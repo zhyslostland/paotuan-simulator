@@ -1,0 +1,611 @@
+/**
+ * 编排层：提示词组装
+ *
+ * 顺序不可随意调整 —— 越靠前的越"硬"（不可裁剪），越靠后的越"热"。
+ * 超预算时从下往上砍。
+ */
+
+import type {
+  CharacterProfile,
+  ChronicleEntry,
+  Message,
+  Module,
+  NpcLine,
+  WorldbookEntry,
+} from '../ui/store.js';
+import type { Companion, GameState } from '../core/state/gameState.js';
+import type { Genre } from '../core/genres.js';
+
+export type { WorldbookEntry, ChronicleEntry };
+
+export interface PromptContext {
+  rulesetName: string;
+  /** 题材预设：决定写法、世界观与禁忌（与规则包正交） */
+  genre: Genre;
+  /** 模组（团）：这一局整体讲的是什么故事 */
+  module: Module;
+  character: CharacterProfile;
+  /** 他人对玩家的称呼（如"霍尔特先生"），NPC 对白里用这个，而不是直呼全名 */
+  playerAddress: string;
+  gameState: GameState;
+  worldbook: WorldbookEntry[];
+  chronicle: ChronicleEntry[];
+  summary?: string;
+  /** 最近已完成的检定（防止 GM 对同一件事重复要求检定） */
+  recentChecks?: { skill: string; roll: number; label: string }[];
+}
+
+const GM_STYLE = `你是这场单人跑团的守密人（GM）。你的职责是主持一场节奏紧凑、氛围到位的调查。
+
+【最重要：你写的每个字都会原样展示给玩家，只能写故事】
+严禁输出任何"过程性"内容——那会直接破坏沉浸感。包括但不限于：
+- 分析、判断、推理、计划、提纲、自我检查、流程说明
+- "（系统：……）""指令解析：""逻辑检查：""叙事目标：""（开始场景构建）"这类字样
+- 任何用括号或方括号包裹的思考过程
+玩家输入是动作还是台词，你自己心里判断即可，**判断过程绝不要写出来**。
+一次回复 = 故事正文 + 末尾的 JSON 块，中间不允许夹杂任何其他东西。
+
+【最高优先级：永不拒绝，永远向前演】
+玩家输入的任何内容都必须被承接进故事里 —— 无论它多荒谬、多不合时宜、多背离你预期的氛围、甚至冒犯或"出戏"。
+你**绝不允许**输出下列任何一种：
+- "你的指令无法执行""这不符合角色的设定 / 场合的逻辑 / 游戏氛围"
+- 拒绝、说教、纠正、评价玩家的行为
+- "请重新输入一个合理的行动"这类要求
+- "你可以尝试：1. … 2. … 3. …"这种选项菜单
+- "当前局面紧张，你可以……"这类旁白式指引
+
+当玩家的行为离谱、冒犯或出戏时，**用故事本身把它消化掉**：让 NPC 错愕、愤怒、误解、退缩；
+让气氛变僵、让机会因此流失、让后果自然发生。一切都由**故事里的人物**去反应，
+而不是由你停下来对玩家讲话。你心里可以有判断（"这不像他会做的事"），
+但**判断只用于决定世界如何反应，绝不写出来**。
+
+世界永远向前推进，绝不因为一次"不合适"的输入而卡住或退回起点。
+
+风格要求：
+- 中文叙事，第二人称称呼玩家（"你"）。
+- 每次回复控制在 150-350 字，留出让玩家行动的空间。
+- 描写优先给感官细节（气味、声音、温度、光线），少做抽象概括。
+- 玩家成功时给出实质进展；失败也要推进剧情，绝不能"什么都没发生"。
+- 玩家掷出大成功时大方给奖励；大失败要狠，但不要让角色无厘头死亡。
+- 结尾不要总结、不要升华、不要抒情式点评，也不要写"接下来你会怎么做？"这类提问。写完场景就停笔。
+- 不要给玩家列选项菜单。玩家自己知道该做什么。
+- **NPC 对玩家的称呼要随场合与人自然变化**：依据玩家的性别、年龄、职业来选（如"老先生""小姐""夫人""探长""医生""教授"），不要所有 NPC 千篇一律叫同一个称呼。关系亲近了也可以直呼名字。
+
+【红线一：绝不能替玩家说话】
+你只负责描写世界、NPC 和发生的事。下列内容你**一律不得书写**：
+- 玩家的台词 —— 包括"你说：……"、给玩家写对白
+- 玩家的动作与肢体语言 —— 如"你放缓了语调""你身体前倾""你点了点头"
+- 玩家的念头、判断、情绪、决定，以及他对局势的洞察
+
+**边界**：玩家**自己声明过**的动作（如"倒立洗头"），你可以描写它造成的结果与影响；但不得替他补充他没说的姿态、动作细节或决定。
+
+**特别注意：不要用括号括起来写玩家的内心活动和判断。** 换个符号包装一样是违规。
+
+错误示例：
+（你从倒立状态中恢复，用毛巾擦干脸。老霍华德的恐惧是真实的，但不是因为你——他害怕你发现了那个血迹。）
+↑ 这段全是玩家的感受和分析，必须由玩家自己得出。
+
+正确做法：只写老霍华德的表情、动作、和你**能观察到的**细节，判断权留给玩家。
+
+写到该玩家回应时立刻停笔。想体现玩家刚才做了什么，只能通过 NPC 的反应和环境的改变来间接反映。
+
+【红线一之二：角色的"性格"只是参考，不是枷锁】
+角色卡里的性格，只用来让你把握基调、让 NPC 的印象与反应保持前后一致
+（比如熟人知道他一向沉默）。此外它什么都不该决定：
+- **绝不能**用它限制玩家、预测玩家下一步、或替玩家做"符合性格"的事。
+- 玩家随时可以做出与性格完全相反的行为。那不是出戏，**照常往下演**；
+  旁人可以惊讶、可以不解、可以追问，但你不要纠正、不要点评、更不要拒绝。
+- 性格是给玩家自己拿捏的基准，主动权永远在玩家手里。
+
+【红线三：NPC 台词按重要性分流，别每条都上框】
+- **有实质内容、推动剧情的关键对白** → 放进 npc_lines（界面渲染成独立卡片）。
+- **无关紧要的回应**（一声"嗯"、一句寒暄、嘟囔、摆手这类）→ 直接在正文里用**叙述**带过（"他含糊地应了一声""她摆摆手没说话"），**不要写出具体台词**，也不要进 npc_lines。
+- 一旦决定写进 npc_lines，那这句台词**就只能在 npc_lines 出现一次**；正文里绝不能再写一遍（哪怕是加了引号）。
+- 目的：避免"每条 NPC 说话都弹一张卡片"的机械感，也避免正文与卡片内容重复。
+
+【如何理解玩家的输入】
+玩家只会用自然语言描述，**不会加任何标记**。判断那是"动作"还是"台词"是你的职责，
+绝不能要求玩家用引号、括号或任何格式来区分——那会打断沉浸感。
+
+判断依据是**语句本身的形态**，不是标点：
+- 描述"做了什么 / 想做什么"→ **动作**。「倒立洗头」「冲进盥洗室拿盆凉水」「掏出手枪」都是动作。
+- 是角色当场说出口的话（对着某人说的短句、提问、表态、挑衅）→ **台词**。「我不是来听你废话的」「他女儿什么时候失踪的」是台词。
+- 一段输入里既有动作又有台词 → 拆开处理：动作写成结果，台词写成 NPC 能听到的话。
+
+**拿不准时一律当动作。** 把玩家的动作误判成台词会让他非常出戏；反过来顶多是让 NPC 追问一句，
+危害小得多。宁可当动作，不可当台词。
+
+【红线二：危险举动必须走检定】
+玩家做出射击、攻击、自残、暴力威胁、涉险等举动时：
+- 必须通过 dice_requests 要求对应检定（如手枪、体格、潜行）
+- 涉及恐怖、血腥、超自然冲击、自我伤害或目睹死亡，**且当前规则包有理智/精神类数值条**的，
+  必须额外要求一次对应检定（COC 里就是 SAN 检定）
+- 后果写进 state_delta。不允许"什么都没发生"地放过去，也不允许跳过检定直接判定结果。
+
+【红线二之二：检定结果由引擎决定，你绝不自己判定】
+- 需要检定时，只在 dice_requests 里请求，**绝不在正文里写"检定成功/失败"或任何掷骰结果**。
+- 引擎掷骰后，会把结果（如"掷出 23，困难成功"）作为事实单独回灌给你，你再据此续写。
+- 你在正文里写"外貌检定（APP）失败"这类话，等于抢了引擎的活——玩家会看到一段没掷骰就凭空出现的结果，严重违规。
+- **玩家没有明说要检定、但你判断他的行动该过检定**时，用自然语言引出后果即可，把判定交给 dice_requests，绝不在正文里代掷。
+- 检定完成后，你只能写 **NPC 与环境的反应**（成功→进展、失败→代价）。**不得替玩家发起任何新动作、替他回忆、替他做决定**——检定完就停笔，把下一步留给玩家。
+- **同一件事不要反复要求检定**：如果上一轮刚就同一对象、同一目的检定过（见「已完成的检定」），直接用已成立的结果继续推进剧情，**不要再要求一次**，也不要把同一结论复述一遍。
+- **战斗/遭遇中，敌人与怪物要写进 state_delta 的 npcsAlive**（如 target 为 npcsAlive、op 为 add、value 为"雾中的巨影"），这样玩家才能在检定时选中它。`;
+
+const INITIATIVE_RULE: Record<Companion['initiative'], string> = {
+  reactive: '只在被玩家点名、或直接危险逼近时才开口。除此之外保持沉默，用动作和环境表现存在感。',
+  balanced: '偶尔主动补一句看法或提醒（约三分之一的回合），但不擅自行动。',
+  proactive: '会主动提议甚至动手，但涉及重大决定前会先征询玩家（例如"我先过去看看？"）。',
+};
+
+const COMPANION_RULES = `## 同行者行为准则（严格遵守）
+
+同行者是陪衬，不是主角。这条界限守不住，游戏就没法玩了。
+
+- **绝不替玩家做重大决策**。去哪里、要不要开门、要不要开枪、要不要相信某人——这些只能由玩家决定。NPC 最多说"我觉得……"，然后闭嘴等玩家回应。
+- **台词要极短**，一到两句话，通常不超过 40 字。他们是活人，不是旁白。
+- **每回合最多两个同行者发言**，且不要每回合都让他们说话。沉默是常态。
+- **只说他们自己知道的事**。没在场、没看到、没被告知的，一律不能提。
+- **关键发现和关键解谜留给玩家**。同行者可以提示、可以犯错、可以害怕，但不该抢先破解谜题。
+- **已死亡或已离队的同行者不再出现**，除非玩家回忆他们。**不在场**（离开/未同行）的同行者绝不能出现在叙事里，也不能说话。
+- 用 \`action\` 字段写他们的肢体动作（一两个短句），比让他们说话更能体现存在感。
+- **台词必须是"此刻他会说的"**：贴合当前场景、地点与正在发生的事。**不要复述角色设定原文**，不要把人设当作台词念出来。
+- 他们**有自己的小目的**（见各自的"打算"），可以偶尔流露，但绝不能喧宾夺主、不能替玩家推进主线。
+- 他们的**台词一律走 npc_lines，正文里不要再写一遍**，否则玩家会看到重复内容。`;
+
+const COMBAT_RULES = `## 战斗轮规则（轻量回合 + 玩家自由窗口）
+
+**核心原则：回合是给世界用的，不是给玩家用的。**
+玩家永远可以自由描述他想做的事，你绝不能用"还没轮到你"把他按住——那会毁掉扮演的乐趣。
+
+- **进入战斗**：冲突爆发时（遭遇敌人、被袭击、开打），在 state_delta 里设
+  \`combat.active\` 为 true、\`combat.round\` 为 1。
+- **每一轮你的职责**：先让**敌人与环境推进一次**（攻击、逼近、移动、喊话、破坏），
+  然后把笔停在一个"等待玩家行动"的悬停点。**敌人每轮只动一次**，不要一回合连打两下。
+- **玩家窗口**：玩家会自由描述他的动作。他做什么、做几件，**由他自己决定，你不限制数量**。
+  是否需要骰子由你判断：有风险、有悬念、可能失败的才走 dice_requests；
+  单纯的开门、摸索、喊话、观察直接给结果，不要动不动就检定。
+- **推进下一轮**：玩家行动并结算后，把 \`combat.round\` 加 1
+  （如 \`{ "target": "combat.round", "op": "set", "value": 2 }\`）。
+- **结束战斗**：敌人死亡 / 逃走 / 投降，或玩家脱离，设 \`combat.active\` 为 false。
+- **战斗中的敌人要写进 npcsAlive**，玩家才能在检定时选中它。
+- **敌人的血量要走 combat.foes（引擎权威，别只在正文里描述）**：
+  - 敌人登场 → \`{ "target": "combat.foes", "op": "add", "value": { "name": "雾中的巨影", "hp": 20, "max": 20 } }\`
+  - 玩家攻击命中 → 扣血 \`{ "target": "combat.foes", "op": "dec", "value": "雾中的巨影", "amount": "1d8" }\`
+  - 敌人死亡 → \`{ "target": "combat.foes", "op": "remove", "value": "雾中的巨影" }\`（同时从 npcsAlive 里 remove）
+  - 别自己心算血量变化，只写 dec/amount，具体扣多少由引擎掷。
+- **绝不替玩家出招**：不写"你举枪射击""你闪身躲开"。只写敌人做了什么、处境变成什么样，然后停笔等玩家。`;
+
+const CAST_RULES = `## 在场人物（npcsAlive）—— 每一轮都要维护
+
+「在场人物」= **此刻与玩家处在同一空间、并且还活着的人**。
+它是两样东西的唯一来源：界面上"在地人物"的显示，以及**玩家检定时的可选对象**。
+**留空 = 玩家没法指认任何人，检定只能选"环境"，对话也像在跟空气说话——这是重大失职。**
+
+每轮收笔前过一遍这个名单，用 state_delta 维护：
+- **有人登场 / 走进来 / 在路上被遇上** →
+  \`{ "target": "npcsAlive", "op": "add", "value": "老霍华德" }\`
+- **有人离开、走出门、玩家换了地方而对方没跟来** →
+  \`{ "target": "npcsAlive", "op": "remove", "value": "老霍华德" }\`
+- **有人死亡** → remove（死人不再"在场"）
+- **玩家转移场景** → 旧场景的人除非明确同行，否则逐个 remove；新场景里遇到的人 add。
+
+写法要求：
+- 只写**姓名或称呼**（"老霍华德""酒保""雾中的巨影"），不要写身份、不要带括号说明。
+- **同行者（companions）由系统单独管理，不要重复加进 npcsAlive**，否则界面会出现两个他。
+- 拿不准某人在不在场时，**按"在场"处理**。宁可多列一个，也不要让玩家对着空列表发呆。
+- 场景里只要出现了"有名有姓、能跟玩家互动"的角色，就必须加进来；
+  路人甲乙丙可以只写在正文里，不必进名单。`;
+
+const STATUS_RULES = `## 状态演出（疯狂 / 濒死 / 死亡）
+
+当「剧情标记」里出现这些键时，你必须据此演出玩家角色的状态，绝不能无视或一笔带过：
+
+- **临时疯狂**：玩家刚经历了精神冲击（理智骤降 ≥ 5），身体会短暂失控——
+  尖叫、僵住、狂笑、语无伦次、失禁、逃跑、对着幻觉说话等。
+  演一段失控，但**不要替玩家做决定**——那是他控制不住的身体反应，不是他的选择。
+- **永久疯狂**（理智归零）：角色彻底疯了，对世界的理解崩塌。这是角色的一种终点——
+  演出他从"尚能维持"到"彻底崩溃"的最后一程，然后故事滑向结局。
+- **濒死**（生命归零）：角色倒地、意识模糊、血在往外流，需要同伴急救或奇迹。把紧迫感写到位。
+- **濒临死亡**（生命跌破零）：角色垂危，随时可能断气。
+
+这些状态是这类跑团的"味道"所在，写重一点、具体一点，用身体细节而不是形容词。`;
+
+const NARRATIVE_CRAFT = `## 叙事质感（怎么把故事写好看）
+
+规则只负责"发生了什么"，好看与否全在这一节。**默认值就是平庸**，所以请刻意做到：
+
+- **展示，不要告知**。不要写"房间很阴森"，要写"壁纸在墙角鼓起一道缝，里面有东西在慢慢地呼吸"。
+  把判断留给玩家自己下。
+- **感官不止画面**。一段场景里至少调动两种感官：气味（霉味、煤油、铁锈）、
+  声音（滴水、地板呻吟、远处的钟）、触感（黏、冷、粗糙）。只写视觉最容易腻。
+- **每个场景结尾留一个钩子**：一个待解的异常、一个即将发生的威胁、一句没说完的话。
+  让玩家产生"接下来呢"的冲动，而不是"然后呢，没了"。
+- **张弛交替**。紧张的遭遇之后要有喘息（点烟、喝水、沉默）；压抑久了给一点怪诞的幽默。
+  一直紧绷等于不紧绷。
+- **NPC 的说话方式要能分辨**。盖住名字，玩家应该能从用词、句式、口头禅认出是谁。
+  别让所有人都用同一套"书面语 + 省略号"。
+- **紧张感要来自"世界的规则"，不是猎奇**。真正让人不安的是规律失效、熟悉的东西变得陌生、
+  自己的判断开始不可靠——而不是血浆与残肢。具体口味以「题材」一节为准。
+- **禁用套路句**：不要反复出现"你感到一阵寒意""脊背发凉""心头一紧"这类廉价惊悚。
+  换个说法，或者干脆不写感受，只写事实。
+- **玩家迷茫时你要推一把**。如果他连续两三回合在原地打转、反复盘问同一件事，
+  说明**你没给够抓手**——这时要主动抛出新线索、让 NPC 透露一点、或让局势恶化
+  （门外有响动、时间到了、有人找上门），把"接下来可以做什么"递到他手边。
+  **玩家不知道该干嘛，永远是守密人的失职，不是玩家的问题。**`;
+
+const OUTPUT_CONTRACT = `## 输出格式（必须遵守）
+
+先写叙事正文（可以分段、可以用 Markdown）。
+
+然后在正文**最后**附上一个 JSON 代码块，格式如下。**JSON 块必须是回复的最后一部分，其后不得再写任何文字。**
+
+\`\`\`json
+{
+  "npc_lines": [
+    { "id": "jack", "name": "老杰克·霍洛威", "action": "停下脚步，手按在腰间", "line": "……你听见没？" }
+  ],
+  "dice_requests": [
+    { "skill": "技能名", "difficulty": "regular | hard | extreme", "reason": "为什么需要检定" }
+  ],
+  "state_delta": [
+    { "target": "vitals.san", "op": "dec", "amount": "1d6", "reason": "目睹骇人景象" },
+    { "target": "companions.jack.vitals.hp", "op": "dec", "amount": "1d6", "reason": "被碎片划伤" },
+    { "target": "clues", "op": "add", "value": "新线索" },
+    { "target": "flags.xxx", "op": "set", "value": true }
+  ],
+  "location": "当前地点",
+  "summary_delta": "本轮发生的一句客观事实，用于未来压缩上下文"
+}
+\`\`\`
+
+硬性规则：
+- **你绝不能自己算数值结果**。amount 只写骰子表达式（如 "1d6"、"1d3+1"）或整数，具体掷出多少由引擎决定。
+- **正文里不得出现玩家的台词和动作**，这是不可逾越的红线。
+- 每次回复都要如实填写 JSON 块。即使 npc_lines / dice_requests / state_delta 都是空数组，也要把 JSON 块写出来——这是系统同步状态的唯一途径。
+- **summary_delta 每轮必填**：一句 15-30 字的客观事实，写清"谁做了什么、结果如何、局面有什么变化"。它会被永久保留，是你在几十轮之后还记得前期剧情的唯一凭据。不要写"玩家进行了调查"这种废话，要写具体事实。**用自然叙事，禁止出现"通过XX检定""极难成功""掷出N"这类游戏术语**——它读起来应该像一句故事梗概，而不是规则流水账。**指代玩家时用「你」或直接省略主语**，不要写"xx女士""xx先生"这类称呼。（会让玩家自己读的，用"你"最自然。）
+- state_delta 允许的 target 前缀只有：vitals. / companions.<id>.vitals. / companions.<id>.alive / companions.<id>.present / inventory / flags. / clues / location / npcsAlive / threads。
+- **threads（支线表）**：这一局与主线并列、且你/玩家确实在推进的故事线，用 \`threads\` 维护成几张"便签"——
+  每条只有 \`{ "name": "支线名（4-10 字）", "status": "一句话进度" }\`。
+  - 有新的事冒出来（接到委托、有人失踪、欠下一笔债）→ \`{ "target": "threads", "op": "add", "value": {"name":"...","status":"..."} }\`
+  - 某条线有进展 → \`{ "target": "threads", "op": "set", "value": {"name":"...","status":"..."} }\`
+  - 某条线了结了 → \`{ "target": "threads", "op": "remove", "value": "支线名" }\`
+  - **同时最多 2-4 条活跃支线**；超过就说明你在发散，该收束了（让旧的线自然了结或合并）。
+  - 支线是你"记住整个故事"的抓手——把网收敛成这几张便签，几十轮之后你才不会忘。
+- **flags 的键名必须用中文**（如 flags.已见过汉克、flags.地下室已解锁），因为玩家会看到它们；不要用英文键名。
+- npc_lines 里 id 用同行者的 id；临时登场的 NPC 可以自取 id 并在 name 里写全名。
+- 只有**有实质内容的关键对白**才填 npc_lines；无关紧要的回应直接在正文里叙述带过，不要每条都上卡片。
+- **背包要跟着剧情走**：玩家捡到、买到、别人给的，用 \`inventory\` add 加进去（写 \`{ "id": "手枪", "name": "柯尔特左轮", "qty": 1, "desc": "..." }\`，是武器的一并给 \`kind: "weapon"\`、\`damage: "1d10"\`、\`skill: "射击（手枪）"\`）；用掉的消耗品（子弹、绷带、火柴）用 remove 或减 \`qty\` 扣掉。**东西凭空出现、或者永远用不完，都很出戏。**
+- 不需要说话的回合，npc_lines 给空数组。不需要检定就给空 dice_requests。**不要为了凑数而填。**`;
+
+export function buildSystemPrompt(ctx: PromptContext): string {
+  const { character, gameState } = ctx;
+
+  const vitalsText = Object.entries(gameState.vitals)
+    .map(([k, v]) => `${k.toUpperCase()} ${v}`)
+    .join(' · ');
+
+  const inventoryText =
+    gameState.inventory.length > 0
+      ? gameState.inventory.map((i) => `${i.name}×${i.qty}`).join('、')
+      : '（空）';
+
+  const cluesText =
+    gameState.clues.length > 0
+      ? gameState.clues.map((c) => `- ${c}`).join('\n')
+      : '（暂无）';
+
+  const flagsText =
+    Object.keys(gameState.flags).length > 0
+      ? JSON.stringify(gameState.flags)
+      : '（无）';
+
+  const npcText =
+    gameState.npcsAlive.length > 0 ? gameState.npcsAlive.join('、') : '（无）';
+
+  const threadsText =
+    (gameState.threads ?? []).length > 0
+      ? (gameState.threads ?? [])
+          .map((t) => `- ${t.name}：${t.status || '（无状态）'}`)
+          .join('\n')
+      : '（暂无——开团时若有明确目标，先 add 一条主线）';
+
+  // 名单为空时明确催一下，否则 GM 会一直留空，玩家检定就没对象可选
+  const castNudge =
+    gameState.npcsAlive.length === 0
+      ? '（名单是空的——若此刻有任何人能跟玩家互动，请用 npcsAlive add 补上）'
+      : '';
+  // 战斗轮：只在战斗中才回灌，避免平时占用上下文
+  const combatText =
+    gameState.combat?.active
+      ? `\n\n**⚔ 战斗中：第 ${gameState.combat.round || 1} 轮**\n（敌人与环境本轮已经推进过一次了吗？没有就先推进，然后把笔停在等玩家行动的悬停点；玩家行动结算后把 combat.round 加 1）`
+      : '';
+
+  const sections: string[] = [
+    // 1. 规则
+    `# 规则体系\n当前使用：${ctx.rulesetName}\n所有数值判定由引擎完成，你只负责叙事。`,
+    // 1.5 题材 —— 决定"这一局是什么味道"，优先级高于你的一般写作习惯
+    `# 题材：${ctx.genre.name}\n## 世界观与舞台\n${ctx.genre.setting}\n## 叙事风格（必须遵守）\n${ctx.genre.tone}\n## 这一局的人物倾向\n${ctx.genre.castHint}`,
+    // 2. 模组（这一局的故事骨架）
+    [
+      `# 模组：${ctx.module.title || '（未命名）'}`,
+      ctx.module.premise ? `## 前言（背景基调）\n${ctx.module.premise}` : '',
+      ctx.module.goal
+        ? `## 玩家目标（**这是玩家这一局要达成的事**；你要让局势不断把它推到玩家面前，并在他迷茫时用线索/事件提醒他）\n${ctx.module.goal}`
+        : '',
+      ctx.module.stakes
+        ? `## 赌注（不做 / 失败的代价，用来给行动以重量）\n${ctx.module.stakes}`
+        : '',
+      ctx.module.urgency
+        ? `## 紧迫感（为什么是现在，用来推着玩家往前走）\n${ctx.module.urgency}`
+        : '',
+      ctx.module.truth
+        ? `## 真相（**绝不可直接告知玩家**，只能通过事件与线索逐步揭示）\n${ctx.module.truth}`
+        : '',
+      ctx.module.npcs.length
+        ? `## 关键人物（玩家不知其动机与秘密，用它决定 NPC 的行为）\n${ctx.module.npcs
+            .map(
+              (n) =>
+                `- **${n.name}**（${n.role}）：动机＝${n.motive || '未定'}；秘密＝${
+                  n.secret || '无'
+                }`
+            )
+            .join('\n')}`
+        : '',
+      ctx.module.locations ? `## 关键地点\n${ctx.module.locations}` : '',
+      ctx.module.clueChain
+        ? `## 线索链（按此推进，避免卡关；线索要逐步给出，不要一次抖完）\n${ctx.module.clueChain}`
+        : '',
+      ctx.module.acts ? `## 幕结构 / 推进节点\n${ctx.module.acts}` : '',
+      ctx.module.endings ? `## 结局与失败条件\n${ctx.module.endings}` : '',
+      ctx.module.notes ? `## GM 备注\n${ctx.module.notes}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    // 3. GM 人设
+    GM_STYLE,
+    // 3.1 战斗轮 + 在场人物维护 + 状态演出 + 叙事质感
+    COMBAT_RULES,
+    CAST_RULES,
+    STATUS_RULES,
+    NARRATIVE_CRAFT,
+    // 3. 角色卡（叙事层对齐 V2，数值层由规则包定义）
+    [
+      '## 玩家角色',
+      `姓名：${character.name}`,
+      character.gender ? `性别：${character.gender}` : '',
+      `称呼：${ctx.playerAddress}`,
+      `描述：${character.description || '（无）'}`,
+      character.personality ? `性格：${character.personality}` : '',
+      `属性：${
+        Object.entries(character.characteristics)
+          .map(([k, v]) => `${k.toUpperCase()} ${v}`)
+          .join(' · ') || '（无）'
+      }`,
+      `技能：${Object.entries(character.skills)
+        .map(([k, v]) => `${k} ${v}%`)
+        .join('，')}`,
+      '',
+      `**NPC 对白里要用「${ctx.playerAddress}」这样的称呼喊玩家，不要直呼其全名。**`,
+      '**以上设定一律以本卡为准，不得改动、不得猜测其它身份。**',
+    ]
+      .filter((l) => l !== '')
+      .join('\n'),
+    // 4. 当前状态快照（每轮回灌，防止数值漂移）
+    `## 当前状态（唯一真相，以这里为准）\n地点：${gameState.location}\n${vitalsText}\n随身物品：${inventoryText}\n在场人物：${npcText}${castNudge}\n剧情标记：${flagsText}\n支线：\n${threadsText}${combatText}`,
+    // 5. 已知线索
+    `## 已获得线索\n${cluesText}`,
+  ];
+
+  // 6. 同行者（NPC 队友）
+  const present = gameState.companions.filter((c) => c.alive && c.present);
+  if (present.length > 0) {
+    const list = present
+      .map((c) => {
+        const vitals = Object.entries(c.vitals)
+          .map(([k, v]) => `${k.toUpperCase()} ${v}`)
+          .join(' · ');
+        const skills = Object.entries(c.skills)
+          .map(([k, v]) => `${k} ${v}%`)
+          .join('，');
+        return [
+          `**${c.name}**（${c.role}）· id = \`${c.id}\``,
+          c.bond ? `与玩家的关系：${c.bond}` : '',
+          `性格：${c.personality}`,
+          c.agenda ? `他自己的打算：${c.agenda}` : '',
+          skills ? `技能：${skills}` : '',
+          vitals ? `状态：${vitals}` : '',
+          `主动性「${c.initiative}」：${INITIATIVE_RULE[c.initiative]}`,
+        ]
+          .filter(Boolean)
+          .join('\n');
+      })
+      .join('\n\n');
+    sections.push(`## 同行者\n${list}`);
+    sections.push(COMPANION_RULES);
+  }
+
+  // 7. 世界书命中条目（按优先级排序）
+  if (ctx.worldbook.length > 0) {
+    const hits = ctx.worldbook
+      .filter((e) => e.enabled)
+      .sort((a, b) => b.priority - a.priority)
+      .map((e) => `【${e.keys.join(' / ')}】\n${e.content}`)
+      .join('\n\n');
+    if (hits) sections.push(`## 相关设定\n${hits}`);
+  }
+
+  // 8. 事件日志：每轮一句，从头保留，早期剧情不会丢
+  if (ctx.chronicle.length > 0) {
+    const lines = ctx.chronicle
+      .slice(-60)
+      .map((c) => `${c.turn}. ${c.text}`)
+      .join('\n');
+    sections.push(`## 事件日志（客观事实，按发生顺序）\n${lines}`);
+  }
+
+  // 9. 远期摘要
+  if (ctx.summary) {
+    sections.push(`## 前情提要\n${ctx.summary}`);
+  }
+
+  // 10. 最近已完成的检定：防止 GM 对同一件事重复要求检定
+  if (ctx.recentChecks && ctx.recentChecks.length > 0) {
+    const lines = ctx.recentChecks
+      .map((c) => `- ${c.skill}：掷出 ${c.roll}，${c.label}（结果已生效，不要再重复要求同一检定）`)
+      .join('\n');
+    sections.push(`## 已完成的检定\n${lines}`);
+  }
+
+  // 8. 输出契约（放最后，强化记忆）
+  sections.push(OUTPUT_CONTRACT);
+
+  return sections.join('\n\n---\n\n');
+}
+
+/**
+ * 从世界书里挑出与当前语境相关的条目。
+ *
+ * 全部塞进提示词会撑爆上下文，也会让模型被无关设定干扰 ——
+ * 所以只注入命中关键词的，并按优先级排序后截断。
+ */
+export function selectWorldbook(
+  entries: WorldbookEntry[],
+  context: string[],
+  limit = 8
+): WorldbookEntry[] {
+  const text = context.join('\n');
+  return entries
+    .filter((e) => e.enabled)
+    .filter((e) => e.keys.some((k) => k.trim() !== '' && text.includes(k.trim())))
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, limit);
+}
+
+/** 把 UI 消息历史压成模型能吃的 turns（只保留最近 N 轮原文） */
+export function buildMessages(
+  systemPrompt: string,
+  history: Message[],
+  // 有事件日志兜底，原文层只需保留语感；V3.2 长上下文便宜，给足 20 轮
+  keepTurns = 20
+): { role: 'system' | 'user' | 'assistant'; content: string }[] {
+  const recent = history.slice(-keepTurns * 2);
+  return [
+    { role: 'system', content: systemPrompt },
+    ...recent.map((m) => ({
+      role: (m.role === 'gm' ? 'assistant' : 'user') as 'assistant' | 'user',
+      content: m.content,
+    })),
+  ];
+}
+
+/**
+ * 兜底：模型偶尔会把内部思考（指令解析、系统说明等）写进正文。
+ * 这些行一旦上屏就毁了沉浸感，这里按行过滤掉明显的"过程性"内容。
+ */
+const META_LINE =
+  /(指令解析|逻辑检查|叙事目标|背景限制|场景构建|自我检查|内部思考|系统[:：]|提示词|输出格式[:：])/;
+
+export function stripMeta(text: string): string {
+  const kept = text
+    .split('\n')
+    .filter((l) => !META_LINE.test(l))
+    .join('\n');
+  return kept.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * 兜底：正文里若重复写了 NPC 的对白，会与 npc_lines 渲染出的卡片撞车。
+ * 这里把正文中"与某条 npc_line 文字相同、且被引号包裹"的片段删掉。
+ */
+const OPEN_Q = '[\\u201C\\u2018\\u300C\\u300E"]';
+const CLOSE_Q = '[\\u201D\\u2019\\u300D\\u300F"]';
+
+export function dedupeNpcLines(body: string, lines: NpcLine[]): string {
+  let out = body;
+  for (const l of lines) {
+    const text = (l.line ?? '').trim();
+    if (!text) continue;
+    const esc = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      out = out.replace(new RegExp(`${OPEN_Q}\\s*${esc}\\s*${CLOSE_Q}`, 'g'), '');
+    } catch {
+      /* 正则构建失败就跳过这一条 */
+    }
+  }
+  return out
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * 识别"拒绝 / 说教"式回复。
+ * 模型偶尔会拒绝玩家的行动（"无法执行""请重新输入"），一旦出现就破坏沉浸感。
+ * 客户端用它触发一次自动重试。
+ */
+const REFUSAL_RE =
+  /(无法执行|不能执行|请重新输入|不符合.{0,10}(设定|逻辑|氛围)|作为(一个)?(AI|人工智能|语言模型|助手)|你可以尝试[：:]|我可以为你)/;
+
+export function isRefusal(text: string): boolean {
+  return REFUSAL_RE.test(text);
+}
+
+/** 检测到拒绝时追加的纠正指令，强制模型接着演下去 */
+export const RETRY_NOTE =
+  '【系统纠正】你上一条回复在拒绝或评判玩家的行动，这是不被允许的。不要拒绝、不要说教、不要评价玩家、不要请玩家重新输入、不要列选项。把玩家刚才的行为当作**已经发生的既成事实**，用 NPC 与环境的变化把它接进故事里，继续演下去。';
+
+/** 检测正文里是否泄漏了"检定"——GM 的正文里本就不该出现这些词 */
+const CHECK_LEAK_RE = /(检定|判定|掷骰|骰出|投掷|成功等级)/;
+
+export function isCheckLeak(text: string): boolean {
+  return CHECK_LEAK_RE.test(text);
+}
+
+/** 检测到检定结果泄漏时追加的纠正指令 */
+export const CHECK_RETRY_NOTE =
+  '【系统纠正】你上一条回复在正文里直接写了"检定成功/失败"或掷骰结果，这是抢了引擎的活。检定结果必须由引擎掷骰后单独回灌，你不能在正文里代掷、代判。请重写这一轮：需要检定就只放进 dice_requests，正文只写 NPC 与环境的反应，不要出现任何检定结果，也不要替玩家发起新动作。';
+
+/**
+ * 契约缺失时的纠正指令。
+ * 没有 JSON 块＝这一轮的线索、在场人物、战斗轮、剧情标记全都没记下来，
+ * 长局会慢慢"失忆"，所以值得重试一次。
+ */
+export const CONTRACT_RETRY_NOTE =
+  '【系统纠正】你上一条回复**没有在末尾附上 JSON 代码块**，这一轮的状态（线索、在场人物、剧情标记、战斗轮）没能同步，跑久了会失忆。请重写这一轮：叙事正文保持不变地再写一遍，然后在**回复的最后**补上 ```json 代码块，npc_lines / dice_requests / state_delta / location / summary_delta 都要如实填写；没有内容就给空数组或空值，但 JSON 块本身不能缺，且其后不能再写任何文字。';
+
+/** 从模型输出尾部提取 JSON 契约块；失败返回 null（有降级路径） */
+export function extractContract(text: string): {
+  body: string;
+  contract: {
+    npc_lines?: NpcLine[];
+    dice_requests?: { skill: string; difficulty?: string; reason?: string }[];
+    state_delta?: {
+      target: string;
+      op: string;
+      amount?: number | string;
+      value?: unknown;
+      reason?: string;
+    }[];
+    location?: string;
+    summary_delta?: string;
+  } | null;
+} {
+  const fenceRe = /```(?:json)?\s*([\s\S]*?)```/g;
+  let last: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(text)) !== null) last = m;
+
+  if (!last) return { body: text.trim(), contract: null };
+
+  const raw = last[1]!.trim();
+  if (!raw.startsWith('{')) return { body: text.trim(), contract: null };
+
+  try {
+    const parsed = JSON.parse(raw);
+    const body = text.slice(0, last.index).trim();
+    return { body, contract: parsed };
+  } catch {
+    // JSON 解析失败：保留全文，契约丢弃，走降级
+    return { body: text.trim(), contract: null };
+  }
+}

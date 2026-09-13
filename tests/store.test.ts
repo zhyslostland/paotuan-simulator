@@ -1,0 +1,692 @@
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getRuleset } from '../src/core/rulesets/index.js';
+
+/**
+ * 回溯/重掷依赖 localStorage。node 环境没有它，这里放一个最小桩，
+ * 必须在 import store 之前装好——store 在模块加载时就会读盘。
+ */
+class MemStorage {
+  private m = new Map<string, string>();
+  getItem(k: string) {
+    return this.m.has(k) ? this.m.get(k)! : null;
+  }
+  setItem(k: string, v: string) {
+    this.m.set(k, String(v));
+  }
+  removeItem(k: string) {
+    this.m.delete(k);
+  }
+  clear() {
+    this.m.clear();
+  }
+  key(i: number) {
+    return [...this.m.keys()][i] ?? null;
+  }
+  get length() {
+    return this.m.size;
+  }
+}
+
+let store: typeof import('../src/ui/store.js').useStore;
+let deriveAddress: typeof import('../src/ui/store.js').deriveAddress;
+let addressOf: typeof import('../src/ui/store.js').addressOf;
+let mergeCharacter: typeof import('../src/ui/store.js').mergeCharacter;
+let mergeModule: typeof import('../src/ui/store.js').mergeModule;
+let resolveCheckTarget: typeof import('../src/ui/store.js').resolveCheckTarget;
+let skillBudget: typeof import('../src/ui/store.js').skillBudget;
+let normalizeCompanion: typeof import('../src/ui/store.js').normalizeCompanion;
+let reconcileVitals: typeof import('../src/ui/store.js').reconcileVitals;
+let initialLocation: typeof import('../src/ui/store.js').initialLocation;
+let initialNpcs: typeof import('../src/ui/store.js').initialNpcs;
+let createInitialState: typeof import('../src/core/state/gameState.js').createInitialState;
+let mapNodesOf: typeof import('../src/ui/store.js').mapNodesOf;
+let starterCharacterOf: typeof import('../src/ui/store.js').starterCharacterOf;
+let applyPreset: typeof import('../src/ui/preset.js').applyPreset;
+let fillPlayerTokens: typeof import('../src/ui/store.js').fillPlayerTokens;
+let sanitizeStateTokens: typeof import('../src/ui/store.js').sanitizeStateTokens;
+let sanitizeModuleTokens: typeof import('../src/ui/store.js').sanitizeModuleTokens;
+
+beforeAll(async () => {
+  vi.stubGlobal('localStorage', new MemStorage());
+  const mod = await import('../src/ui/store.js');
+  store = mod.useStore;
+  deriveAddress = mod.deriveAddress;
+  addressOf = mod.addressOf;
+  mergeCharacter = mod.mergeCharacter;
+  mergeModule = mod.mergeModule;
+  resolveCheckTarget = mod.resolveCheckTarget;
+  skillBudget = mod.skillBudget;
+  normalizeCompanion = mod.normalizeCompanion;
+  reconcileVitals = mod.reconcileVitals;
+  initialLocation = mod.initialLocation;
+  initialNpcs = mod.initialNpcs;
+  createInitialState = (await import('../src/core/state/gameState.js')).createInitialState;
+  mapNodesOf = mod.mapNodesOf;
+  starterCharacterOf = mod.starterCharacterOf;
+  applyPreset = (await import('../src/ui/preset.js')).applyPreset;
+  fillPlayerTokens = mod.fillPlayerTokens;
+  sanitizeStateTokens = mod.sanitizeStateTokens;
+  sanitizeModuleTokens = mod.sanitizeModuleTokens;
+});
+
+beforeEach(() => {
+  store.getState().clearMessages();
+  store.setState({
+    gameState: {
+      ...store.getState().gameState,
+      vitals: { ...store.getState().gameState.vitals, san: 70 },
+    },
+  });
+});
+
+/** 直接改 san，模拟模型返回 state_delta 之后的落库结果 */
+const setSan = (v: number) =>
+  store.setState({
+    gameState: {
+      ...store.getState().gameState,
+      vitals: { ...store.getState().gameState.vitals, san: v },
+    },
+  });
+
+describe('回合快照与回溯', () => {
+  it('回溯会恢复当时的状态，并截断其后所有消息', () => {
+    const p1 = store.getState().addMessage({ role: 'player', content: '行动一' });
+    store.getState().snapshotTurn(p1);
+    setSan(60);
+    store.getState().addMessage({ role: 'gm', content: '结果一' });
+
+    const p2 = store.getState().addMessage({ role: 'player', content: '行动二' });
+    store.getState().snapshotTurn(p2);
+    setSan(50);
+    store.getState().addMessage({ role: 'gm', content: '结果二' });
+
+    expect(store.getState().messages).toHaveLength(4);
+
+    // 回溯到「行动二」之前
+    store.getState().rewindBefore(p2);
+
+    const s = store.getState();
+    expect(s.messages).toHaveLength(2);
+    expect(s.messages.map((m) => m.content)).toEqual(['行动一', '结果一']);
+    expect(s.gameState.vitals.san).toBe(60); // 恢复到行动二发生前的状态
+  });
+
+  it('回溯到第一条玩家消息之前时清空消息，状态回到初始', () => {
+    const p1 = store.getState().addMessage({ role: 'player', content: '行动一' });
+    store.getState().snapshotTurn(p1);
+    setSan(40);
+    store.getState().addMessage({ role: 'gm', content: '结果一' });
+
+    store.getState().rewindBefore(p1);
+
+    const s = store.getState();
+    expect(s.messages).toHaveLength(0);
+    expect(s.gameState.vitals.san).toBe(70);
+  });
+
+  it('被截断消息的快照会被一并清理，不会残留', () => {
+    const p1 = store.getState().addMessage({ role: 'player', content: '行动一' });
+    store.getState().snapshotTurn(p1);
+    const p2 = store.getState().addMessage({ role: 'player', content: '行动二' });
+    store.getState().snapshotTurn(p2);
+    const p3 = store.getState().addMessage({ role: 'player', content: '行动三' });
+    store.getState().snapshotTurn(p3);
+
+    expect(Object.keys(store.getState().snapshots).sort()).toEqual([p1, p2, p3].sort());
+
+    store.getState().rewindBefore(p2);
+
+    // p2 及其后的快照都应消失，只剩 p1
+    expect(Object.keys(store.getState().snapshots)).toEqual([p1]);
+  });
+
+  it('quick 清空消息时快照一并清空', () => {
+    const p1 = store.getState().addMessage({ role: 'player', content: '行动一' });
+    store.getState().snapshotTurn(p1);
+    expect(Object.keys(store.getState().snapshots)).toHaveLength(1);
+
+    store.getState().clearMessages();
+    expect(store.getState().snapshots).toEqual({});
+  });
+
+  it('回溯到不存在的消息 id 时不做任何改动', () => {
+    const p1 = store.getState().addMessage({ role: 'player', content: '行动一' });
+    store.getState().snapshotTurn(p1);
+    const before = store.getState().messages;
+
+    store.getState().rewindBefore('不存在');
+
+    expect(store.getState().messages).toBe(before);
+  });
+});
+
+describe('开场白跟随角色姓名与称呼', () => {
+  it('西式译名推导出姓氏敬称，而不是直呼全名', () => {
+    expect(deriveAddress('艾伦·霍尔特')).toBe('霍尔特先生');
+    expect(deriveAddress('卢卡斯')).toBe('卢卡斯先生');
+  });
+
+  it('性别为女时用"女士"，不会叫成先生', () => {
+    expect(deriveAddress('卢卡斯', '女')).toBe('卢卡斯女士');
+    expect(deriveAddress('艾琳·布莱克', '女')).toBe('布莱克女士');
+  });
+
+  it('改角色名会按新名字重推导称呼，写进开场白', () => {
+    store.setState({
+      messages: [{ id: 'welcome', role: 'gm', content: '老的开场白，称呼是霍尔特。', ts: 0 }],
+    });
+
+    store.getState().setCharacter({ name: '卢卡斯' });
+
+    expect(store.getState().messages[0]!.content).toContain('卢卡斯先生');
+    expect(store.getState().messages[0]!.content).not.toContain('霍尔特');
+  });
+
+  it('手填的称呼优先于推导值', () => {
+    store.setState({
+      messages: [{ id: 'welcome', role: 'gm', content: '开场白。', ts: 0 }],
+    });
+
+    store.getState().setCharacter({ address: '陈小姐' });
+
+    expect(store.getState().messages[0]!.content).toContain('陈小姐');
+  });
+
+  it('旧存档缺 address 字段时按姓名推导，不会套用默认的"霍尔特先生"', () => {
+    // 用户改名早于「称呼」字段上线，存档里没有 address
+    const c = mergeCharacter(JSON.stringify({ name: '卢卡斯' }));
+    expect(addressOf(c)).toBe('卢卡斯先生');
+  });
+
+  it('旧结构存档（occupation/age/background）会迁移成 description，并补齐属性', () => {
+    const c = mergeCharacter(
+      JSON.stringify({
+        name: '林深',
+        gender: '女',
+        occupation: '记者',
+        age: 28,
+        background: '追查一桩无人敢碰的旧案。',
+      })
+    );
+    expect(c.description).toContain('记者');
+    expect(c.description).toContain('28 岁');
+    expect(c.description).toContain('追查一桩无人敢碰的旧案');
+    expect(c.personality).toBe('');
+    expect(Object.keys(c.characteristics)).toContain('str');
+    expect(addressOf(c)).toBe('林深女士');
+  });
+});
+
+describe('开团 startNewGame', () => {
+  it('清空剧情/线索/进度，按当前模组的开场白重置首条消息，并把数值恢复满', () => {
+    store.getState().startNewGame();
+    store.getState().addMessage({ role: 'player', content: '我推开门' });
+    store.getState().addMessage({ role: 'gm', content: '门后一片漆黑。' });
+    store.getState().addChronicle('玩家推开了门');
+    store.setState({
+      gameState: {
+        ...store.getState().gameState,
+        clues: ['一条旧线索'],
+        location: '旧城区',
+        vitals: { ...store.getState().gameState.vitals, san: 20 },
+      },
+    });
+
+    store.getState().setModule({ opening: '{{称呼}}，故事从这里开始。', startLocation: '某事务所' });
+    // 数值派生：SAN 起始 = POW，把意志设为 70 以便断言
+    store.getState().setCharacter({
+      characteristics: { ...store.getState().character.characteristics, pow: 70, con: 50, siz: 50 },
+    });
+    store.getState().startNewGame();
+
+    const s = store.getState();
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0]!.content).toContain('故事从这里开始');
+    expect(s.messages[0]!.content).not.toContain('{{称呼}}');
+    expect(s.chronicle).toHaveLength(0);
+    expect(s.gameState.clues).toEqual([]);
+    // 开局面板不再空着：地点取模组的 startLocation，在场人物取开场白/前言里点名的人
+    expect(s.gameState.location).toBe('某事务所');
+    expect(s.gameState.vitals.san).toBe(70);
+    expect(s.gameState.vitals.hp).toBe(10); // (50+50)/10
+    expect(s.gameState.vitalsMax?.san).toBe(99);
+    expect(s.gameState.vitalsMax?.hp).toBe(10);
+    expect(s.snapshots).toEqual({});
+  });
+
+  it('开团把角色卡里的物品连简介一起带进背包', () => {
+    store.getState().setCharacter({
+      items: ['柯尔特左轮', '牛皮纸笔记本'],
+      itemDetails: [
+        { name: '柯尔特左轮', desc: '六发左轮，关键时刻能保命', kind: 'weapon', damage: '1d10', skill: '射击（手枪）' },
+      ],
+    });
+    store.getState().startNewGame();
+    const inv = store.getState().gameState.inventory;
+    const gun = inv.find((i) => i.name === '柯尔特左轮');
+    expect(gun?.desc).toBe('六发左轮，关键时刻能保命');
+    expect(gun?.kind).toBe('weapon');
+    expect(gun?.damage).toBe('1d10');
+    expect(gun?.skill).toBe('射击（手枪）');
+    // 没配详情的物品照常进背包，只是没有简介
+    expect(inv.find((i) => i.name === '牛皮纸笔记本')).toBeDefined();
+  });
+});
+
+describe('数值条缺键补齐（MP/SAN 显示 0 的根因）', () => {
+  it('旧存档只有 hp 时，按属性派生值补出 mp 与 san，不再显示 0', () => {
+    const c = mergeCharacter(JSON.stringify({ characteristics: { pow: 60, con: 50, siz: 50 } }));
+    const state = createInitialState({ vitals: { hp: 5 } }); // 缺 mp / san
+    const fixed = reconcileVitals(state, c, 'coc7');
+    expect(fixed.vitals.mp).toBe(12); // 60 / 5
+    expect(fixed.vitals.san).toBe(60); // 起始 SAN = POW
+    expect(fixed.vitals.hp).toBe(5); // 已有的值不动
+  });
+
+  it('键齐全时原样返回，不做多余改写', () => {
+    const c = mergeCharacter(JSON.stringify({ characteristics: { pow: 60 } }));
+    const state = createInitialState({ vitals: { hp: 10, mp: 12, san: 44 } });
+    const fixed = reconcileVitals(state, c, 'coc7');
+    expect(fixed.vitals).toEqual({ hp: 10, mp: 12, san: 44 });
+  });
+});
+
+describe('开局地点与在场人物', () => {
+  it('开局地点优先 startLocation，其次地点表第一行', () => {
+    expect(
+      initialLocation({
+        title: '',
+        premise: '',
+        opening: '',
+        truth: '',
+        npcs: [],
+        locations: '码头\n灯塔',
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+      })
+    ).toBe('码头');
+    expect(
+      initialLocation({
+        title: '',
+        premise: '',
+        opening: '',
+        truth: '',
+        npcs: [],
+        locations: '码头\n灯塔',
+        startLocation: '守塔人的小屋',
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+      })
+    ).toBe('守塔人的小屋');
+  });
+
+  it('在场人物只取开场白/前言里点过名的人，未登场的不会被拉进来', () => {
+    const mk = { id: '1', name: '老马林', role: '', motive: '', secret: '' };
+    const other = { id: '2', name: '米莉安', role: '', motive: '', secret: '' };
+    const base = {
+      title: '',
+      truth: '',
+      locations: '',
+      clueChain: '',
+      acts: '',
+      endings: '',
+      notes: '',
+      npcs: [mk, other],
+    };
+    expect(
+      initialNpcs({ ...base, premise: '守塔人老马林不见踪影。', opening: '海雾很重。' })
+    ).toEqual(['老马林']);
+    expect(initialNpcs({ ...base, premise: '', opening: '' })).toEqual([]);
+  });
+});
+
+describe('模组（团）', () => {
+  it('设置开场白会同步到首条消息，并把 {{称呼}} 替换成玩家的称呼', () => {
+    store.setState({
+      messages: [{ id: 'welcome', role: 'gm', content: '旧的开场', ts: 0 }],
+    });
+
+    store.getState().setModule({ opening: '{{称呼}}，有人在暗房里等你。' });
+
+    const first = store.getState().messages[0]!;
+    expect(first.content).toContain('，有人在暗房里等你。');
+    expect(first.content).not.toContain('{{称呼}}');
+  });
+
+  it('旧模组存档（outline）迁移成 truth，新字段留空而不是套默认模组', () => {
+    const m = mergeModule(
+      JSON.stringify({ title: '旧模组', premise: '引言', opening: '开场', outline: '这就是真相' })
+    );
+    expect(m.truth).toBe('这就是真相');
+    expect(m.npcs).toEqual([]);
+    expect(m.locations).toBe('');
+    expect(m.clueChain).toBe('');
+  });
+});
+
+
+describe('检定目标解析（技能 + 属性）', () => {
+  it('技能名优先于属性', () => {
+    const c = mergeCharacter(JSON.stringify({ skills: { 侦查: 70 }, characteristics: { str: 55 } }));
+    expect(resolveCheckTarget('侦查', c, getRuleset('coc7'))).toBe(70);
+  });
+
+  it('属性可用英文键解析', () => {
+    const c = mergeCharacter(JSON.stringify({ characteristics: { str: 55, dex: 60 } }));
+    expect(resolveCheckTarget('str', c, getRuleset('coc7'))).toBe(55);
+  });
+
+  it('属性可用中文标签解析', () => {
+    const c = mergeCharacter(JSON.stringify({ characteristics: { dex: 60 } }));
+    expect(resolveCheckTarget('敏捷', c, getRuleset('coc7'))).toBe(60);
+  });
+
+  it('找不到返回 null', () => {
+    const c = mergeCharacter(JSON.stringify({ skills: {}, characteristics: {} }));
+    expect(resolveCheckTarget('不存在的技能', c, getRuleset('coc7'))).toBeNull();
+  });
+});
+
+describe('技能点预算', () => {
+  it('总预算 = 教育×4 + 智力×2', () => {
+    const c = mergeCharacter(JSON.stringify({ characteristics: { edu: 60, int: 50 } }));
+    const b = skillBudget(c, 'coc7');
+    expect(b.total).toBe(60 * 4 + 50 * 2);
+  });
+
+  it('已用 = Σ(技能值 − 基础值)，不把低于基础值的算成负数', () => {
+    // 侦查基础 25 → 70 用掉 45；心理学基础 10 → 60 用掉 50
+    const c = mergeCharacter(
+      JSON.stringify({ characteristics: { edu: 60, int: 50 }, skills: { 侦查: 70, 心理学: 60 } })
+    );
+    const b = skillBudget(c, 'coc7');
+    expect(b.spent).toBe(45 + 50);
+  });
+
+  it('自定义技能基础值按 0 计', () => {
+    const c = mergeCharacter(
+      JSON.stringify({ characteristics: { edu: 50, int: 50 }, skills: { 自定义技能: 30 } })
+    );
+    expect(skillBudget(c, 'coc7').spent).toBe(30);
+  });
+});
+
+describe('同伴数值规范化与入队门槛', () => {
+  it('把脏键清洗成规则包定义的 hp/san/mp，并记录上限', () => {
+    const c = normalizeCompanion({
+      id: 'x',
+      name: '某人',
+      role: '记者',
+      personality: '话多',
+      skills: {},
+      vitals: { hp: 12, san: 60, 血: 999 } as never,
+      initiative: 'reactive',
+      alive: true,
+      present: true,
+    });
+    expect(Object.keys(c.vitals).sort()).toEqual(['hp', 'mp', 'san']);
+    expect(c.vitals.hp).toBe(12);
+    expect(c.vitalsMax).toEqual(c.vitals);
+    expect(c.met).toBe(false);
+  });
+
+  it('剧情里出现候选名字后才会被标记为已登场', () => {
+    store.getState().setCompanionCandidates([
+      {
+        id: 'cand1',
+        name: '米拉·陈',
+        role: '记者',
+        personality: '',
+        skills: {},
+        vitals: { hp: 10, san: 60, mp: 10 },
+        initiative: 'reactive',
+        alive: true,
+        present: true,
+        met: false,
+      },
+    ]);
+    // 未出现 → 仍不可入队
+    store.getState().markCandidatesMet('你推开门，屋里空无一人。');
+    expect(store.getState().companionCandidates[0]!.met).toBe(false);
+    store.getState().recruitCompanion('cand1');
+    expect(store.getState().gameState.companions.find((c) => c.id === 'cand1')).toBeUndefined();
+
+    // 名字出现 → 已登场，可入队
+    store.getState().markCandidatesMet('米拉抬起头，看了你一眼。');
+    expect(store.getState().companionCandidates[0]!.met).toBe(true);
+    store.getState().recruitCompanion('cand1');
+    expect(store.getState().gameState.companions.find((c) => c.id === 'cand1')).toBeDefined();
+  });
+});
+
+describe('地图节点（空间信息）', () => {
+  it('模组给了 mapNodes 就用它，并清洗空值', () => {
+    const nodes = mapNodesOf({
+      title: '',
+      premise: '',
+      opening: '',
+      truth: '',
+      npcs: [],
+      locations: '甲\n乙',
+      mapNodes: [
+        { name: ' 甲 ', links: ['乙', ' '], note: '起点' },
+        { name: '乙', links: ['甲'] },
+        { name: '   ' },
+      ],
+      clueChain: '',
+      acts: '',
+      endings: '',
+      notes: '',
+    });
+    expect(nodes.map((n) => n.name)).toEqual(['甲', '乙']);
+    expect(nodes[0]!.links).toEqual(['乙']);
+    expect(nodes[0]!.note).toBe('起点');
+  });
+
+  it('没有 mapNodes 时从「关键地点」兜底生成节点（无连线）', () => {
+    const nodes = mapNodesOf({
+      title: '',
+      premise: '',
+      opening: '',
+      truth: '',
+      npcs: [],
+      locations: '1. 码头\n- 灯塔\n\n旧仓库',
+      clueChain: '',
+      acts: '',
+      endings: '',
+      notes: '',
+    });
+    expect(nodes.map((n) => n.name)).toEqual(['1. 码头', '- 灯塔', '旧仓库']);
+    expect(nodes.every((n) => !n.links || n.links.length === 0)).toBe(true);
+  });
+});
+
+describe('示例角色', () => {
+  it('经典克苏鲁与剑与魔法各有一份，且都带姓名与描述', () => {
+    for (const id of ['coc', 'fantasy']) {
+      const c = starterCharacterOf(id);
+      expect(c?.name).toBeTruthy();
+      expect(c?.description).toBeTruthy();
+    }
+  });
+
+  it('没有示例角色的题材返回 undefined（界面不显示按钮）', () => {
+    expect(starterCharacterOf('not-a-genre')).toBeUndefined();
+  });
+});
+
+describe('游玩预设（导入文本 → 整套预设）', () => {
+  it('应用预设后：题材、模组、地图、世界书、队友候选都换好了', () => {
+    applyPreset({
+      name: '赛博侦探',
+      genre: {
+        name: '赛博朋克',
+        blurb: '霓虹与义体',
+        setting: '近未来的巨型都市',
+        tone: '冷硬、潮湿、信息过载',
+        imageStyle: '霓虹赛博风',
+        castHint: '黑客、义体佣兵、企业密探',
+      },
+      module: {
+        title: '霓虹之下',
+        premise: '一名义体医生失踪了。',
+        opening: '雨落在霓虹广告牌上。',
+        start_location: '下城区',
+        goal: '找到失踪的义体医生',
+        stakes: '再拖下去，她的义体记忆会被覆盖。',
+        urgency: '今晚就是数据清理的窗口。',
+        truth: '她被自己的雇主灭口了。',
+        npcs: [{ name: '委托人', role: '诊所前台', motive: '找人', secret: '她收了封口费' }],
+        locations: '下城区\n企业塔',
+        map_nodes: [
+          { name: '下城区', links: ['企业塔'], note: '霓虹最密的地方' },
+          { name: '企业塔', links: ['下城区'] },
+        ],
+        clueChain: 'A → B',
+        acts: '三幕',
+        endings: '三种',
+        notes: '霓虹',
+        source_note: 'AI 自创',
+      },
+      worldbook: [{ keys: ['义体'], content: '义体是植入人体的机械部件。', priority: 70 }],
+      companions: [
+        {
+          name: '凛',
+          role: '黑客',
+          bond: '旧识',
+          personality: '嘴上不饶人',
+          secret: '她欠着企业一笔债',
+          agenda: '想借你脱身',
+          initiative: 'balanced',
+          skills: { 调查: 60 },
+          vitals: { hp: 11, san: 55, mp: 12 },
+        },
+      ],
+      ruleset: null,
+    });
+
+    const s = store.getState();
+    expect(s.genreId).toBe('genre-赛博朋克');
+    expect(s.customGenres.some((g) => g.name === '赛博朋克')).toBe(true);
+
+    expect(s.module.title).toBe('霓虹之下');
+    expect(s.module.startLocation).toBe('下城区');
+    expect(s.module.mapNodes).toHaveLength(2);
+    expect(s.module.npcs).toHaveLength(1);
+
+    expect(s.worldbook.some((e) => e.content.includes('机械部件'))).toBe(true);
+    expect(s.companionCandidates.some((c) => c.name === '凛')).toBe(true);
+    // 未登场不可入队——沿用原有的入队门槛
+    expect(s.companionCandidates.find((c) => c.name === '凛')!.met).toBe(false);
+  });
+});
+
+describe('占位符 {{称呼}} 不能漏到状态里', () => {
+  // 注意：mergeCharacter 在 beforeAll 里才赋值，所以这里必须懒取，不能在 describe 本体里调
+  const mkChar = () => mergeCharacter(JSON.stringify({ name: '艾伦·霍尔特', gender: '男' }));
+
+  it('按称呼 / 姓名替换', () => {
+    const c = mkChar();
+    expect(fillPlayerTokens('{{称呼}}的公寓房间', c)).toBe('霍尔特先生的公寓房间');
+    expect(fillPlayerTokens('{{name}} 走进门', c)).toBe('艾伦·霍尔特 走进门');
+    expect(fillPlayerTokens('没有占位符', c)).toBe('没有占位符');
+  });
+
+  it('状态里的地点 / 线索 / 物品名 / 标记键都会被清洗', () => {
+    const c = mkChar();
+    const s = sanitizeStateTokens(
+      createInitialState({
+        location: '{{称呼}}的公寓房间',
+        clues: ['{{称呼}}留下的字条'],
+        npcsAlive: ['{{称呼}}的房东'],
+        inventory: [{ id: 'x', name: '{{称呼}}的表', qty: 1, desc: '{{name}}的遗物' }],
+        flags: { '{{称呼}}已到场': true },
+      }),
+      c
+    );
+    expect(s.location).toBe('霍尔特先生的公寓房间');
+    expect(s.clues).toEqual(['霍尔特先生留下的字条']);
+    expect(s.npcsAlive).toEqual(['霍尔特先生的房东']);
+    expect(s.inventory[0]!.name).toBe('霍尔特先生的表');
+    expect(s.inventory[0]!.desc).toBe('艾伦·霍尔特的遗物');
+    expect(Object.keys(s.flags)).toEqual(['霍尔特先生已到场']);
+  });
+
+  it('没有占位符时原样返回同一个对象（不做无谓重建）', () => {
+    const s = createInitialState({ location: '旧城区' });
+    expect(sanitizeStateTokens(s, mkChar())).toBe(s);
+  });
+
+  it('模组里除开场白之外的字段也清洗（开场白要留占位符给渲染时替换）', () => {
+    const c = mkChar();
+    const m = sanitizeModuleTokens(
+      {
+        title: 't',
+        premise: '',
+        opening: '{{称呼}}，故事从这里开始。',
+        truth: '',
+        npcs: [{ id: '1', name: '{{称呼}}的老友', role: '旧识', motive: '', secret: '' }],
+        locations: '{{称呼}}的公寓',
+        startLocation: '{{称呼}}的公寓',
+        mapNodes: [{ name: '{{称呼}}的公寓', links: [], note: '' }],
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+      },
+      c
+    );
+    expect(m.startLocation).toBe('霍尔特先生的公寓');
+    expect(m.locations).toBe('霍尔特先生的公寓');
+    expect(m.npcs[0]!.name).toBe('霍尔特先生的老友');
+    expect(m.mapNodes![0]!.name).toBe('霍尔特先生的公寓');
+    // 开场白保留占位符（由 openingText 在渲染时替换）
+    expect(m.opening).toContain('{{称呼}}');
+  });
+});
+
+describe('开新团要清干净上一局的东西', () => {
+  it('清空队友与队友候选，避免老杰克／米拉陈一直跟着', () => {
+    store.setState({
+      gameState: {
+        ...store.getState().gameState,
+        companions: [
+          {
+            id: 'jack',
+            name: '老杰克·霍洛威',
+            role: '',
+            personality: '',
+            skills: {},
+            vitals: { hp: 10, san: 50, mp: 10 },
+            initiative: 'reactive',
+            alive: true,
+            present: true,
+          },
+        ],
+      },
+    });
+    store.getState().setCompanionCandidates([
+      {
+        id: 'cand-x',
+        name: '米拉·陈',
+        role: '',
+        personality: '',
+        skills: {},
+        vitals: { hp: 10, san: 50, mp: 10 },
+        initiative: 'reactive',
+        alive: true,
+        present: true,
+        met: true,
+      },
+    ]);
+
+    store.getState().startNewGame();
+
+    expect(store.getState().gameState.companions).toEqual([]);
+    expect(store.getState().companionCandidates).toEqual([]);
+  });
+});

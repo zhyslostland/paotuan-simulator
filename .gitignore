@@ -6,3 +6,14 @@ dist/
 .DS_Store
 .vscode/
 data/
+
+# WorkBuddy 内部 / 部署产物（含本地部署标记，不进仓库）
+.wbapp_*.genie
+*.genie
+.workbuddy/
+
+# 构建 / 测试日志
+*.log
+
+# 临时诊断文件
+_*.txt

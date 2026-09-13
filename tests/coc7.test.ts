@@ -108,6 +108,44 @@ describe('百分骰与奖励骰 / 惩罚骰', () => {
   });
 });
 
+describe('COC 标准技能表', () => {
+  it('包含常见技能，且每项都带基础值', () => {
+    const cat = coc7.skillCatalog;
+    expect(cat.length).toBeGreaterThan(20);
+    expect(cat.every((s) => s.name.length > 0)).toBe(true);
+    expect(cat.every((s) => Number.isFinite(s.base) && s.base >= 0 && s.base <= 99)).toBe(true);
+    expect(cat.find((s) => s.name === '侦查')?.base).toBe(25);
+    expect(cat.find((s) => s.name === '聆听')?.base).toBe(20);
+    expect(cat.find((s) => s.name === '克苏鲁神话')?.base).toBe(0);
+  });
+});
+
+describe('数值派生', () => {
+  it('HP=(CON+SIZ)/10、MP=POW/5、SAN=POW（向下取整）', () => {
+    expect(coc7.deriveVitals({ con: 50, siz: 50, pow: 60 })).toEqual({
+      hp: 10,
+      mp: 12,
+      san: 60,
+    });
+    expect(coc7.deriveVitals({ con: 65, siz: 70, pow: 43 })).toEqual({
+      hp: 13,
+      mp: 8,
+      san: 43,
+    });
+  });
+
+  it('缺失属性回退 50', () => {
+    const v = coc7.deriveVitals({});
+    expect(v).toEqual({ hp: 10, mp: 10, san: 50 });
+  });
+
+  it('伤害加成与体格由 STR+SIZ 查表', () => {
+    expect(coc7.deriveExtras!({ str: 30, siz: 30 })).toMatchObject({ 伤害加成: '-2', 体格: -2 });
+    expect(coc7.deriveExtras!({ str: 70, siz: 70 })).toMatchObject({ 伤害加成: '+1d4', 体格: 1 });
+    expect(coc7.deriveExtras!({ str: 50, siz: 50 })).toMatchObject({ 伤害加成: '0', 体格: 0 });
+  });
+});
+
 function mean(n: number, f: () => number): number {
   let s = 0;
   for (let i = 0; i < n; i++) s += f();
