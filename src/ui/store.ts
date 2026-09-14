@@ -1376,6 +1376,13 @@ interface Store {
   rewindBefore(msgId: string): void;
   /** 从导出的存档恢复（会自动做版本迁移） */
   loadSave(raw: unknown): void;
+  /**
+   * 序列化"这一局的全部战役数据"。
+   *
+   * 导出存档、存槽位**必须共用它**——分开写两份字段清单，迟早会漏掉一个
+   * （`companionCandidates` 就是这么漏的）。
+   */
+  buildSave(): SaveFile;
 }
 
 export interface SaveFile {
@@ -1388,6 +1395,12 @@ export interface SaveFile {
   chronicle?: ChronicleEntry[];
   summary?: string;
   worldbook?: WorldbookEntry[];
+  /**
+   * 队友候选（准备页「同行者」里那些还没入队的）。
+   * 早先它只活在当前浏览器的 localStorage 里，任何换档 / 导档 / 清缓存都会丢——
+   * 玩家看到的就是"准备页的同行者不见了"。
+   */
+  companionCandidates?: Companion[];
   snapshots?: Record<string, TurnSnapshot>;
 }
 
@@ -1397,7 +1410,27 @@ export interface SaveFile {
  * 改动存档结构时把它 +1，并在 `migrateSave` 里补一条迁移 ——
  * 否则玩家读旧档时会因为缺字段而报错，看起来就像"存档坏了"。
  */
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
+
+/**
+ * 世界书合并：取**并集**（按 id 优先、其次按正文去重），而不是整体替换。
+ *
+ * 为什么：整体替换意味着"读一个条目更少的档 = 删掉我现在的东西"，
+ * 玩家看到的就是"世界书消失了"。读档一律只补不删。
+ */
+export function mergeWorldbook(
+  current: WorldbookEntry[],
+  incoming?: WorldbookEntry[]
+): WorldbookEntry[] {
+  if (!incoming?.length) return current;
+  const out = [...current];
+  for (const e of incoming) {
+    const idx = out.findIndex((x) => x.id === e.id || x.content === e.content);
+    if (idx >= 0) out[idx] = { ...out[idx]!, ...e };
+    else out.push(e);
+  }
+  return out;
+}
 
 /**
  * 存档迁移：把任意历史版本的存档补成当前结构。
@@ -1442,6 +1475,9 @@ export function migrateSave(raw: unknown): Partial<SaveFile> {
     if (!gs.flags || typeof gs.flags !== 'object') gs = { ...gs, flags: {} };
     data.gameState = gs;
   }
+
+  // 队友候选是后来才纳入存档的（早期只存在 localStorage，换档就丢）
+  if (!Array.isArray(data.companionCandidates)) data.companionCandidates = [];
 
   // 编年史：早期版本折叠后回合号会错乱，这里统一修正成单调递增
   if (Array.isArray(data.chronicle) && data.chronicle.length > 0) {
@@ -1968,17 +2004,14 @@ export const useStore = create<Store>((set, get) => ({
     // 队友候选也清掉：它们属于上一局的模组
     saveJson('trpg.companionCandidates', []);
     /*
-     * 上一局残留的内容也要清：
-     * - 世界书里由模组包生成的条目（fromModule）与内置示例条目（sample-）——它们属于上一局的世界；
-     *   用户手写的条目保留。
-     * - 旧地图图（新模组要重新生成）。
+     * **世界书不再清**（协作方 B3）。
+     *
+     * 早期这里会把 `fromModule` 与 `sample-` 的条目全部删掉，理由是"属于上一局的世界"。
+     * 但开新团时**模组并没有换**，那些条目正是当前模组配套的（AI 生成的世界书都是 fromModule），
+     * 一删就空——玩家看到的就是"准备页的世界书没了"。
+     * 换模组时，新生成的世界书本来就会覆盖 fromModule 条目，不需要在这里再删一次。
      */
-    const keptWorldbook = s.worldbook.filter(
-      (e) => !e.fromModule && !e.id.startsWith('sample-')
-    );
-    if (keptWorldbook.length !== s.worldbook.length) {
-      saveJson('trpg.worldbook', keptWorldbook);
-    }
+    const keptWorldbook = s.worldbook;
     // 动作小图与旧地图：都属于上一局，清掉（图片在 IndexedDB 里，要一起清）
     void idbSet('messageImages', {});
     void idbSet('mapImage', '');
@@ -2100,9 +2133,33 @@ export const useStore = create<Store>((set, get) => ({
     for (const e of events) get().addChronicle(e.text, get().gameState.location);
   },
 
+  buildSave() {
+    const s = get();
+    return {
+      version: SAVE_VERSION,
+      exportedAt: new Date().toISOString(),
+      character: s.character,
+      module: s.module,
+      gameState: s.gameState,
+      messages: s.messages,
+      chronicle: s.chronicle,
+      summary: s.summary,
+      worldbook: s.worldbook,
+      companionCandidates: s.companionCandidates,
+      snapshots: s.snapshots,
+    };
+  },
+
   loadSave(raw) {
     // 先过一遍迁移：任何历史版本的存档都要能读进来
     const data = migrateSave(raw);
+    /*
+     * 读档 = **只补不删**。
+     * 世界书取并集而不是整体替换（替换＝把我现在的东西删掉），
+     * 队友候选也一并恢复（以前完全没恢复，准备页就"空了"）。
+     */
+    const worldbook = mergeWorldbook(get().worldbook, data.worldbook);
+    const candidates = data.companionCandidates ?? get().companionCandidates;
     set((s) => ({
       character: data.character ? { ...s.character, ...data.character } : s.character,
       module: data.module ?? s.module,
@@ -2110,7 +2167,8 @@ export const useStore = create<Store>((set, get) => ({
       messages: data.messages ?? s.messages,
       chronicle: data.chronicle ?? s.chronicle,
       summary: data.summary ?? s.summary,
-      worldbook: data.worldbook ?? s.worldbook,
+      worldbook,
+      companionCandidates: candidates,
       snapshots: data.snapshots ?? s.snapshots,
     }));
     if (data.character) localStorage.setItem('trpg.character', JSON.stringify(data.character));
@@ -2120,8 +2178,8 @@ export const useStore = create<Store>((set, get) => ({
     if (data.chronicle)
       localStorage.setItem('trpg.chronicle', JSON.stringify(data.chronicle));
     if (data.summary) localStorage.setItem('trpg.summary', JSON.stringify(data.summary));
-    if (data.worldbook)
-      localStorage.setItem('trpg.worldbook', JSON.stringify(data.worldbook));
+    localStorage.setItem('trpg.worldbook', JSON.stringify(worldbook));
+    saveJson('trpg.companionCandidates', candidates);
     if (data.snapshots) saveJson('trpg.snapshots', data.snapshots);
   },
 }));

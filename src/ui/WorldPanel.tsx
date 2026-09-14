@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, mapNodesOf, type MapNode } from './store';
 import { ImageField } from './ImageField';
 import { mapImagePrompt, sceneImagePrompt } from '../orchestrator/generate.js';
@@ -225,17 +225,52 @@ function MapGraph({
   nodes,
   current,
   revealed,
+  visited,
   onTravel,
 }: {
   nodes: MapNode[];
   current: string;
   revealed: Set<string>;
+  /** 真正去过的地方（"只是听说过"的不算）——用来区分实心与虚线两种亮度 */
+  visited?: Set<string>;
   onTravel?: (location: string) => void;
 }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+
+  // 放在最前面：下面的滚轮监听闭包要用到它（组件可能提前 return，晚定义会踩 TDZ）
+  const clampZoom = (z: number) => Math.max(0.7, Math.min(3, Number(z.toFixed(2))));
+
+  /*
+   * 拖拽收尾必须清掉 dragRef。
+   * 早期 onPointerUp 只 setDragging(false)，dragRef 一直还在，
+   * 于是松手后任何一次 pointermove（连单纯悬停都算）都会继续平移——地图"粘"在鼠标上；
+   * 更糟的是 moved=true 永不复位，之后点任何地点都会被当成"刚拖过"而忽略，
+   * 表现为"点地图没反应"。
+   */
+  const endDrag = () => {
+    dragRef.current = null;
+    setDragging(false);
+  };
+
+  /*
+   * 滚轮缩放。React 的 onWheel 是**被动监听**，里面 preventDefault 无效，
+   * 所以这里手动挂一个 passive:false 的原生监听。
+   * 不再要求按住 Ctrl —— 触屏没有 Ctrl，鼠标用户也不知道要按。
+   */
+  useEffect(() => {
+    const el = surfaceRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      setZoom((z) => clampZoom(z - e.deltaY * 0.002));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
 
   const n = nodes.length;
   if (n === 0) return null;
@@ -264,7 +299,6 @@ function MapGraph({
     }
   }
 
-  const clampZoom = (z: number) => Math.max(0.7, Math.min(3, Number(z.toFixed(2))));
   const reset = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
@@ -273,8 +307,13 @@ function MapGraph({
   return (
     <div className="relative">
       <div
-        className="relative aspect-[17/15] w-full touch-none overflow-hidden rounded-lg border border-ink-700 bg-ink-850/60"
+        ref={surfaceRef}
+        className={`relative aspect-[17/15] w-full touch-none overflow-hidden rounded-lg border border-ink-700 bg-ink-850/60 ${
+          dragging ? 'cursor-grabbing' : 'cursor-grab'
+        }`}
         onPointerDown={(e) => {
+          // 鼠标只认左键；右键/中键不要启动拖动
+          if (e.pointerType === 'mouse' && e.button !== 0) return;
           dragRef.current = { x: e.clientX, y: e.clientY, moved: false };
           setDragging(true);
           (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -289,17 +328,9 @@ function MapGraph({
           d.y = e.clientY;
           setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
         }}
-        onPointerUp={() => {
-          setDragging(false);
-        }}
-        onPointerCancel={() => {
-          setDragging(false);
-        }}
-        onWheel={(e) => {
-          if (!e.ctrlKey && !e.metaKey) return;
-          e.preventDefault();
-          setZoom((z) => clampZoom(z - e.deltaY * 0.002));
-        }}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
       >
         <div
           className="h-full w-full"
@@ -337,6 +368,8 @@ function MapGraph({
               const p = pos.get(nd.name)!;
               const here = isHere(nd.name);
               const known = revealed.has(nd.name);
+              // 三档亮度：**在这儿 > 去过 > 只是听说过**（听说过的画虚线空心，信息不丢也不算探索过）
+              const been = visited?.has(nd.name) ?? false;
               // 名字折成最多两行，别再只显示"霍尔特的侦…"
               const lines = known ? splitLabel(nd.name) : ['？'];
               const twoLine = lines.length > 1;
@@ -357,12 +390,22 @@ function MapGraph({
                     cx={p.x}
                     cy={p.y}
                     r={here ? 26 : 23}
-                    fill={here ? 'var(--c-accent)' : known ? 'var(--c-elevated)' : 'transparent'}
+                    fill={
+                      here
+                        ? 'var(--c-accent)'
+                        : been
+                          ? 'var(--c-elevated)'
+                          : 'transparent'
+                    }
                     stroke={
-                      here ? 'var(--c-accent)' : known ? 'var(--c-border-strong)' : 'var(--c-border)'
+                      here
+                        ? 'var(--c-accent)'
+                        : known
+                          ? 'var(--c-border-strong)'
+                          : 'var(--c-border)'
                     }
                     strokeWidth={1.4}
-                    strokeDasharray={known ? undefined : '3 3'}
+                    strokeDasharray={!known ? '3 3' : been || here ? undefined : '3 4'}
                   />
                   <text
                     x={p.x}
@@ -383,33 +426,41 @@ function MapGraph({
           </svg>
         </div>
 
-        {/* 缩放控件：侧栏里挤一张关系图，必须能放大看 */}
-        <div className="absolute right-1.5 top-1.5 flex flex-col overflow-hidden rounded-md border border-ink-600 bg-ink-900/90">
-          <button
-            onClick={() => setZoom((z) => clampZoom(z + 0.35))}
-            className="h-8 w-8 text-[15px] leading-none text-mist-300 transition hover:bg-ink-800 hover:text-mist-100"
-            title="放大"
-          >
-            ＋
-          </button>
-          <button
-            onClick={() => setZoom((z) => clampZoom(z - 0.35))}
-            className="h-8 w-8 border-t border-ink-700 text-[15px] leading-none text-mist-300 transition hover:bg-ink-800 hover:text-mist-100"
-            title="缩小"
-          >
-            －
-          </button>
-          <button
-            onClick={reset}
-            className="h-8 w-8 border-t border-ink-700 text-[12px] leading-none text-mist-400 transition hover:bg-ink-800 hover:text-mist-100"
-            title="复位"
-          >
-            ⤢
-          </button>
-        </div>
         <span className="pointer-events-none absolute bottom-1.5 right-2 text-[10px] tabular-nums text-mist-500">
           {Math.round(zoom * 100)}%
         </span>
+      </div>
+
+      {/*
+       * 缩放控件必须放在**可拖动容器外面**。
+       * 放在里面时，在按钮上按下会冒泡到容器 → 启动拖动 + setPointerCapture 夺走指针
+       * → 按钮的 click 再也收不到，表现为"点了没反应"。
+       */}
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        className="absolute right-1.5 top-1.5 z-10 flex flex-col overflow-hidden rounded-md border border-ink-600 bg-ink-900/90"
+      >
+        <button
+          onClick={() => setZoom((z) => clampZoom(z + 0.35))}
+          className="h-8 w-8 text-[15px] leading-none text-mist-300 transition hover:bg-ink-800 hover:text-mist-100"
+          title="放大"
+        >
+          ＋
+        </button>
+        <button
+          onClick={() => setZoom((z) => clampZoom(z - 0.35))}
+          className="h-8 w-8 border-t border-ink-700 text-[15px] leading-none text-mist-300 transition hover:bg-ink-800 hover:text-mist-100"
+          title="缩小"
+        >
+          －
+        </button>
+        <button
+          onClick={reset}
+          className="h-8 w-8 border-t border-ink-700 text-[12px] leading-none text-mist-400 transition hover:bg-ink-800 hover:text-mist-100"
+          title="复位"
+        >
+          ⤢
+        </button>
       </div>
     </div>
   );
@@ -422,12 +473,14 @@ function MapSection({
   nodes,
   current,
   revealed,
+  visited,
   mapImage,
   onTravel,
 }: {
   nodes: MapNode[];
   current: string;
   revealed: Set<string>;
+  visited?: Set<string>;
   mapImage: string;
   onTravel?: (location: string) => void;
 }) {
@@ -469,7 +522,13 @@ function MapSection({
         </div>
       </div>
 
-      <MapGraph nodes={nodes} current={here} revealed={shown} onTravel={onTravel} />
+      <MapGraph
+        nodes={nodes}
+        current={here}
+        revealed={shown}
+        visited={visited}
+        onTravel={onTravel}
+      />
 
       {hereNode && (
         <p className="mt-2 rounded-md border-l-2 border-gold-600/60 bg-ink-850 px-2.5 py-1.5 text-[11px] leading-relaxed text-mist-300">
@@ -511,7 +570,9 @@ function MapSection({
 
       <p className="mt-1.5 text-[10px] leading-relaxed text-mist-500/70">
         {hasLinks
-          ? '连线表示走得通。拖动可平移，右上角加减放大。点地点即动身——守密人若认为此刻去不了，会用剧情里的理由拦下你。'
+          ? '连线表示走得通。拖动可平移，滚轮可直接缩放（也可用右上角加减）。' +
+            '实心地点的你去过，虚线的只是听说过。' +
+            '点地点即动身——守密人若认为此刻去不了，会用剧情里的理由拦下你。'
           : '点地点即动身。（这个模组没有给出地点间的可达关系，已按地点顺序连成一条线。）'}
         {hiddenCount > 0 && !showAll && ` 还有 ${hiddenCount} 个地方你还没听说过。`}
       </p>
@@ -571,6 +632,19 @@ export function WorldPanel({
     ? revealedNodeNames(mapNodes, gameState.visited ?? [], location ?? '', knownText)
     : new Set(mapNodes.map((nd) => nd.name));
 
+  /*
+   * 「去过」与「只是听说过」要能一眼分开（协作方建议，采纳）：
+   * 去过的画实心，只是听说的画虚线空心——信息不丢，探索感也不被稀释。
+   * visited 里存的可能是完整地点名（"霍尔特的侦探事务所"），节点名是简称，这里模糊匹配。
+   */
+  const visitedNames = new Set<string>();
+  for (const v of gameState.visited ?? []) {
+    const t = v.trim();
+    if (!t) continue;
+    const m = mapNodes.find((x) => x.name === t || x.name.includes(t) || t.includes(x.name));
+    if (m) visitedNames.add(m.name);
+  }
+
   return (
     <div className="space-y-6 p-4">
       <GoalSection goal={module.goal} stakes={module.stakes} urgency={module.urgency} />
@@ -599,6 +673,7 @@ export function WorldPanel({
         nodes={mapNodes}
         current={location ?? ''}
         revealed={revealed}
+        visited={visitedNames}
         mapImage={mapImage}
         onTravel={onTravel}
       />

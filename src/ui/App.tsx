@@ -12,12 +12,13 @@ import {
   extractContract,
   selectWorldbook,
   stripMeta,
+  stripTravelEcho,
   dedupeNpcLines,
   isRefusal,
   isCheckLeak,
   RETRY_NOTE,
   CHECK_RETRY_NOTE,
-  CONTRACT_RETRY_NOTE,
+  CONTRACT_ONLY_NOTE,
 } from '../orchestrator/prompt.js';
 import { playSfx, resumeAudio, startAmbience, startBgm } from './audio.js';
 import {
@@ -256,23 +257,36 @@ export default function App() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
-    /** 流式输出：网络中途断开时自动重试一次（从头再来，避免留下半截内容） */
+    /*
+     * 流式输出：网络中途断开时自动重试一次。
+     *
+     * **重试绝不清屏**（协作方 B4）：早期这里先 `out=''` 再把消息清空，
+     * 玩家看到的就是"写了一半突然没了"。现在保留已显示的内容，
+     * 只在末尾挂一条提示；等新内容长到超过旧内容再整体替换，
+     * 屏幕上永远是"在变长"，不会闪一下空白。
+     */
     const streamFull = async (ts: ChatTurn[]): Promise<string> => {
-      let out = '';
+      let shown = '';
       for (let attempt = 0; ; attempt++) {
+        let buf = '';
         try {
           for await (const chunk of streamChat(ts, config, ctrl.signal)) {
-            out += chunk;
-            updateMessage(gmId, { content: visible(out) });
+            buf += chunk;
+            if (attempt === 0 || buf.length >= shown.length) {
+              shown = buf;
+              updateMessage(gmId, { content: visible(buf) });
+            }
           }
-          return out;
+          return buf;
         } catch (e) {
           if ((e as Error).name === 'AbortError') throw e;
           // 明确的服务端错误（有 status）不重试；网络抖动（无 status）重试一次
           const isHttpError = e instanceof ModelError && typeof e.status === 'number';
           if (isHttpError || attempt >= 1) throw e;
-          out = '';
-          updateMessage(gmId, { content: '（网络中断，重试中…）' });
+          shown = buf;
+          updateMessage(gmId, {
+            content: visible(buf) ? `${visible(buf)}\n\n_（网络中断，正在重试…）_` : '（网络中断，正在重试…）',
+          });
         }
       }
     };
@@ -285,15 +299,37 @@ export default function App() {
 
       // 兜底：模型偶尔会拒绝玩家，或抢在引擎前把"检定结果"写进正文。
       // 这两类都破坏沉浸感，这里追加纠正指令重新生成一次。
+      // 同样**不清屏**：新内容长过旧内容才替换。
       const retryWith = async (note: string) => {
-        full = '';
-        updateMessage(gmId, { content: '' });
+        let buf = '';
         const retryTurns = [...turns, { role: 'user' as const, content: note }];
         for await (const chunk of streamChat(retryTurns, config, ctrl.signal)) {
-          full += chunk;
-          updateMessage(gmId, { content: visible(full) });
+          buf += chunk;
+          if (buf.length >= full.length) updateMessage(gmId, { content: visible(buf) });
         }
+        full = buf;
         ({ body, contract } = extractContract(full));
+      };
+
+      /**
+       * 只缺 JSON 契约时**不要重写正文**（协作方 B4）：
+       * 整段重写会让屏幕上闪一下空白，代价远大于"这一轮状态不推进"。
+       * 改成单独向模型要一个 JSON 块，正文原样保留；要不来就接受本轮无契约。
+       */
+      const requestContractOnly = async (bodyText: string) => {
+        try {
+          const raw = await chat(
+            [
+              ...turns,
+              { role: 'assistant' as const, content: bodyText },
+              { role: 'user' as const, content: CONTRACT_ONLY_NOTE },
+            ],
+            { ...config, maxTokens: 1024, temperature: 0.3 }
+          );
+          return extractContract(raw).contract;
+        } catch {
+          return null;
+        }
       };
 
       if (isRefusal(stripMeta(body))) {
@@ -301,12 +337,12 @@ export default function App() {
       } else if (isCheckLeak(stripMeta(body))) {
         await retryWith(CHECK_RETRY_NOTE);
       } else if (!contract && stripMeta(body).trim()) {
-        // 正文写好了却漏了 JSON 契约：这一轮的状态会整个丢掉，值得重写一次
-        await retryWith(CONTRACT_RETRY_NOTE);
+        const only = await requestContractOnly(stripMeta(body));
+        if (only) contract = only;
       }
 
       const npcLines = contract?.npc_lines ?? [];
-      const finalBody = dedupeNpcLines(stripMeta(body), npcLines);
+      const finalBody = dedupeNpcLines(stripTravelEcho(stripMeta(body)), npcLines);
       updateMessage(gmId, {
         content: finalBody || '（模型没有返回叙事内容）',
         npcLines,
@@ -503,10 +539,14 @@ export default function App() {
   const travelTo = (location: string) => {
     if (streaming) return;
     setMobilePanel('chat');
-    void handleSend(
-      `（我打算前往「${location}」。这只是我此刻的打算，还不是已经发生的事——` +
-        `如果现在去不了，请用剧情里的理由把我拦下，并给我一个能继续往下走的线索。）`
-    );
+    /*
+     * 只发**最简意图**。
+     * 早期把"这只是打算、去不了请用剧情理由拦下我"整段规则也写进玩家消息，
+     * 结果模型最常见的反应就是把它**原样抄进正文**（协作方 B2 确诊）——
+     * 玩家看到自己的括号被念出来，非常出戏。
+     * 规则只留在系统提示词的【红线二之四】里，玩家消息不重复。
+     */
+    void handleSend(`（意图：前往「${location}」）`);
   };
 
   const panelBtn = (key: Panel, label: string, hint: string) => (

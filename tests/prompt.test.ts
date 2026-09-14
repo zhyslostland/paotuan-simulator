@@ -6,6 +6,7 @@ import {
   isCheckLeak,
   isRefusal,
   stripMeta,
+  stripTravelEcho,
 } from '../src/orchestrator/prompt.js';
 
 describe('stripMeta 兜底过滤', () => {
@@ -153,6 +154,28 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
     expect(prompt).toContain('combat.foes');
     // 检定结论不许写进正文，这条红线要在提示词里
     expect(prompt).toContain('检定结论只由引擎的卡片呈现');
+  });
+});
+
+describe('stripTravelEcho 去掉被抄进正文的"移动意图"模板', () => {
+  it('删掉整段括号模板', () => {
+    const raw =
+      '你站在巷口。\n\n（我打算前往「码头区」。这只是我此刻的打算，还不是已经发生的事——如果现在去不了，请用剧情里的理由把我拦下，并给我一个能继续往下走的线索。）\n\n雾更浓了。';
+    const out = stripTravelEcho(raw);
+    expect(out).not.toContain('我打算前往');
+    expect(out).not.toContain('请用剧情里的理由把我拦下');
+    expect(out).toContain('你站在巷口。');
+    expect(out).toContain('雾更浓了。');
+  });
+
+  it('正常叙事原样返回（不会被误伤）', () => {
+    const raw = '你推开那扇吱呀作响的木门，走廊尽头有人在等你。';
+    expect(stripTravelEcho(raw)).toBe(raw);
+  });
+
+  it('玩家自己写的"打算"不算模板（不匹配就不动）', () => {
+    const raw = '他打量着你，似乎在打算什么。';
+    expect(stripTravelEcho(raw)).toBe(raw);
   });
 });
 

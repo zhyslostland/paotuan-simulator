@@ -832,4 +832,76 @@ describe('存档迁移（旧档必须能读）', () => {
     expect(() => migrateSave(undefined)).not.toThrow();
     expect(migrateSave(null).version).toBe(SAVE_VERSION);
   });
+
+  it('旧档没有 companionCandidates 时补空数组（不丢、也不炸）', () => {
+    expect(migrateSave({ gameState: { vitals: {} } }).companionCandidates).toEqual([]);
+  });
+});
+
+describe('战役数据必须整进整出（B3：消灭半持久化字段）', () => {
+  const mkCompanion = (id: string, name: string) => ({
+    id,
+    name,
+    role: 'r',
+    personality: 'p',
+    skills: {},
+    vitals: { hp: 10, san: 50, mp: 10 },
+    initiative: 'reactive' as const,
+    alive: true,
+    present: true,
+    met: false,
+  });
+
+  it('导出 → 读档：世界书、队友候选、已入队同行者三者都保留', () => {
+    const e1 = { id: 'wb-1', keys: ['甲'], content: '关于甲', priority: 50, enabled: true };
+    store.setState({
+      worldbook: [e1],
+      companionCandidates: [mkCompanion('cand-1', '米拉')],
+      gameState: {
+        ...store.getState().gameState,
+        companions: [mkCompanion('jack', '老杰克')],
+      },
+    });
+
+    const save = store.getState().buildSave();
+    expect(save.companionCandidates).toHaveLength(1);
+    expect(save.worldbook).toHaveLength(1);
+    expect(save.snapshots).toBeDefined();
+
+    // 模拟"切到另一个空档"再读回来
+    store.setState({
+      worldbook: [],
+      companionCandidates: [],
+      gameState: { ...store.getState().gameState, companions: [] },
+    });
+    store.getState().loadSave(save);
+
+    expect(store.getState().companionCandidates.map((c) => c.name)).toEqual(['米拉']);
+    expect(store.getState().gameState.companions.map((c) => c.name)).toEqual(['老杰克']);
+    expect(store.getState().worldbook.map((e) => e.content)).toContain('关于甲');
+  });
+
+  it('读档是世界书**并集**，不会因为读了一个条目更少的档就把现有条目删掉', () => {
+    store.setState({
+      worldbook: [{ id: 'a', keys: ['a'], content: '现有条目', priority: 50, enabled: true }],
+    });
+    store.getState().loadSave({
+      worldbook: [{ id: 'b', keys: ['b'], content: '档案里的条目', priority: 50, enabled: true }],
+      gameState: { vitals: {} },
+      messages: [],
+    });
+    const contents = store.getState().worldbook.map((e) => e.content);
+    expect(contents).toContain('现有条目');
+    expect(contents).toContain('档案里的条目');
+  });
+
+  it('开新团不再删世界书（模组没换，配套条目就不该没）', () => {
+    store.setState({
+      worldbook: [
+        { id: 'wb-mod', keys: ['x'], content: '模组生成', priority: 50, enabled: true, fromModule: true },
+      ],
+    });
+    store.getState().startNewGame();
+    expect(store.getState().worldbook.map((e) => e.content)).toContain('模组生成');
+  });
 });

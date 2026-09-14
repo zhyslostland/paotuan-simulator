@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore, TYPOGRAPHY_PRESETS, SAVE_VERSION, checkTargetText, type ThemeName } from './store';
+import { useStore, TYPOGRAPHY_PRESETS, checkTargetText, type ThemeName } from './store';
 import { ConfirmDialog } from './ConfirmDialog';
 import {
   canInstall,
@@ -620,21 +620,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
     }
   };
 
-  /** 导出完整存档（不含 API Key） */
+  /**
+   * 导出完整存档（不含 API Key）。
+   * 字段清单统一走 store 的 `buildSave()`：导出与存槽共用它，
+   * 免得两边各写一份、漏掉某个战役字段（队友候选就是这么漏的）。
+   */
   const exportSave = () => {
-    const s = useStore.getState();
-    const payload = {
-      version: SAVE_VERSION,
-      exportedAt: new Date().toISOString(),
-      character: s.character,
-      module: s.module,
-      gameState: s.gameState,
-      messages: s.messages,
-      chronicle: s.chronicle,
-      summary: s.summary,
-      worldbook: s.worldbook,
-      snapshots: s.snapshots,
-    };
+    const payload = useStore.getState().buildSave();
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json',
     });
@@ -740,18 +732,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
       savedAt: new Date().toISOString(),
       title: s.module.title || '（无模组）',
     };
-    const payload = {
-      version: SAVE_VERSION,
-      character: s.character,
-      module: s.module,
-      gameState: s.gameState,
-      messages: s.messages,
-      chronicle: s.chronicle,
-      summary: s.summary,
-      worldbook: s.worldbook,
-      // 快照要一起存：没有它，「回溯 / 重掷」在读档后会全部消失
-      snapshots: s.snapshots,
-    };
+    // 与导出共用 buildSave()，字段不会漏（含队友候选与快照）
+    const payload = s.buildSave();
     try {
       localStorage.setItem(slotKey(id), JSON.stringify(payload));
       const next = [...slots.filter((x) => x.name !== meta.name), meta];
