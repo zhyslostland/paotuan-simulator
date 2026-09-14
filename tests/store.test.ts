@@ -45,6 +45,9 @@ let applyPreset: typeof import('../src/ui/preset.js').applyPreset;
 let fillPlayerTokens: typeof import('../src/ui/store.js').fillPlayerTokens;
 let sanitizeStateTokens: typeof import('../src/ui/store.js').sanitizeStateTokens;
 let sanitizeModuleTokens: typeof import('../src/ui/store.js').sanitizeModuleTokens;
+let checkTargetText: typeof import('../src/ui/store.js').checkTargetText;
+let migrateSave: typeof import('../src/ui/store.js').migrateSave;
+let SAVE_VERSION: typeof import('../src/ui/store.js').SAVE_VERSION;
 
 beforeAll(async () => {
   vi.stubGlobal('localStorage', new MemStorage());
@@ -67,6 +70,9 @@ beforeAll(async () => {
   fillPlayerTokens = mod.fillPlayerTokens;
   sanitizeStateTokens = mod.sanitizeStateTokens;
   sanitizeModuleTokens = mod.sanitizeModuleTokens;
+  checkTargetText = mod.checkTargetText;
+  migrateSave = mod.migrateSave;
+  SAVE_VERSION = mod.SAVE_VERSION;
 });
 
 beforeEach(() => {
@@ -487,7 +493,7 @@ describe('地图节点（空间信息）', () => {
     expect(nodes[0]!.note).toBe('起点');
   });
 
-  it('没有 mapNodes 时从「关键地点」兜底生成节点（无连线）', () => {
+  it('没有 mapNodes 时从「关键地点」兜底：清洗名字并按顺序连成一条线', () => {
     const nodes = mapNodesOf({
       title: '',
       premise: '',
@@ -500,8 +506,49 @@ describe('地图节点（空间信息）', () => {
       endings: '',
       notes: '',
     });
-    expect(nodes.map((n) => n.name)).toEqual(['1. 码头', '- 灯塔', '旧仓库']);
-    expect(nodes.every((n) => !n.links || n.links.length === 0)).toBe(true);
+    // 列表符号与括号里的细节都要清掉，节点名要干净
+    expect(nodes.map((n) => n.name)).toEqual(['码头', '灯塔', '旧仓库']);
+    /*
+     * 兜底**必须**给出可达关系：早期这里没有 links，
+     * 结果地图迷雾因为"没有关系图"被整块关掉，开局就把所有地点摊给玩家。
+     * 现在按地点书写顺序连成一条线，走一步亮一片。
+     */
+    expect(nodes[0]!.links).toEqual(['灯塔']);
+    expect(nodes[1]!.links).toEqual(['码头', '旧仓库']);
+    expect(nodes[2]!.links).toEqual(['灯塔']);
+  });
+
+  it('mapNodes 存在但一个 links 都没给时，同样按顺序补上连线', () => {
+    const nodes = mapNodesOf({
+      title: '',
+      premise: '',
+      opening: '',
+      truth: '',
+      npcs: [],
+      locations: '',
+      mapNodes: [{ name: '甲' }, { name: '乙' }, { name: '丙' }],
+      clueChain: '',
+      acts: '',
+      endings: '',
+      notes: '',
+    });
+    expect(nodes.map((n) => n.links)).toEqual([['乙'], ['甲', '丙'], ['乙']]);
+  });
+
+  it('地点名里的括号细节与列表符号会被清掉', () => {
+    const nodes = mapNodesOf({
+      title: '',
+      premise: '',
+      opening: '',
+      truth: '',
+      npcs: [],
+      locations: '霍尔特的侦探事务所（接待室 / 盥洗室）\n2、码头区',
+      clueChain: '',
+      acts: '',
+      endings: '',
+      notes: '',
+    });
+    expect(nodes.map((n) => n.name)).toEqual(['霍尔特的侦探事务所', '码头区']);
   });
 });
 
@@ -688,5 +735,101 @@ describe('开新团要清干净上一局的东西', () => {
 
     expect(store.getState().gameState.companions).toEqual([]);
     expect(store.getState().companionCandidates).toEqual([]);
+  });
+});
+
+describe('检定目标值文案随规则包变化', () => {
+  it('d100 显示成功率百分比，d20 显示加值', () => {
+    expect(checkTargetText({ target: 65, mainDice: '1d100' })).toBe('目标值 65%');
+    expect(checkTargetText({ target: 2, mainDice: '1d20' })).toBe('加值 +2');
+    expect(checkTargetText({ target: -1, mainDice: '1d20' })).toBe('加值 -1');
+  });
+
+  it('老存档的检定记录没有 mainDice 时按百分比兜底', () => {
+    expect(checkTargetText({ target: 40 })).toBe('目标值 40%');
+  });
+});
+
+describe('待掷检定队列（一轮里多个请求都不能丢）', () => {
+  it('可以一次挂多条，逐条移除，也能整体清空', () => {
+    store.getState().setPendingChecks([
+      { skill: '潜行' },
+      { skill: '聆听', difficulty: 'hard', reason: '雾里听不清' },
+    ]);
+    expect(store.getState().pendingChecks).toHaveLength(2);
+    expect(store.getState().pendingChecks[1]!.reason).toBe('雾里听不清');
+
+    store.getState().removePendingCheck(0);
+    expect(store.getState().pendingChecks.map((c) => c.skill)).toEqual(['聆听']);
+
+    store.getState().clearPendingChecks();
+    expect(store.getState().pendingChecks).toEqual([]);
+  });
+});
+
+describe('编年史回合号', () => {
+  it('折叠掉早期条目后，新条目的编号接在最大号后面而不是 length+1', () => {
+    store.setState({ chronicle: [] });
+    for (let i = 1; i <= 5; i++) store.getState().addChronicle(`第 ${i} 件事`);
+    expect(store.getState().chronicle.map((c) => c.turn)).toEqual([1, 2, 3, 4, 5]);
+
+    // 模拟 foldChronicle：只留最近两条（编号 4、5）
+    store.getState().foldChronicle(3, '前情提要');
+    expect(store.getState().chronicle.map((c) => c.turn)).toEqual([4, 5]);
+
+    store.getState().addChronicle('折叠之后的新事件');
+    // 早期实现用 length+1，这里会得到 3 —— 比现有条目还小，日志在提示词里就乱序了
+    expect(store.getState().chronicle.map((c) => c.turn)).toEqual([4, 5, 6]);
+  });
+});
+
+describe('存档迁移（旧档必须能读）', () => {
+  it('补齐后加的 visited / threads / combat，并标上当前版本号', () => {
+    const data = migrateSave({
+      version: 1,
+      character: {
+        name: '旧人',
+        description: '',
+        personality: '',
+        mes_example: '',
+        characteristics: {},
+        skills: {},
+      },
+      gameState: {
+        vitals: { hp: 5 },
+        companions: [],
+        inventory: [],
+        flags: {},
+        clues: [],
+        location: '旧城区',
+        npcsAlive: [],
+      },
+      messages: [],
+    });
+    expect(data.version).toBe(SAVE_VERSION);
+    expect(data.gameState!.visited).toEqual(['旧城区']);
+    expect(data.gameState!.threads).toEqual([]);
+    expect(data.gameState!.combat).toEqual({ active: false, round: 0, foes: [] });
+    // 缺键的数值条要按规则包补齐，不能留成界面上"显示 0"
+    expect(Number.isFinite(data.gameState!.vitals.san)).toBe(true);
+  });
+
+  it('把乱序的编年史回合号修正成单调递增（避免 key 撞车与日志乱序）', () => {
+    const data = migrateSave({
+      chronicle: [
+        { turn: 4, text: 'a' },
+        { turn: 5, text: 'b' },
+        { turn: 2, text: 'c' },
+        { turn: 3, text: 'd' },
+      ],
+    });
+    expect(data.chronicle!.map((c) => c.turn)).toEqual([4, 5, 6, 7]);
+  });
+
+  it('垃圾输入不抛异常（宁可空档也不能崩）', () => {
+    expect(() => migrateSave(null)).not.toThrow();
+    expect(() => migrateSave({ gameState: 'not-an-object' })).not.toThrow();
+    expect(() => migrateSave(undefined)).not.toThrow();
+    expect(migrateSave(null).version).toBe(SAVE_VERSION);
   });
 });

@@ -190,6 +190,23 @@ function revealedNodeNames(
 }
 
 /**
+ * 地图节点名折行。
+ *
+ * 为什么必须折行：侧栏太窄，节点名一长就只剩"霍尔特的侦…"，
+ * 玩家根本认不出那是哪（用户报的"地图名字显示不全"）。
+ * 这里折成最多两行，每行 5-6 个字，再长才截断。
+ */
+function splitLabel(name: string): string[] {
+  const n = name.trim();
+  if (n.length <= 5) return [n];
+  if (n.length <= 12) {
+    const mid = Math.ceil(n.length / 2);
+    return [n.slice(0, mid), n.slice(mid)];
+  }
+  return [n.slice(0, 6), `${n.slice(6, 11)}…`];
+}
+
+/**
  * 地图节点关系图：节点＝地点、连线＝走得通。
  *
  * 三件事必须做到：**空间信息**（谁挨着谁）、**可缩放拖拽**（侧栏太小看不清）、
@@ -214,11 +231,11 @@ function MapGraph({
   const n = nodes.length;
   if (n === 0) return null;
 
-  const W = 340;
-  const H = 300;
+  const W = 360;
+  const H = 316;
   const cx = W / 2;
   const cy = H / 2;
-  const radius = n <= 1 ? 0 : Math.min(112, 30 + n * 11);
+  const radius = n <= 1 ? 0 : Math.min(118, 34 + n * 13);
   const pos = new Map<string, { x: number; y: number }>();
   nodes.forEach((nd, i) => {
     const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
@@ -311,11 +328,9 @@ function MapGraph({
               const p = pos.get(nd.name)!;
               const here = isHere(nd.name);
               const known = revealed.has(nd.name);
-              const label = known
-                ? nd.name.length > 6
-                  ? `${nd.name.slice(0, 6)}…`
-                  : nd.name
-                : '？';
+              // 名字折成最多两行，别再只显示"霍尔特的侦…"
+              const lines = known ? splitLabel(nd.name) : ['？'];
+              const twoLine = lines.length > 1;
               return (
                 <g
                   key={nd.name}
@@ -332,7 +347,7 @@ function MapGraph({
                   <circle
                     cx={p.x}
                     cy={p.y}
-                    r={here ? 25 : 21}
+                    r={here ? 26 : 23}
                     fill={here ? 'var(--c-accent)' : known ? 'var(--c-elevated)' : 'transparent'}
                     stroke={
                       here ? 'var(--c-accent)' : known ? 'var(--c-border-strong)' : 'var(--c-border)'
@@ -342,12 +357,16 @@ function MapGraph({
                   />
                   <text
                     x={p.x}
-                    y={p.y + 4}
+                    y={twoLine ? p.y - 1 : p.y + 4}
                     textAnchor="middle"
-                    fontSize={known ? 11 : 12}
+                    fontSize={twoLine ? 9.5 : 11}
                     fill={here ? '#14171d' : known ? 'var(--c-text)' : 'var(--c-muted)'}
                   >
-                    {label}
+                    {lines.map((ln, li) => (
+                      <tspan key={li} x={p.x} dy={li === 0 ? 0 : 11.5}>
+                        {ln}
+                      </tspan>
+                    ))}
                   </text>
                 </g>
               );
@@ -455,10 +474,36 @@ function MapSection({
         </p>
       )}
 
+      {/* 已知地点用完整名字列一遍：图上的节点名是折行/截断的，这里补全 */}
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {nodes
+          .filter((nd) => shown.has(nd.name))
+          .map((nd) => {
+            const isCurrent =
+              Boolean(here) && (nd.name === here || nd.name.includes(here) || here.includes(nd.name));
+            return (
+              <button
+                key={nd.name}
+                disabled={isCurrent || !onTravel}
+                onClick={() => onTravel?.(nd.name)}
+                title={isCurrent ? '你就在这里' : nd.note || `前往${nd.name}`}
+                className={`max-w-full truncate rounded-md border px-2 py-0.5 text-[11px] transition ${
+                  isCurrent
+                    ? 'border-gold-600/70 bg-gold-500/10 text-gold-300'
+                    : 'border-ink-600 text-mist-300 hover:border-gold-600/50 hover:text-mist-100'
+                }`}
+              >
+                {nd.name}
+                {isCurrent && <span className="ml-1 text-[9px] text-gold-500/80">你在这里</span>}
+              </button>
+            );
+          })}
+      </div>
+
       <p className="mt-1.5 text-[10px] leading-relaxed text-mist-500/70">
         {hasLinks
-          ? '连线表示走得通。拖动可平移，右上角加减放大。点地点即动身，转场由守密人替你演。'
-          : '点地点即动身，路上的转场由守密人替你演。（这个模组还没给出地点间的可达关系）'}
+          ? '连线表示走得通。拖动可平移，右上角加减放大。点地点即动身——守密人若认为此刻去不了，会用剧情里的理由拦下你。'
+          : '点地点即动身。（这个模组没有给出地点间的可达关系，已按地点顺序连成一条线。）'}
         {hiddenCount > 0 && !showAll && ` 还有 ${hiddenCount} 个地方你还没听说过。`}
       </p>
 

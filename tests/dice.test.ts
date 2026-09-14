@@ -91,6 +91,35 @@ describe('分布与公平性', () => {
     expect(expectedValue('1d6+2')).toBeCloseTo(5.5, 10);
   });
 
+  // 回归：早期 enumerate 用 convolve(dist, dist)，每轮把骰数翻倍，
+  // 3d6 被算成 8d6（均值 14 而非 10.5），4d6 更离谱。
+  it('NdM（N≥3）的分布与期望正确', () => {
+    const d3 = distribution('3d6');
+    expect(Math.min(...d3.keys())).toBe(3);
+    expect(Math.max(...d3.keys())).toBe(18);
+    expect([...d3.values()].reduce((a, b) => a + b, 0)).toBe(216);
+    expect(d3.get(10)).toBe(27); // 3d6 和为 10 有 27 种
+    expect(d3.get(11)).toBe(27);
+    expect(expectedValue('3d6')).toBeCloseTo(10.5, 10);
+
+    const d4 = distribution('4d6');
+    expect(Math.min(...d4.keys())).toBe(4);
+    expect(Math.max(...d4.keys())).toBe(24);
+    expect([...d4.values()].reduce((a, b) => a + b, 0)).toBe(1296);
+    expect(expectedValue('4d6')).toBeCloseTo(14, 10);
+
+    expect(expectedValue('5d10')).toBeCloseTo(27.5, 10);
+    expect(expectedValue('2d6+1d4')).toBeCloseTo(9.5, 10);
+  });
+
+  it('分布与实测均值一致（3d6）', () => {
+    const N = 60_000;
+    const rng = seededRng(20260913);
+    let sum = 0;
+    for (let i = 0; i < N; i++) sum += roll('3d6', rng).total;
+    expect(sum / N).toBeCloseTo(expectedValue('3d6'), 1);
+  });
+
   it('10 万次 1d6 通过卡方检验（p > 0.01）', () => {
     const N = 100_000;
     const rng = seededRng(20260912);

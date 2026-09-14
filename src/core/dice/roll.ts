@@ -118,11 +118,15 @@ function enumerate(ast: Ast): [Map<number, number>, number] {
       return [new Map([[ast.value, 1]]), 1];
 
     case 'dice': {
-      let dist = new Map<number, number>();
-      for (let v = 1; v <= ast.sides; v++) dist.set(v, 1);
-      let combos = ast.sides;
-      for (let i = 1; i < ast.count; i++) {
-        dist = convolve(dist, dist);
+      // 单骰分布：1..sides 各一次
+      const single = new Map<number, number>();
+      for (let v = 1; v <= ast.sides; v++) single.set(v, 1);
+      // 逐个卷积"单骰"，而不是 convolve(dist, dist)。
+      // 后者每次把骰数翻倍（1→2→4→8…），会把 3d6 算成 8d6，均值 14 而非 10.5。
+      let dist = new Map<number, number>([[0, 1]]);
+      let combos = 1;
+      for (let i = 0; i < ast.count; i++) {
+        dist = convolve(dist, single);
         combos *= ast.sides;
         if (combos > MAX_COMBINATIONS) break;
       }

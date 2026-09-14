@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildSystemPrompt,
   dedupeNpcLines,
   extractContract,
   isCheckLeak,
@@ -84,9 +85,74 @@ describe('isCheckLeak 识别正文里泄漏的检定结果', () => {
     expect(isCheckLeak('进行一次侦查检定，结果是困难成功。')).toBe(true);
   });
 
+  it('结论标签与掷骰字样都算泄漏（结果只由本地卡片呈现）', () => {
+    expect(isCheckLeak('这一下大成功。')).toBe(true);
+    expect(isCheckLeak('你掷出 23，极难成功。')).toBe(true);
+    expect(isCheckLeak('骰出 7 点。')).toBe(true);
+    expect(isCheckLeak('投掷结果：失败。')).toBe(true);
+  });
+
   it('正常叙事不会误判', () => {
     expect(isCheckLeak('你推开那扇吱呀作响的木门。')).toBe(false);
     expect(isCheckLeak('他盯着你，眼神里满是怀疑。')).toBe(false);
+    expect(isCheckLeak('地板接缝处有几道新鲜的刮痕。')).toBe(false);
+  });
+});
+
+describe('输出契约里的状态白名单不能和战斗规则自相矛盾', () => {
+  it('combat.active / round / foes 都写在允许的 target 前缀里', () => {
+    const prompt = buildSystemPrompt({
+      rulesetName: 'COC 7th',
+      genre: {
+        id: 'coc',
+        name: '经典克苏鲁',
+        blurb: '',
+        setting: '',
+        tone: '',
+        imageStyle: '',
+        castHint: '',
+      },
+      module: {
+        title: 't',
+        premise: '',
+        opening: '',
+        truth: '',
+        npcs: [],
+        locations: '',
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+      },
+      character: {
+        name: '甲',
+        description: '',
+        personality: '',
+        mes_example: '',
+        characteristics: { str: 50 },
+        skills: { 侦查: 50 },
+      },
+      playerAddress: '甲先生',
+      gameState: {
+        vitals: { hp: 10, san: 60, mp: 10 },
+        companions: [],
+        inventory: [],
+        flags: {},
+        clues: [],
+        threads: [],
+        location: '走廊',
+        npcsAlive: [],
+        combat: { active: false, round: 0, foes: [] },
+      },
+      worldbook: [],
+      chronicle: [],
+    });
+    // 战斗规则让模型写 combat.*，白名单里就必须有，否则写多少被拒多少
+    expect(prompt).toContain('combat.active');
+    expect(prompt).toContain('combat.round');
+    expect(prompt).toContain('combat.foes');
+    // 检定结论不许写进正文，这条红线要在提示词里
+    expect(prompt).toContain('检定结论只由引擎的卡片呈现');
   });
 });
 

@@ -528,15 +528,20 @@ function CharacterTab() {
               <input
                 className={`${inputCls} text-center`}
                 type="number"
+                min={d.min}
+                max={d.max}
+                step={1}
                 value={character.characteristics[d.key] ?? d.default}
                 onChange={(e) =>
                   setCharacter({
                     characteristics: {
                       ...character.characteristics,
-                      [d.key]: Number(e.target.value),
+                      // 清空时回落到默认值；store 里还会再按 min/max 夹一次
+                      [d.key]: e.target.value === '' ? d.default : Number(e.target.value),
                     },
                   })
                 }
+                title={`范围 ${d.min}–${d.max}`}
               />
             </label>
           ))}
@@ -1481,6 +1486,7 @@ function ModuleTab() {
             urgency?: string;
             npcs?: { name?: string; role?: string; motive?: string; secret?: string }[];
             locations?: string;
+            map_nodes?: { name?: string; links?: string[]; note?: string }[];
             clueChain?: string;
             acts?: string;
             endings?: string;
@@ -1511,6 +1517,21 @@ function ModuleTab() {
                 }))
               : gameModule.npcs,
             locations: data.locations ?? gameModule.locations,
+            /*
+             * 地图节点必须接住。
+             * 提示词早就在要 map_nodes，但这里以前没把它写进模组，
+             * 于是 AI 生成的模组永远没有"可达关系"，地图迷雾被整块关掉，
+             * 开局就把所有地点摊开——这正是玩家报的"迷雾失效"。
+             */
+            mapNodes: data.map_nodes?.length
+              ? data.map_nodes
+                  .filter((n) => n.name)
+                  .map((n) => ({
+                    name: n.name!.trim(),
+                    links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
+                    note: n.note?.trim(),
+                  }))
+              : gameModule.mapNodes,
             clueChain: data.clueChain ?? gameModule.clueChain,
             acts: data.acts ?? gameModule.acts,
             endings: data.endings ?? gameModule.endings,
@@ -1646,6 +1667,7 @@ function ModuleTab() {
                     truth?: string;
                     npcs?: { name?: string; role?: string; motive?: string; secret?: string }[];
                     locations?: string;
+                    map_nodes?: { name?: string; links?: string[]; note?: string }[];
                     clueChain?: string;
                     acts?: string;
                     endings?: string;
@@ -1676,6 +1698,16 @@ function ModuleTab() {
                         }))
                       : gameModule.npcs,
                     locations: data.locations ?? gameModule.locations,
+                    // 同上：地图节点要接住，否则地图迷雾没法工作
+                    mapNodes: data.map_nodes?.length
+                      ? data.map_nodes
+                          .filter((n) => n.name)
+                          .map((n) => ({
+                            name: n.name!.trim(),
+                            links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
+                            note: n.note?.trim(),
+                          }))
+                      : gameModule.mapNodes,
                     clueChain: data.clueChain ?? gameModule.clueChain,
                     acts: data.acts ?? gameModule.acts,
                     endings: data.endings ?? gameModule.endings,

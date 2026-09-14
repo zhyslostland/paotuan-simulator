@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useStore, type CheckBadge, type DiceBadge, type NpcLine } from './store';
+import {
+  useStore,
+  type CheckBadge,
+  type DiceBadge,
+  type Message,
+  type NpcLine,
+  type Typography,
+} from './store';
 import { generateImage, ModelError } from '../providers/model.js';
 import { actionImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
@@ -78,9 +85,7 @@ function NpcLines({ lines }: { lines: NpcLine[] }) {
           className="rounded-lg border-l-2 border-arcane-600 bg-ink-800 px-3 py-2"
         >
           <div className="text-[12px] font-medium text-arcane-400">{l.name}</div>
-          {l.action && (
-            <p className="mt-0.5 text-[12px] italic text-mist-400">{l.action}</p>
-          )}
+          {l.action && <p className="mt-0.5 text-[12px] text-mist-400">{l.action}</p>}
           {l.line && (
             <p className="mt-1 text-[14px] leading-relaxed text-mist-100">「{l.line}」</p>
           )}
@@ -202,6 +207,112 @@ function InlineSceneImage({
   );
 }
 
+/**
+ * 单条消息。
+ *
+ * 为什么单独抽出来并 memo：流式输出时最后一条消息每几百毫秒就变一次，
+ * 若不 memo，整屏（最多 120 条）的 Markdown 都要重新解析一遍，手机上直接卡住。
+ * props 全部是原始值或稳定引用，所以只有内容真的变了的那一条会重渲染。
+ */
+const MessageRow = memo(function MessageRow({
+  m,
+  streaming,
+  isLast,
+  isLastGm,
+  hasPlayer,
+  canRewind,
+  imageUrl,
+  typography,
+  onRewind,
+  onReroll,
+}: {
+  m: Message;
+  streaming: boolean;
+  isLast: boolean;
+  isLastGm: boolean;
+  hasPlayer: boolean;
+  canRewind: boolean;
+  imageUrl?: string;
+  typography: Typography;
+  onRewind: (id: string) => void;
+  onReroll: () => void;
+}) {
+  if (m.role === 'system') {
+    return (
+      <div className="text-center">
+        <span className="rounded-full bg-ink-800 px-3 py-1 text-[11px] text-mist-500">
+          {m.content}
+        </span>
+      </div>
+    );
+  }
+
+  if (m.role === 'player') {
+    return (
+      <div className="rise-in flex justify-end">
+        <div className="max-w-[85%]">
+          <div className="rounded-2xl rounded-br-md border border-gold-600/40 bg-ink-800/90 px-4 py-2.5 text-[14px] leading-relaxed text-mist-100">
+            {m.content}
+          </div>
+          {m.check && (
+            <div className="flex justify-end">
+              <CheckCard badge={m.check} />
+            </div>
+          )}
+          {m.dice?.map((d, i) => (
+            <div key={i} className="flex justify-end">
+              <DiceCard badge={d} />
+            </div>
+          ))}
+          {!streaming && canRewind && (
+            <div className="mt-1 flex justify-end">
+              <GhostBtn
+                onClick={() => onRewind(m.id)}
+                title="回到这一步，重新来过（内容会填回输入框）"
+              >
+                ↺ 回溯到这里
+              </GhostBtn>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rise-in">
+      <div className="mb-1.5 flex items-center gap-2">
+        <span className="h-px w-5 bg-gold-600/50" />
+        <span className="text-[11px] tracking-wide text-gold-500/80">守密人</span>
+      </div>
+      <div
+        className={`prose-trpg font-serif text-mist-300 ${typography.indent ? 'prose-indent' : ''}`}
+        style={{
+          fontSize: `${(15 * typography.scale).toFixed(1)}px`,
+          lineHeight: typography.lineHeight,
+        }}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+      </div>
+      {m.npcLines && m.npcLines.length > 0 && <NpcLines lines={m.npcLines} />}
+      {(!streaming || !isLast) && (
+        <InlineSceneImage msgId={m.id} content={m.content} value={imageUrl} />
+      )}
+      {streaming && isLast && <TypingDots />}
+      {!streaming && hasPlayer && isLastGm && (
+        <div className="mt-2">
+          <GhostBtn
+            onClick={onReroll}
+            title="用同一行动重新生成一次；若该轮过了检定，会重掷骰子"
+          >
+            ↻ 重掷这一轮
+          </GhostBtn>
+        </div>
+      )}
+    </div>
+  );
+});
+
 export function Chat({
   onSend,
   onAbort,
@@ -217,12 +328,12 @@ export function Chat({
   setDraft: (v: string) => void;
   onRewind: (id: string) => void;
   onReroll: () => void;
-  onQuickCheck: (skill: string, difficulty?: string) => void;
+  onQuickCheck: (skill: string, difficulty?: string, index?: number) => void;
 }) {
   const messages = useStore((s) => s.messages);
   const streaming = useStore((s) => s.streaming);
   const snapshots = useStore((s) => s.snapshots);
-  const pendingCheck = useStore((s) => s.pendingCheck);
+  const pendingChecks = useStore((s) => s.pendingChecks);
   const typography = useStore((s) => s.typography);
   const combat = useStore((s) => s.gameState.combat);
   const messageImages = useStore((s) => s.messageImages);
@@ -232,6 +343,18 @@ export function Chat({
   // 移动端长对话虚拟化：默认只渲染最近 120 条，点「加载更早」再往前翻
   const [renderCount, setRenderCount] = useState(120);
   const visibleMessages = messages.slice(Math.max(0, messages.length - renderCount));
+
+  /*
+   * 上层每次 render 都会新建 onRewind / onReroll 这两个函数，
+   * 直接传给 memo 过的 MessageRow 会让 memo 完全失效。
+   * 这里用 ref 转一手，拿到一个身份稳定的回调。
+   */
+  const rewindRef = useRef(onRewind);
+  rewindRef.current = onRewind;
+  const rerollRef = useRef(onReroll);
+  rerollRef.current = onReroll;
+  const rewind = useCallback((id: string) => rewindRef.current(id), []);
+  const reroll = useCallback(() => rerollRef.current(), []);
 
   // 流式输出时消息长度不变，必须在"内容"变化时也滚动；
   // 但只有当用户本来就在底部附近时才自动滚，避免打断向上翻看。
@@ -275,86 +398,21 @@ export function Chat({
               </button>
             </div>
           )}
-          {visibleMessages.map((m) => {
-            if (m.role === 'system') {
-              return (
-                <div key={m.id} className="text-center">
-                  <span className="rounded-full bg-ink-800 px-3 py-1 text-[11px] text-mist-500">
-                    {m.content}
-                  </span>
-                </div>
-              );
-            }
-            if (m.role === 'player') {
-              return (
-                <div key={m.id} className="rise-in flex justify-end">
-                  <div className="max-w-[85%]">
-                    <div className="rounded-2xl rounded-br-md border border-gold-600/40 bg-ink-800/90 px-4 py-2.5 text-[14px] leading-relaxed text-mist-100">
-                      {m.content}
-                    </div>
-                    {m.check && (
-                      <div className="flex justify-end">
-                        <CheckCard badge={m.check} />
-                      </div>
-                    )}
-                    {m.dice?.map((d, i) => (
-                      <div key={i} className="flex justify-end">
-                        <DiceCard badge={d} />
-                      </div>
-                    ))}
-                    {!streaming && snapshots[m.id] && (
-                      <div className="mt-1 flex justify-end">
-                        <GhostBtn
-                          onClick={() => onRewind(m.id)}
-                          title="回到这一步，重新来过（内容会填回输入框）"
-                        >
-                          ↺ 回溯到这里
-                        </GhostBtn>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <div key={m.id} className="rise-in">
-                <div className="mb-1.5 flex items-center gap-2">
-                  <span className="h-px w-5 bg-gold-600/50" />
-                  <span className="text-[11px] tracking-wide text-gold-500/80">守密人</span>
-                </div>
-                <div
-                  className={`prose-trpg font-serif text-mist-300 ${
-                    typography.indent ? 'prose-indent' : ''
-                  }`}
-                  style={{
-                    fontSize: `${(15 * typography.scale).toFixed(1)}px`,
-                    lineHeight: typography.lineHeight,
-                  }}
-                >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                </div>
-                {m.npcLines && m.npcLines.length > 0 && <NpcLines lines={m.npcLines} />}
-                {(!streaming || m.id !== messages[messages.length - 1]?.id) && (
-                  <InlineSceneImage
-                    msgId={m.id}
-                    content={m.content}
-                    value={messageImages[m.id] ?? m.sceneImage}
-                  />
-                )}
-                {streaming && m.id === messages[messages.length - 1]?.id && <TypingDots />}
-                {!streaming && hasPlayer && m.id === lastGmId && (
-                  <div className="mt-2">
-                    <GhostBtn
-                      onClick={onReroll}
-                      title="用同一行动重新生成一次；若该轮过了检定，会重掷骰子"
-                    >
-                      ↻ 重掷这一轮
-                    </GhostBtn>
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {visibleMessages.map((m) => (
+            <MessageRow
+              key={m.id}
+              m={m}
+              streaming={streaming}
+              isLast={m.id === messages[messages.length - 1]?.id}
+              isLastGm={m.id === lastGmId}
+              hasPlayer={hasPlayer}
+              canRewind={Boolean(snapshots[m.id])}
+              imageUrl={messageImages[m.id] ?? m.sceneImage}
+              typography={typography}
+              onRewind={rewind}
+              onReroll={reroll}
+            />
+          ))}
           {streaming && messages[messages.length - 1]?.role === 'player' && (
             <div>
               <div className="mb-1.5 flex items-center gap-2">
@@ -406,37 +464,51 @@ export function Chat({
         </div>
       )}
 
-      {pendingCheck && !streaming && (
+      {pendingChecks.length > 0 && !streaming && (
         <div className="shrink-0 border-t border-gold-600/30 bg-gold-500/5 px-4 py-2.5 sm:px-8">
-          <div className="mx-auto flex max-w-3xl items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[12px] text-mist-200">
-                守密人要求一次{' '}
-                <b className="text-gold-400">{pendingCheck.skill}</b> 检定
-                {pendingCheck.difficulty && pendingCheck.difficulty !== 'regular'
-                  ? `（${pendingCheck.difficulty === 'hard' ? '困难' : '极难'}）`
-                  : ''}
+          <div className="mx-auto max-w-3xl space-y-2">
+            {pendingChecks.length > 1 && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-mist-400">
+                  守密人要求了 {pendingChecks.length} 次检定，逐个掷
+                </span>
+                <GhostBtn
+                  onClick={() => useStore.getState().clearPendingChecks()}
+                  title="把这一轮要求的所有检定都忽略"
+                >
+                  全部忽略
+                </GhostBtn>
               </div>
-              {pendingCheck.reason && (
-                <div className="mt-0.5 truncate text-[11px] text-mist-500">
-                  {pendingCheck.reason}
+            )}
+            {pendingChecks.map((pc, i) => (
+              <div key={`${pc.skill}-${i}`} className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[12px] text-mist-200">
+                    守密人要求一次 <b className="text-gold-400">{pc.skill}</b> 检定
+                    {pc.difficulty && pc.difficulty !== 'regular'
+                      ? `（${pc.difficulty === 'hard' ? '困难' : '极难'}）`
+                      : ''}
+                  </div>
+                  {pc.reason && (
+                    <div className="mt-0.5 truncate text-[11px] text-mist-500">{pc.reason}</div>
+                  )}
                 </div>
-              )}
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <button
-                onClick={() => onQuickCheck(pendingCheck.skill, pendingCheck.difficulty)}
-                className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
-              >
-                掷骰
-              </button>
-              <GhostBtn
-                onClick={() => useStore.getState().setPendingCheck(null)}
-                title="忽略这次检定"
-              >
-                忽略
-              </GhostBtn>
-            </div>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    onClick={() => onQuickCheck(pc.skill, pc.difficulty, i)}
+                    className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+                  >
+                    掷骰
+                  </button>
+                  <GhostBtn
+                    onClick={() => useStore.getState().removePendingCheck(i)}
+                    title="忽略这一次检定"
+                  >
+                    忽略
+                  </GhostBtn>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

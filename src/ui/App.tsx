@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useStore, addressOf, resolveCheckTarget } from './store';
+import { useStore, addressOf, resolveCheckTarget, checkTargetText } from './store';
 import { Chat } from './Chat';
 import { CharacterSheet, CheckDialog, type Difficulty } from './CharacterSheet';
 import { WorldPanel } from './WorldPanel';
@@ -20,7 +20,13 @@ import {
   CONTRACT_RETRY_NOTE,
 } from '../orchestrator/prompt.js';
 import { playSfx, resumeAudio, startAmbience, startBgm } from './audio.js';
-import { updateSW } from '../pwa.js';
+import {
+  canInstall,
+  initInstallPrompt,
+  onInstallAvailable,
+  promptInstall,
+  updateSW,
+} from '../pwa.js';
 import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.js';
 import { FOLD_SYSTEM } from '../orchestrator/generate.js';
 import { getRuleset } from '../core/rulesets/index.js';
@@ -54,6 +60,7 @@ export default function App() {
     addChronicle,
     summary,
     chronicle,
+    lastChanges,
   } = useStore();
 
   const [showSettings, setShowSettings] = useState(false);
@@ -64,12 +71,32 @@ export default function App() {
   const [pendingStart, setPendingStart] = useState(false);
   const [toast, setToast] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
+  const [installable, setInstallable] = useState(false);
+  /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
+  const [installHintHidden, setInstallHintHidden] = useState(
+    () => localStorage.getItem('trpg.installHint') === '1'
+  );
   const [welcome, setWelcome] = useState(() => !localStorage.getItem('trpg.welcomed'));
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  // PWA：截住浏览器的"可安装"事件，攒着等用户主动点安装
+  useEffect(() => {
+    initInstallPrompt();
+    const sync = () => setInstallable(canInstall());
+    sync();
+    return onInstallAvailable(sync);
+  }, []);
+
+  /* 状态变化提示：自动收起（玩家也可以手动关） */
+  useEffect(() => {
+    if (!lastChanges) return;
+    const t = setTimeout(() => useStore.getState().clearChanges(), 9000);
+    return () => clearTimeout(t);
+  }, [lastChanges?.id]);
 
   // PWA 有新版本 → 弹更新横幅，否则用户会一直卡在旧版本
   useEffect(() => {
@@ -295,14 +322,20 @@ export default function App() {
           ] as never);
         }
         if (contract.summary_delta) addChronicle(contract.summary_delta);
+        /*
+         * 一键掷骰：把**全部**检定请求挂进队列，界面逐个给出「掷骰」按钮。
+         * 早期只取 dice_requests[0]，一轮里要求两个检定时后一个会被整个丢掉。
+         * 与队列里已有的项合并（按技能去重、最多留 6 条），避免手滑漏掉某一条。
+         */
         if (contract.dice_requests?.length) {
-          const req = contract.dice_requests[0]!;
-          // 一键掷骰：把请求挂起来，界面给一个直接的「掷骰」按钮
-          useStore.getState().setPendingCheck({
-            skill: req.skill,
-            difficulty: req.difficulty,
-            reason: req.reason,
-          });
+          const store = useStore.getState();
+          const merged = [...store.pendingChecks];
+          for (const r of contract.dice_requests) {
+            if (!merged.some((x) => x.skill === r.skill)) {
+              merged.push({ skill: r.skill, difficulty: r.difficulty, reason: r.reason });
+            }
+          }
+          store.setPendingChecks(merged.slice(-6));
         }
       }
     } catch (e) {
@@ -354,19 +387,24 @@ export default function App() {
       content,
       check: badge,
     });
-    const note = `【引擎判定，不可更改】玩家${targetText}进行${skill}检定（难度：${difficultyLabel}），目标值 ${
-      badge.target
-    }%，掷出 ${badge.roll}，结果：${badge.label}。${
-      action.trim() ? `玩家想做的是：${action.trim()}` : ''
-    } 请严格依据这个结果续写剧情，不要替玩家发起新动作。`;
+    const note =
+      `【引擎判定，不可更改】玩家${targetText}进行${skill}检定（难度：${difficultyLabel}），` +
+      `${checkTargetText(badge)}，掷出 ${badge.roll}，结果：${badge.label}。` +
+      `${action.trim() ? `玩家想做的是：${action.trim()}。` : ''}` +
+      '请严格依据这个结果续写剧情，不要替玩家发起新动作。' +
+      '**这条结果已经由界面上的卡片单独呈现，你的正文里一个字都不要提' +
+      '“检定/判定/掷骰/成功/失败”——把结论化成事实写出来即可。**';
     await sendToGm(note);
   };
 
   const abort = () => abortRef.current?.abort();
 
-  /** 一键掷骰：响应守密人请求的检定，不用再选难度/对象 */
-  const quickCheck = async (skill: string, difficulty?: string) => {
-    useStore.getState().setPendingCheck(null);
+  /**
+   * 一键掷骰：响应守密人请求的检定，不用再选难度/对象。
+   * `index` 是它在待掷队列里的位置——掷掉它，后面的继续排队。
+   */
+  const quickCheck = async (skill: string, difficulty?: string, index = 0) => {
+    useStore.getState().removePendingCheck(index);
     await handleCheck(skill, (difficulty as Difficulty) ?? 'regular', '', '');
   };
 
@@ -438,7 +476,9 @@ export default function App() {
         .skillCheck(pm.check.skill, pm.check.difficulty ?? 'regular');
       useStore.getState().addMessage({ role: 'player', content: pm.content, check: badge });
       await sendToGm(
-        `【引擎判定，不可更改】玩家进行${pm.check.skill}检定，目标值 ${badge.target}%，掷出 ${badge.roll}，结果：${badge.label}。请严格依据这个结果续写剧情。`
+        `【引擎判定，不可更改】玩家进行${pm.check.skill}检定，${checkTargetText(badge)}，` +
+          `掷出 ${badge.roll}，结果：${badge.label}。请严格依据这个结果续写剧情，` +
+          `不要在正文里复述“检定/判定/成功/失败”等字样。`
       );
     } else {
       useStore.getState().addMessage({ role: 'player', content: pm.content });
@@ -452,11 +492,21 @@ export default function App() {
     setMobilePanel('chat');
   };
 
-  /** 点地图上的地点即动身：直接发给守密人，路上的转场由他替你演 */
+  /**
+   * 点地图上的地点：发出的是**意图**，不是"已经到达"。
+   *
+   * 为什么改：以前直接写成「我前往X」，等于替玩家落定了行程，
+   * 守密人只能顺着演，于是玩家可以在地图上反复横跳、想去哪就去哪，
+   * 模组的时间压力与封锁形同虚设。现在把决定权交回给世界——
+   * 路封了、天黑了、有人拦着、他根本不知道路，都可以用剧情里的理由挡下来。
+   */
   const travelTo = (location: string) => {
     if (streaming) return;
     setMobilePanel('chat');
-    void handleSend(`（我前往${location}）`);
+    void handleSend(
+      `（我打算前往「${location}」。这只是我此刻的打算，还不是已经发生的事——` +
+        `如果现在去不了，请用剧情里的理由把我拦下，并给我一个能继续往下走的线索。）`
+    );
   };
 
   const panelBtn = (key: Panel, label: string, hint: string) => (
@@ -570,8 +620,41 @@ export default function App() {
           onConfirm={doStartNew}
         />
       )}
+      {lastChanges && lastChanges.lines.length > 0 && (
+        <div
+          key={lastChanges.id}
+          className="rise-in fixed left-1/2 top-16 z-[68] w-[min(92vw,340px)] -translate-x-1/2 rounded-xl border border-ink-600 bg-ink-900/97 p-3 shadow-2xl"
+        >
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <span className="text-[11px] tracking-wider text-gold-400">状态变化</span>
+            <button
+              onClick={() => useStore.getState().clearChanges()}
+              className="text-[11px] text-mist-500 transition hover:text-mist-200"
+              title="收起"
+            >
+              ✕
+            </button>
+          </div>
+          <ul className="space-y-1">
+            {lastChanges.lines.map((l) => (
+              <li
+                key={l.text}
+                className={`text-[12px] leading-relaxed ${
+                  l.tone === 'down'
+                    ? 'text-blood-300'
+                    : l.tone === 'up'
+                      ? 'text-moss-400'
+                      : 'text-mist-300'
+                }`}
+              >
+                {l.text}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {toast && (
-        <div className="pointer-events-none fixed left-1/2 top-16 z-[70] -translate-x-1/2 rounded-full border border-moss-400/40 bg-ink-900/95 px-4 py-2 text-[12px] text-moss-400 shadow-lg">
+        <div className="pointer-events-none fixed left-1/2 top-32 z-[70] -translate-x-1/2 rounded-full border border-moss-400/40 bg-ink-900/95 px-4 py-2 text-[12px] text-moss-400 shadow-lg">
           {toast}
         </div>
       )}
@@ -583,6 +666,35 @@ export default function App() {
           >
             有新版本 · 点击立即更新
           </button>
+        </div>
+      )}
+      {/* 装到主屏之后才没有地址栏、能离线开，也不容易被系统清缓存——手机上是重点 */}
+      {installable && !installHintHidden && !updateReady && (
+        <div className="fixed inset-x-0 bottom-16 z-[74] flex justify-center px-4 lg:hidden">
+          <div className="flex items-center gap-2 rounded-full border border-ink-600 bg-ink-900/95 px-3 py-1.5 shadow-lg">
+            <span className="text-[11px] text-mist-300">装到手机主屏，像 App 一样用</span>
+            <button
+              onClick={async () => {
+                const ok = await promptInstall();
+                if (!ok) {
+                  localStorage.setItem('trpg.installHint', '1');
+                  setInstallHintHidden(true);
+                }
+              }}
+              className="shrink-0 rounded-full bg-gold-500 px-2.5 py-0.5 text-[11px] font-medium text-ink-950"
+            >
+              安装
+            </button>
+            <button
+              onClick={() => {
+                localStorage.setItem('trpg.installHint', '1');
+                setInstallHintHidden(true);
+              }}
+              className="shrink-0 text-[11px] text-mist-500"
+            >
+              以后
+            </button>
+          </div>
         </div>
       )}
       {welcome && (

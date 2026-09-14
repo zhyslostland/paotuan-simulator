@@ -3,9 +3,12 @@ import {
   applyDeltas,
   createInitialState,
   detectStatusEvents,
+  type AppliedDelta,
   type Companion,
   type GameState,
+  type InventoryItem,
   type StateDelta,
+  type Thread,
 } from '../core/state/gameState.js';
 
 export type { Companion };
@@ -55,6 +58,45 @@ export interface NpcLine {
   name: string;
   action?: string;
   line?: string;
+}
+
+/**
+ * 检定目标值的显示文案。
+ *
+ * 为什么要有它：目标值的含义随规则包而变——COC 的 d100 是"成功率百分比"，
+ * DnD 的 d20 是"检定加值"。早期 UI 与引擎提示里写死了 `%`，
+ * 换到 DnD 就会出现"目标值 +2%"这种自相矛盾的文案。
+ */
+export function checkTargetText(b: { target: number; mainDice?: string }): string {
+  return b.mainDice === '1d20'
+    ? `加值 ${b.target >= 0 ? '+' : ''}${b.target}`
+    : `目标值 ${b.target}%`;
+}
+
+/** 守密人要求、等待玩家掷骰的检定 */
+export interface PendingCheck {
+  skill: string;
+  difficulty?: string;
+  reason?: string;
+}
+
+/** 主页面"状态变化"提示里的一行 */
+export interface StateChangeLine {
+  text: string;
+  /** down = 变坏（掉血 / 掉理智 / 失去物品），up = 变好，info = 中性 */
+  tone: 'down' | 'up' | 'info';
+}
+
+/**
+ * 一轮结束后给玩家看的状态变化摘要。
+ *
+ * 为什么需要：状态栏（左侧角色卡）更新是"静默"的——玩家摔了一跤、
+ * 血掉了 3 点，主页面完全没有提示，等发现时已经不知道是什么时候变的。
+ */
+export interface StateChangeNotice {
+  id: string;
+  ts: number;
+  lines: StateChangeLine[];
 }
 
 /** 世界书条目。keys 命中时才注入提示词，避免撑爆上下文 */
@@ -254,21 +296,49 @@ export interface MapNode {
   note?: string;
 }
 
-/** 由 locations 兜底生成地图节点（没有显式关系时，至少把地点画出来） */
+/**
+ * 由 locations 兜底生成地图节点（没有显式关系图时用）。
+ *
+ * 关键点：**兜底也必须给出可达关系**。
+ * 早期这里只给节点、不给 links，结果"地图迷雾"因为"这个模组没有关系图"
+ * 而被整块关掉 —— 开局就把所有地点名摊在玩家眼前（用户报的"迷雾失效"）。
+ * 而地点表的书写顺序通常就是剧情推进顺序，所以这里按"一条线"串起来：
+ * 站在当前位置只能看见并走到相邻的下一个，走一步亮一片，既不剧透也不锁死。
+ */
 export function mapNodesOf(m: Module): MapNode[] {
-  if (m.mapNodes?.length) {
-    return m.mapNodes.filter((n) => n?.name?.trim()).map((n) => ({
+  const explicit = (m.mapNodes ?? [])
+    .filter((n) => n?.name?.trim())
+    .map((n) => ({
       name: n.name.trim(),
       links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
       note: n.note?.trim(),
     }));
+  if (explicit.length > 0) {
+    // 有关系图就照用它；一个 links 都没给，同样按顺序串成一条线
+    return explicit.some((n) => n.links.length > 0) ? explicit : chainNodes(explicit);
   }
-  return (m.locations ?? '')
-    .split('\n')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .slice(0, 9)
-    .map((name) => ({ name }));
+
+  const names: string[] = [];
+  for (const line of (m.locations ?? '').split('\n')) {
+    // 去掉"（接待室 / 盥洗室）"这类细节与"1. / - "这类列表符号，节点名要干净才画得下
+    const name = line
+      .split(/[（(]/)[0]!
+      .replace(/^\s*(?:[-*·•—]+|\d+\s*[.、)）])\s*/, '')
+      .trim();
+    if (name && !names.includes(name)) names.push(name);
+    if (names.length >= 9) break;
+  }
+  return names.length > 1
+    ? chainNodes(names.map((name) => ({ name })))
+    : names.map((name) => ({ name }));
+}
+
+/** 把一串地点按书写顺序连成一条线（相邻可走）——没有显式关系图时的兜底 */
+function chainNodes(nodes: MapNode[]): MapNode[] {
+  return nodes.map((n, i) => ({
+    ...n,
+    links: [nodes[i - 1]?.name, nodes[i + 1]?.name].filter((x): x is string => Boolean(x)),
+  }));
 }
 
 /**
@@ -1078,6 +1148,121 @@ function loadModule(): Module {
   return sanitizeModuleTokens(mergeModule(localStorage.getItem('trpg.module')), loadCharacter());
 }
 
+/**
+ * 把本轮的 applied 变更翻译成"人话"，给主页面的状态变化提示用。
+ *
+ * 只挑玩家真正关心的：数值条、背包、线索、在场人物、支线、地点。
+ * flags 与战斗轮不在这里报（它们各自有常驻界面）。
+ */
+function describeChanges(
+  applied: AppliedDelta[],
+  after: GameState,
+  vitalLabel: (key: string) => string
+): StateChangeLine[] {
+  const lines: StateChangeLine[] = [];
+  const seen = new Set<string>();
+  const push = (text: string, tone: StateChangeLine['tone']) => {
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    lines.push({ text, tone });
+  };
+
+  for (const a of applied) {
+    const t = a.delta.target;
+
+    if (t.startsWith('vitals.')) {
+      const key = t.slice('vitals.'.length);
+      const b = typeof a.before === 'number' ? a.before : null;
+      const af = typeof a.after === 'number' ? a.after : null;
+      if (b === null || af === null || b === af) continue;
+      const diff = af - b;
+      push(
+        `${vitalLabel(key)} ${b} → ${af}（${diff > 0 ? '+' : ''}${diff}）`,
+        diff > 0 ? 'up' : 'down'
+      );
+      continue;
+    }
+
+    if (t.startsWith('companions.')) {
+      const [, id, field, vitalKey] = t.split('.');
+      const name = after.companions.find((c) => c.id === id)?.name ?? id ?? '队友';
+      if (field === 'vitals' && vitalKey) {
+        const b = typeof a.before === 'number' ? a.before : null;
+        const af = typeof a.after === 'number' ? a.after : null;
+        if (b === null || af === null || b === af) continue;
+        push(
+          `${name} · ${vitalLabel(vitalKey)} ${b} → ${af}`,
+          af > b ? 'up' : 'down'
+        );
+      } else if (field === 'alive' && a.after === false) {
+        push(`${name} 倒下了`, 'down');
+      } else if (field === 'present') {
+        push(a.after ? `${name} 归队` : `${name} 离队`, a.after ? 'up' : 'info');
+      }
+      continue;
+    }
+
+    if (t === 'location') {
+      const af = String(a.after ?? '');
+      if (af && af !== a.before) push(`移步：${af}`, 'info');
+      continue;
+    }
+
+    if (t === 'inventory') {
+      const b = Array.isArray(a.before) ? (a.before as InventoryItem[]) : [];
+      const af = Array.isArray(a.after) ? (a.after as InventoryItem[]) : [];
+      if (!Array.isArray(a.before) || !Array.isArray(a.after)) continue;
+      for (const item of af) {
+        const prev = b.find((x) => x.id === item.id || x.name === item.name);
+        if (!prev) push(`获得：${item.name}${item.qty > 1 ? ` ×${item.qty}` : ''}`, 'up');
+        else if (prev.qty !== item.qty)
+          push(`${item.name} ×${prev.qty} → ×${item.qty}`, 'info');
+      }
+      for (const item of b) {
+        if (!af.find((x) => x.id === item.id || x.name === item.name))
+          push(`失去：${item.name}`, 'down');
+      }
+      continue;
+    }
+
+    if (t === 'clues') {
+      const b = Array.isArray(a.before) ? (a.before as string[]) : [];
+      const af = Array.isArray(a.after) ? (a.after as string[]) : [];
+      if (!Array.isArray(a.before) || !Array.isArray(a.after)) continue;
+      for (const c of af) if (!b.includes(c)) push(`新线索：${c}`, 'up');
+      for (const c of b) if (!af.includes(c)) push(`线索作废：${c}`, 'info');
+      continue;
+    }
+
+    if (t === 'npcsAlive') {
+      const b = Array.isArray(a.before) ? (a.before as string[]) : [];
+      const af = Array.isArray(a.after) ? (a.after as string[]) : [];
+      if (!Array.isArray(a.before) || !Array.isArray(a.after)) continue;
+      for (const n of af) if (!b.includes(n)) push(`${n} 登场`, 'info');
+      for (const n of b) if (!af.includes(n)) push(`${n} 离场`, 'info');
+      continue;
+    }
+
+    if (t === 'threads') {
+      const b = Array.isArray(a.before) ? (a.before as Thread[]) : [];
+      const af = Array.isArray(a.after) ? (a.after as Thread[]) : [];
+      if (!Array.isArray(a.before) || !Array.isArray(a.after)) continue;
+      for (const x of af) {
+        const prev = b.find((y) => y.name === x.name);
+        if (!prev) push(`支线：${x.name}`, 'info');
+        else if (prev.status !== x.status)
+          push(`支线 · ${x.name}：${x.status || '（无状态）'}`, 'info');
+      }
+      for (const x of b) if (!af.find((y) => y.name === x.name)) push(`支线了结：${x.name}`, 'up');
+      continue;
+    }
+  }
+  return lines;
+}
+
+/** 同一轮里可能分几次调用 applyModelDeltas（状态 + 地点），在这个窗口内的提示合并 */
+const CHANGE_MERGE_MS = 4000;
+
 interface Store {
   messages: Message[];
   gameState: GameState;
@@ -1107,8 +1292,15 @@ interface Store {
   messageImages: Record<string, string>;
   /** 地图总览图（data URI，存 IndexedDB） */
   mapImage: string;
-  /** 守密人要求的、等待玩家掷骰的检定（一键掷骰用） */
-  pendingCheck: { skill: string; difficulty?: string; reason?: string } | null;
+  /**
+   * 守密人要求的、等待玩家掷骰的检定。
+   *
+   * 为什么是队列：一轮里守密人可能同时要求多个检定（如"潜行"与"聆听"）。
+   * 早期只取 `dice_requests[0]`，后面的请求会被整个丢掉——玩家永远掷不到。
+   */
+  pendingChecks: PendingCheck[];
+  /** 最近一轮的状态变化摘要，主页面用它弹提示 */
+  lastChanges: StateChangeNotice | null;
   /** 正文排版设置 */
   typography: Typography;
   /** 音频设置（氛围音 / 自配 BGM / 判定音效） */
@@ -1153,8 +1345,14 @@ interface Store {
   setMapImage(url: string): void;
   /** 启动时把 IndexedDB 里的图片读回内存（异步，故不能放在初始化里） */
   hydrateImages(): Promise<void>;
-  /** 设置 / 清除待掷的检定 */
-  setPendingCheck(c: Store['pendingCheck']): void;
+  /** 覆盖整条待掷检定队列（守密人一次要求多个时用） */
+  setPendingChecks(list: PendingCheck[]): void;
+  /** 掷掉队列里的第 index 个 */
+  removePendingCheck(index: number): void;
+  /** 清空整条队列 */
+  clearPendingChecks(): void;
+  /** 清掉主页面的状态变化提示 */
+  clearChanges(): void;
   /** 更新正文排版设置 */
   setTypography(patch: Partial<Typography>): void;
   /** 更新音频设置（会同步启动/停止氛围音与 BGM） */
@@ -1176,8 +1374,8 @@ interface Store {
   snapshotTurn(playerMsgId: string): void;
   /** 回溯到某条玩家消息之前：恢复当时的状态并截断其后所有消息 */
   rewindBefore(msgId: string): void;
-  /** 从导出的存档恢复 */
-  loadSave(data: Partial<SaveFile>): void;
+  /** 从导出的存档恢复（会自动做版本迁移） */
+  loadSave(raw: unknown): void;
 }
 
 export interface SaveFile {
@@ -1192,6 +1390,86 @@ export interface SaveFile {
   worldbook?: WorldbookEntry[];
   snapshots?: Record<string, TurnSnapshot>;
 }
+
+/**
+ * 存档结构版本号。
+ *
+ * 改动存档结构时把它 +1，并在 `migrateSave` 里补一条迁移 ——
+ * 否则玩家读旧档时会因为缺字段而报错，看起来就像"存档坏了"。
+ */
+export const SAVE_VERSION = 2;
+
+/**
+ * 存档迁移：把任意历史版本的存档补成当前结构。
+ *
+ * 原则是**只补不删**：旧档里没有的新字段一律给安全默认值，
+ * 已有字段原样保留，绝不静默丢弃玩家的进度。
+ */
+export function migrateSave(raw: unknown): Partial<SaveFile> {
+  const data = { ...((raw ?? {}) as Partial<SaveFile>) };
+  const rid = loadRulesetId();
+  const character = data.character
+    ? migrateCharacter(data.character as unknown as Record<string, unknown>)
+    : loadCharacter();
+  if (data.character) data.character = character;
+
+  if (data.module) {
+    data.module = sanitizeModuleTokens(
+      { ...MERGE_MODULE_DEFAULTS, ...data.module } as Module,
+      character
+    );
+  }
+
+  if (data.gameState && typeof data.gameState === 'object') {
+    let gs = data.gameState as GameState;
+    // 1) 数值条补齐到当前规则包的全集（缺键在界面上会显示成 0）
+    gs = reconcileVitals(gs, character, rid);
+    // 2) 地图迷雾的"去过的地方"是后加的
+    if (!Array.isArray(gs.visited)) {
+      gs = { ...gs, visited: gs.location?.trim() ? [gs.location.trim()] : [] };
+    }
+    // 3) 支线表与战斗轮也是后加的
+    if (!Array.isArray(gs.threads)) gs = { ...gs, threads: [] };
+    if (!gs.combat || typeof gs.combat !== 'object') {
+      gs = { ...gs, combat: { active: false, round: 0, foes: [] } };
+    } else if (!Array.isArray(gs.combat.foes)) {
+      gs = { ...gs, combat: { ...gs.combat, foes: [] } };
+    }
+    if (!Array.isArray(gs.companions)) gs = { ...gs, companions: [] };
+    if (!Array.isArray(gs.inventory)) gs = { ...gs, inventory: [] };
+    if (!Array.isArray(gs.clues)) gs = { ...gs, clues: [] };
+    if (!Array.isArray(gs.npcsAlive)) gs = { ...gs, npcsAlive: [] };
+    if (!gs.flags || typeof gs.flags !== 'object') gs = { ...gs, flags: {} };
+    data.gameState = gs;
+  }
+
+  // 编年史：早期版本折叠后回合号会错乱，这里统一修正成单调递增
+  if (Array.isArray(data.chronicle) && data.chronicle.length > 0) {
+    let prev = 0;
+    data.chronicle = data.chronicle.map((c, i) => {
+      const turn = Number.isFinite(c?.turn) && c.turn > prev ? c.turn : prev + 1;
+      prev = turn;
+      return { ...c, turn };
+    });
+  }
+
+  data.version = SAVE_VERSION;
+  return data;
+}
+
+/** 读档时给模组补的最小默认值（只补键，不塞剧情内容） */
+const MERGE_MODULE_DEFAULTS: Module = {
+  title: '',
+  premise: '',
+  opening: '',
+  truth: '',
+  npcs: [],
+  locations: '',
+  clueChain: '',
+  acts: '',
+  endings: '',
+  notes: '',
+};
 
 let seq = 0;
 const uid = () => `${Date.now().toString(36)}-${(seq++).toString(36)}`;
@@ -1217,7 +1495,8 @@ export const useStore = create<Store>((set, get) => ({
   sceneImages: {},
   messageImages: {},
   mapImage: '',
-  pendingCheck: null,
+  pendingChecks: [],
+  lastChanges: null,
   typography: loadTypography(),
   audio: loadAudioConfig(),
 
@@ -1283,7 +1562,7 @@ export const useStore = create<Store>((set, get) => ({
     saveJson('trpg.chronicle', chronicle);
     saveJson('trpg.summary', summary);
     saveJson('trpg.snapshots', snapshots);
-    set({ messages: kept, gameState, chronicle, summary, snapshots });
+    set({ messages: kept, gameState, chronicle, summary, snapshots, pendingChecks: [], lastChanges: null });
   },
 
   setConfig(patch) {
@@ -1360,9 +1639,12 @@ export const useStore = create<Store>((set, get) => ({
       const clamped = { ...next.characteristics };
       for (const def of rs.characteristicDefs) {
         const v = clamped[def.key];
-        if (v != null) {
-          clamped[def.key] = Math.max(def.min, Math.min(def.max, Math.round(v)));
-        }
+        if (v == null) continue;
+        // 非有限数（空输入 / 手输 1e999）一律回落到默认值：
+        // 否则会存进一个看不见的 NaN，派生出来的血/蓝/理智全变成 NaN。
+        clamped[def.key] = Number.isFinite(v)
+          ? Math.max(def.min, Math.min(def.max, Math.round(v)))
+          : def.default;
       }
       next.characteristics = clamped;
     }
@@ -1553,8 +1835,20 @@ export const useStore = create<Store>((set, get) => ({
     set(patch);
   },
 
-  setPendingCheck(c) {
-    set({ pendingCheck: c });
+  setPendingChecks(list) {
+    set({ pendingChecks: list });
+  },
+
+  removePendingCheck(index) {
+    set((s) => ({ pendingChecks: s.pendingChecks.filter((_, i) => i !== index) }));
+  },
+
+  clearPendingChecks() {
+    set({ pendingChecks: [] });
+  },
+
+  clearChanges() {
+    set({ lastChanges: null });
   },
 
   setTypography(patch) {
@@ -1582,10 +1876,20 @@ export const useStore = create<Store>((set, get) => ({
   addChronicle(text, location) {
     const t = text.trim();
     if (!t) return;
-    const next = [
-      ...get().chronicle,
-      { turn: get().chronicle.length + 1, text: t, location },
-    ];
+    const list = get().chronicle;
+    /*
+     * 回合号必须用"现有最大号 + 1"，不能用 length + 1。
+     *
+     * 原因：`foldChronicle` 会把早期条目折进摘要、只留最近 20 条，
+     * 此时 length 已经小于实际回合数。若还用 length+1，新条目会拿到一个
+     * 比现有条目更小的号（如已有 31..50，新条目却编号 21），
+     * 事件日志在提示词里就成了乱序，`key={c.turn}` 也会撞车。
+     */
+    const lastTurn = list.reduce(
+      (m, c) => (Number.isFinite(c.turn) && c.turn > m ? c.turn : m),
+      0
+    );
+    const next = [...list, { turn: lastTurn + 1, text: t, location }];
     localStorage.setItem('trpg.chronicle', JSON.stringify(next));
     set({ chronicle: next });
   },
@@ -1688,6 +1992,9 @@ export const useStore = create<Store>((set, get) => ({
       worldbook: keptWorldbook,
       messageImages: {},
       mapImage: '',
+      // 上一局遗留的待掷检定与状态提示也一并清掉
+      pendingChecks: [],
+      lastChanges: null,
     });
   },
 
@@ -1765,6 +2072,27 @@ export const useStore = create<Store>((set, get) => ({
     }
     saveJson('trpg.gameState', report.state);
     set({ gameState: report.state });
+
+    /*
+     * 主页面"状态变化"提示。
+     * 角色卡里的数值是静默更新的——玩家摔了一跤、血掉了 3 点，
+     * 如果主页面不提示，等他偶然翻到角色卡时已经不知道是什么时候变的。
+     */
+    const lines = describeChanges(report.applied, report.state, (k) => {
+      const def = getRuleset(rulesetId).vitalDefs.find((v) => v.key === k);
+      return def?.label ?? k.toUpperCase();
+    });
+    const now = Date.now();
+    const prev = get().lastChanges;
+    const sameTurn = Boolean(prev) && now - prev!.ts < CHANGE_MERGE_MS;
+    const merged: StateChangeLine[] = sameTurn ? [...prev!.lines] : [];
+    for (const l of lines) if (!merged.some((x) => x.text === l.text)) merged.push(l);
+    set({
+      lastChanges: merged.length
+        ? { id: sameTurn ? prev!.id : uid(), ts: now, lines: merged }
+        : null,
+    });
+
     if (report.rejected.length > 0) {
       console.warn('[跑团] 被拒绝的状态变更：', report.rejected);
     }
@@ -1772,7 +2100,9 @@ export const useStore = create<Store>((set, get) => ({
     for (const e of events) get().addChronicle(e.text, get().gameState.location);
   },
 
-  loadSave(data) {
+  loadSave(raw) {
+    // 先过一遍迁移：任何历史版本的存档都要能读进来
+    const data = migrateSave(raw);
     set((s) => ({
       character: data.character ? { ...s.character, ...data.character } : s.character,
       module: data.module ?? s.module,

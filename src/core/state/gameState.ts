@@ -436,6 +436,57 @@ export function applyDeltas(
       const list = next[root] as unknown[];
       const before = deepClone(list);
 
+      /*
+       * 物品"按数量"增减。
+       *
+       * 为什么必须支持：模型天然会写"用掉一发子弹"，早期只支持整件 add/remove，
+       * 结果消耗品被消耗时会静默失败——东西永远用不完，很出戏。
+       * 写法：{ target: "inventory", op: "dec", value: "子弹", amount: 1 }
+       * 也接受 { target: "inventory.子弹", op: "dec", amount: 1 }（模型两种都会写）。
+       */
+      if (root === 'inventory' && (delta.op === 'dec' || delta.op === 'inc')) {
+        const raw = delta.value;
+        const fromValue =
+          typeof raw === 'object' && raw !== null
+            ? String((raw as InventoryItem).id ?? (raw as InventoryItem).name ?? '')
+            : raw == null
+              ? ''
+              : String(raw);
+        const key = (fromValue || rest.join('.')).trim();
+        if (!key) {
+          rejected.push({ delta, reason: 'inventory 数量变更缺少物品名' });
+          continue;
+        }
+        const idx = (list as InventoryItem[]).findIndex((i) => i.id === key || i.name === key);
+        if (idx < 0) {
+          rejected.push({ delta, reason: `背包中不存在物品 ${key}` });
+          continue;
+        }
+        let amount: number;
+        if (delta.amount === undefined) amount = 1;
+        else if (typeof delta.amount === 'number') amount = delta.amount;
+        else {
+          const outcome = roll(delta.amount, rng);
+          rolls.push({ expression: outcome.expression, total: outcome.total });
+          amount = outcome.total;
+        }
+        if (!Number.isFinite(amount) || amount <= 0) {
+          rejected.push({ delta, reason: '数量变更需要正数 amount' });
+          continue;
+        }
+        const item = (list as InventoryItem[])[idx]!;
+        const current = Number.isFinite(item.qty) ? item.qty : 1;
+        const after = delta.op === 'dec' ? current - amount : current + amount;
+        if (after <= 0) {
+          // 用光了就从背包里移除；"永远用不完"和"扣到负数"一样出戏
+          (list as InventoryItem[]).splice(idx, 1);
+        } else {
+          item.qty = after;
+        }
+        applied.push({ delta, resolvedAmount: amount, before, after: deepClone(list) });
+        continue;
+      }
+
       if (delta.op === 'add') {
         if (delta.value === undefined || delta.value === null || delta.value === '') {
           rejected.push({ delta, reason: 'add 需要 value' });

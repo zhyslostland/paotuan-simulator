@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
-import { useStore, TYPOGRAPHY_PRESETS, type ThemeName } from './store';
+import { useStore, TYPOGRAPHY_PRESETS, SAVE_VERSION, checkTargetText, type ThemeName } from './store';
 import { ConfirmDialog } from './ConfirmDialog';
+import {
+  canInstall,
+  isStandalone,
+  onInstallAvailable,
+  promptInstall,
+} from '../pwa.js';
 import {
   AMBIENCE_LABEL,
   delAudio,
@@ -151,6 +157,7 @@ const SECTIONS = [
   { id: 'sec-look', label: '外观与排版' },
   { id: 'sec-audio', label: '音频' },
   { id: 'sec-data', label: '数据与存档' },
+  { id: 'sec-install', label: '安装到设备' },
 ];
 
 /** 设置里的一节标题：带锚点 id，供顶部快速跳转 */
@@ -574,6 +581,18 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [slots, setSlots] = useState<SlotMeta[]>(readSlots());
   const [slotName, setSlotName] = useState('');
   const [customVersion, setCustomVersion] = useState(0);
+  const [installable, setInstallable] = useState(false);
+  const [standalone, setStandalone] = useState(false);
+
+  // 安装可用性由浏览器决定，可能晚于首屏才知道，所以订阅一下
+  useEffect(() => {
+    const sync = () => {
+      setInstallable(canInstall());
+      setStandalone(isStandalone());
+    };
+    sync();
+    return onInstallAvailable(sync);
+  }, []);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -605,7 +624,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const exportSave = () => {
     const s = useStore.getState();
     const payload = {
-      version: 1,
+      version: SAVE_VERSION,
       exportedAt: new Date().toISOString(),
       character: s.character,
       module: s.module,
@@ -637,7 +656,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         const who = m.role === 'gm' ? '守密人' : m.role === 'player' ? '玩家' : '系统';
         let line = `【${who}】${m.content}`;
         if (m.check) {
-          line += `\n  ↳ ${m.check.skill} ${m.check.target}% · 掷出 ${m.check.roll} · ${m.check.label}`;
+          line += `\n  ↳ ${m.check.skill} ${checkTargetText(m.check)} · 掷出 ${m.check.roll} · ${m.check.label}`;
         }
         if (m.npcLines?.length) {
           for (const n of m.npcLines) {
@@ -722,7 +741,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       title: s.module.title || '（无模组）',
     };
     const payload = {
-      version: 1,
+      version: SAVE_VERSION,
       character: s.character,
       module: s.module,
       gameState: s.gameState,
@@ -730,6 +749,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
       chronicle: s.chronicle,
       summary: s.summary,
       worldbook: s.worldbook,
+      // 快照要一起存：没有它，「回溯 / 重掷」在读档后会全部消失
+      snapshots: s.snapshots,
     };
     try {
       localStorage.setItem(slotKey(id), JSON.stringify(payload));
@@ -1392,6 +1413,46 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 </ul>
               )}
             </div>
+          </div>
+
+          <GroupTitle
+            id="sec-install"
+            title="安装到设备"
+            hint="装到手机主屏后没有地址栏、能离线打开，也不容易被系统清掉本地存档。"
+          />
+
+          <div>
+            {standalone ? (
+              <p className="rounded-lg border border-moss-400/40 bg-moss-400/10 px-3 py-2 text-[11px] leading-relaxed text-moss-400">
+                已经以「独立应用」的方式在运行了，不用再装一次。
+              </p>
+            ) : (
+              <>
+                {installable && (
+                  <button
+                    onClick={() => void promptInstall()}
+                    className="w-full rounded-lg bg-gold-500 px-3 py-2 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+                  >
+                    安装到本机（一键）
+                  </button>
+                )}
+                <div className="mt-2 space-y-1.5 rounded-lg border border-ink-700 bg-ink-850/60 p-3 text-[11px] leading-relaxed text-mist-400">
+                  <p className="text-mist-300">手动添加到主屏：</p>
+                  <p>
+                    <b className="text-mist-200">iPhone / iPad</b>：用 Safari 打开 → 底部「分享」→
+                    「添加到主屏幕」。
+                  </p>
+                  <p>
+                    <b className="text-mist-200">Android</b>：用 Chrome 打开 → 右上角「⋮」→
+                    「添加到主屏幕 / 安装应用」。
+                  </p>
+                  <p>
+                    <b className="text-mist-200">电脑</b>：Chrome / Edge 地址栏右侧会出现「安装」图标，
+                    点一下就变成一个独立窗口的应用。
+                  </p>
+                </div>
+              </>
+            )}
           </div>
 
           <GroupTitle id="sec-keys" title="快捷键" />

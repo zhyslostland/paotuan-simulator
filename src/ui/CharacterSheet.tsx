@@ -54,8 +54,16 @@ export function CheckDialog({
   );
 
   return (
+    /*
+     * 检定面板：右侧浮动、**不模糊也不透**。
+     *
+     * 早期用了 `backdrop-blur-sm` + 半透明底，结果背后的故事正文被糊成一团，
+     * 玩家读不到"自己正在回应什么"，等于边看边瞎。
+     * 现在改成不透明底色（把正文完全挡住而不是糊掉），并在宽屏上收窄，
+     * 好让左边的正文仍然看得见。
+     */
     <div className="pointer-events-none fixed inset-y-0 right-0 z-50 flex items-center justify-end p-4">
-      <div className="pointer-events-auto max-h-[92vh] w-full max-w-sm overflow-y-auto rounded-2xl border border-ink-600 bg-ink-900/95 p-5 shadow-2xl backdrop-blur-sm">
+      <div className="pointer-events-auto max-h-[92vh] w-full max-w-sm overflow-y-auto rounded-2xl border border-ink-600 bg-ink-900 p-5 shadow-2xl lg:max-w-xs">
         <h3 className="font-serif text-[15px] text-mist-100">
           {skill} 检定
           <span className="ml-2 text-[12px] text-gold-500/80">{valueText}</span>

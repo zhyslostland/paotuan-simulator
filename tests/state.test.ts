@@ -478,3 +478,74 @@ describe('支线表（threads）', () => {
     expect(state.threads).toHaveLength(1);
   });
 });
+
+describe('背包按数量消耗', () => {
+  const withAmmo = (): GameState => ({
+    ...base(),
+    inventory: [
+      { id: 'ammo', name: '子弹', qty: 3 },
+      { id: 'bandage', name: '绷带', qty: 1 },
+    ],
+  });
+
+  it('3 发子弹用掉 1 发后剩 2（qty 递减）', () => {
+    const { state, applied } = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'dec', value: '子弹', amount: 1 },
+    ]);
+    expect(state.inventory.find((i) => i.name === '子弹')!.qty).toBe(2);
+    expect(applied[0]!.resolvedAmount).toBe(1);
+  });
+
+  it('只带 value（按名字命中）也支持，不写 amount 时默认扣 1', () => {
+    const { state } = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'dec', value: '子弹' },
+    ]);
+    expect(state.inventory.find((i) => i.name === '子弹')!.qty).toBe(2);
+  });
+
+  it('扣到 0 就从背包里移除（不能留下 0 件或负数）', () => {
+    const { state } = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'dec', value: '子弹', amount: 3 },
+    ]);
+    expect(state.inventory.some((i) => i.name === '子弹')).toBe(false);
+
+    const over = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'dec', value: '绷带', amount: 5 },
+    ]);
+    expect(over.state.inventory.some((i) => i.name === '绷带')).toBe(false);
+  });
+
+  it('也接受 target 写成 inventory.<物品名> 的形式', () => {
+    const { state } = applyDeltas(withAmmo(), [
+      { target: 'inventory.子弹', op: 'dec', amount: 2 },
+    ]);
+    expect(state.inventory.find((i) => i.name === '子弹')!.qty).toBe(1);
+  });
+
+  it('amount 可以是骰子表达式', () => {
+    const { state, rolls } = applyDeltas(
+      { ...withAmmo(), inventory: [{ id: 'ammo', name: '子弹', qty: 10 }] },
+      [{ target: 'inventory', op: 'dec', value: '子弹', amount: '1d6' }],
+      { rng: seededRng(5) }
+    );
+    expect(rolls).toHaveLength(1);
+    expect(state.inventory[0]!.qty).toBe(10 - rolls[0]!.total);
+  });
+
+  it('inc 可以补给；不存在的物品与非法数量会被拒绝', () => {
+    const add = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'inc', value: '子弹', amount: 4 },
+    ]);
+    expect(add.state.inventory.find((i) => i.name === '子弹')!.qty).toBe(7);
+
+    const missing = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'dec', value: '不存在的', amount: 1 },
+    ]);
+    expect(missing.rejected).toHaveLength(1);
+
+    const bad = applyDeltas(withAmmo(), [
+      { target: 'inventory', op: 'dec', value: '子弹', amount: 0 },
+    ]);
+    expect(bad.rejected).toHaveLength(1);
+  });
+});
