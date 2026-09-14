@@ -195,6 +195,8 @@ export function applyPreset(data: GenPreset): void {
       notes: m.notes ?? '',
       sourceNote: m.source_note,
     });
+    // 整套预设里带的是**新模组**，清掉上一个模组的派生数据
+    s.clearModuleDerived();
   }
 
   // 4. 世界书（细节层）

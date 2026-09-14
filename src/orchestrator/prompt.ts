@@ -251,7 +251,11 @@ const NARRATIVE_CRAFT = `## 叙事质感（怎么把故事写好看）
 - **玩家迷茫时你要推一把**。如果他连续两三回合在原地打转、反复盘问同一件事，
   说明**你没给够抓手**——这时要主动抛出新线索、让 NPC 透露一点、或让局势恶化
   （门外有响动、时间到了、有人找上门），把"接下来可以做什么"递到他手边。
-  **玩家不知道该干嘛，永远是守密人的失职，不是玩家的问题。**`;
+  **玩家不知道该干嘛，永远是守密人的失职，不是玩家的问题。**
+- **每场收尾留一个"自然的下一步抓手"**（用户 2026-09-14 定）：把可做的事写进**故事里**——
+  一句没说完的话、一个刚被提到的地方、一个正在逼近的期限。
+  这是**剧情内的引导**，不是给玩家列选项菜单：**绝不要**写"你可以去 A 或 B""接下来可以尝试……"。
+  做得好的样子是：读者读完这段，自己就想去某个地方、想找某个人问一句。`;
 
 const OUTPUT_CONTRACT = `## 输出格式（必须遵守）
 
@@ -613,12 +617,25 @@ export const CHECK_RETRY_NOTE =
  * 只匹配那几个**只会出现在模板里**的短语，避免误伤正常叙事。
  */
 const TRAVEL_ECHO_RE =
-  /[（(][^）)]{0,60}(?:我打算前往|如果现在去不了|把我拦下|这只是我(?:此刻)?的打算)[^）)]{0,60}[）)]/g;
+  /[（(][^）)]{0,60}(?:我打算前往|如果现在去不了|把我拦下|这只是我(?:此刻)?的打算|意图\s*[:：]?\s*前往)[^）)]{0,60}[）)]/g;
+/** 单独一行的"纯意图"括号（如「（意图：前往「码头区」）」），整行删掉 */
+const TRAVEL_ECHO_LINE_RE = /^[ \t]*[（(]\s*意图\s*[:：][^）)]*[）)][ \t]*$/gm;
 
 export function stripTravelEcho(text: string): string {
-  if (!TRAVEL_ECHO_RE.test(text)) return text;
+  /*
+   * 注意：正则里的短语必须覆盖**当前** `travelTo` 发出的模板。
+   * 早期只写了旧模板（"我打算前往…"），换了新模板（"（意图：前往「X」）"）却没同步，
+   * 兜底形同虚设——而提示词里又把这个新串当范例写给了模型，等于亲手教它照抄（协作方 N1）。
+   */
+  if (!TRAVEL_ECHO_RE.test(text) && !TRAVEL_ECHO_LINE_RE.test(text)) return text;
   TRAVEL_ECHO_RE.lastIndex = 0;
-  return text.replace(TRAVEL_ECHO_RE, '').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  TRAVEL_ECHO_LINE_RE.lastIndex = 0;
+  return text
+    .replace(TRAVEL_ECHO_LINE_RE, '')
+    .replace(TRAVEL_ECHO_RE, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /** 缺失契约时的"只补契约"指令：不重写正文，只要 JSON 块 */

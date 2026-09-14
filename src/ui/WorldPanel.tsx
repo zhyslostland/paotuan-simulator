@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore, mapNodesOf, type MapNode } from './store';
 import { ImageField } from './ImageField';
+import { AnchorList } from './EndingScreen';
 import { mapImagePrompt, sceneImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
 
@@ -240,6 +241,14 @@ function MapGraph({
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const [dragging, setDragging] = useState(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  /**
+   * "刚才是不是拖过"的抑制标志。
+   *
+   * 不能复用 `dragRef.current?.moved`：click 在 pointerup **之后**才派发，
+   * 而 endDrag 已经在 pointerup 里把 dragRef 清成 null 了，守卫会恒为假——
+   * 于是"拖着地图在另一个地点上松手"会误触发一次移动（协作方 N3）。
+   */
+  const suppressClick = useRef(false);
 
   // 放在最前面：下面的滚轮监听闭包要用到它（组件可能提前 return，晚定义会踩 TDZ）
   const clampZoom = (z: number) => Math.max(0.7, Math.min(3, Number(z.toFixed(2))));
@@ -252,19 +261,28 @@ function MapGraph({
    * 表现为"点地图没反应"。
    */
   const endDrag = () => {
+    // 把"拖过"这件事先存下来，供随后的 click 判断（dragRef 马上就要被清掉）
+    suppressClick.current = Boolean(dragRef.current?.moved);
     dragRef.current = null;
     setDragging(false);
+    // click 紧跟在 pointerup 之后同步派发，下一轮宏任务再放开
+    setTimeout(() => {
+      suppressClick.current = false;
+    }, 0);
   };
 
   /*
    * 滚轮缩放。React 的 onWheel 是**被动监听**，里面 preventDefault 无效，
    * 所以这里手动挂一个 passive:false 的原生监听。
-   * 不再要求按住 Ctrl —— 触屏没有 Ctrl，鼠标用户也不知道要按。
+   *
+   * 但**不能无条件 preventDefault**：地图占满侧栏宽度，用户把鼠标放在上面想滚页面时会发现滚不动（协作方 N4）。
+   * 折中：按住 Ctrl / ⌘ 才缩放，裸滚轮交还给页面；可发现路径交给右上角的 ＋/－ 按钮（现在真的能点了）。
    */
   useEffect(() => {
     const el = surfaceRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       setZoom((z) => clampZoom(z - e.deltaY * 0.002));
     };
@@ -377,8 +395,8 @@ function MapGraph({
                 <g
                   key={nd.name}
                   onClick={() => {
-                    // 拖动过就不算点击，避免平移地图时不慎搬家
-                    if (dragRef.current?.moved) return;
+                    // 刚拖过就不算点击，避免松手时压在某个地点上误搬家
+                    if (suppressClick.current) return;
                     if (known) onTravel?.(nd.name);
                   }}
                   style={{ cursor: known && onTravel ? 'pointer' : 'default' }}
@@ -570,7 +588,7 @@ function MapSection({
 
       <p className="mt-1.5 text-[10px] leading-relaxed text-mist-500/70">
         {hasLinks
-          ? '连线表示走得通。拖动可平移，滚轮可直接缩放（也可用右上角加减）。' +
+          ? '连线表示走得通。拖动可平移，右上角加减缩放（按住 Ctrl 滚滚轮也行）。' +
             '实心地点的你去过，虚线的只是听说过。' +
             '点地点即动身——守密人若认为此刻去不了，会用剧情里的理由拦下你。'
           : '点地点即动身。（这个模组没有给出地点间的可达关系，已按地点顺序连成一条线。）'}
@@ -600,11 +618,14 @@ function MapSection({
 export function WorldPanel({
   onPromptCompanion,
   onTravel,
+  onRewind,
 }: {
   onPromptCompanion?: (name: string) => void;
   onTravel?: (location: string) => void;
+  onRewind?: (msgId: string) => void;
 }) {
   const gameState = useStore((s) => s.gameState);
+  const snapshots = useStore((s) => s.snapshots);
   const chronicle = useStore((s) => s.chronicle);
   const summary = useStore((s) => s.summary);
   const sceneImages = useStore((s) => s.sceneImages);
@@ -637,6 +658,12 @@ export function WorldPanel({
    * 去过的画实心，只是听说的画虚线空心——信息不丢，探索感也不被稀释。
    * visited 里存的可能是完整地点名（"霍尔特的侦探事务所"），节点名是简称，这里模糊匹配。
    */
+  // 关键抉择（回溯锚点）：倒序，最近的岔路口排最前
+  const anchors = messages
+    .filter((m) => m.role === 'player' && snapshots[m.id]?.key)
+    .map((m) => ({ id: m.id, label: snapshots[m.id]!.label, snap: snapshots[m.id]! }))
+    .reverse();
+
   const visitedNames = new Set<string>();
   for (const v of gameState.visited ?? []) {
     const t = v.trim();
@@ -677,6 +704,19 @@ export function WorldPanel({
         mapImage={mapImage}
         onTravel={onTravel}
       />
+
+      {/*
+       * 关键节点（回溯锚点）。
+       * 结档页里能回溯，但平常也得有个入口——不然玩家只记得"某一步好像走错了"，
+       * 却要在一百多条消息里翻。这里只列被标为关键的那几个岔路口。
+       */}
+      <Section title={`关键抉择${anchors.length ? `（${anchors.length}）` : ''}`}>
+        {anchors.length > 0 ? (
+          <AnchorList anchors={anchors} onRewind={(id) => onRewind?.(id)} />
+        ) : (
+          <Empty text="还没有关键抉择——掷骰、进入战斗、转移地点、拿到新线索都会自动记一个。" />
+        )}
+      </Section>
 
       {module.premise && (
         <Section title="剧情简介">

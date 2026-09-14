@@ -29,11 +29,21 @@ import {
   updateSW,
 } from '../pwa.js';
 import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.js';
-import { FOLD_SYSTEM } from '../orchestrator/generate.js';
+import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
+import { EndingScreen } from './EndingScreen';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 
 type Panel = 'chat' | 'character' | 'world';
+
+/** 结局正文要不来时的兜底：必须是"故事里的句子"，不能变成程序提示 */
+const FALLBACK_ENDING: Record<string, string> = {
+  death:
+    '意识一层层退下去，最后剩下的是很远处的声音。故事在这里断了线——具体断在哪一处，要看你自己记得的那一段。',
+  insanity:
+    '他终于看清了那件东西本来的样子。只是从这一刻起，再也分不清哪些是眼前的、哪些不是了。',
+  other: '事情告一段落。留下来的东西比带走的要多。',
+};
 
 /** 事件日志超过这个条数就把早期的折进摘要 */
 const CHRONICLE_FOLD_AT = 50;
@@ -72,6 +82,7 @@ export default function App() {
   const [pendingStart, setPendingStart] = useState(false);
   const [toast, setToast] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
+  const [showEnding, setShowEnding] = useState(false);
   const [installable, setInstallable] = useState(false);
   /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
   const [installHintHidden, setInstallHintHidden] = useState(
@@ -98,6 +109,15 @@ export default function App() {
     const t = setTimeout(() => useStore.getState().clearChanges(), 9000);
     return () => clearTimeout(t);
   }, [lastChanges?.id]);
+
+  /*
+   * 重新打开页面时，如果这一局已经结档了（结局正文也写好了），把结档页顶上来。
+   * 只看 `text` 有值的：空 text 表示"结论已定但守密人还没写结局"，那还是留在故事页。
+   */
+  const endedText = gameState.ending?.text ?? '';
+  useEffect(() => {
+    if (endedText) setShowEnding(true);
+  }, [endedText]);
 
   // PWA 有新版本 → 弹更新横幅，否则用户会一直卡在旧版本
   useEffect(() => {
@@ -203,14 +223,31 @@ export default function App() {
     }
   };
 
-  /** 流式过程中屏蔽尚未写完的 JSON 契约块，并清掉模型偶发的"过程性"文字 */
+  /**
+   * 流式过程中屏蔽尚未写完的 JSON 契约块，并清掉模型偶发的"过程性"文字。
+   * 模板清洗也放在这里：落库前再洗一次已经太晚，流式时玩家已经看见了（协作方 N1）。
+   */
   const visible = (raw: string) => {
     const i = raw.search(/```json/i);
-    return stripMeta(i >= 0 ? raw.slice(0, i) : raw);
+    return stripTravelEcho(stripMeta(i >= 0 ? raw.slice(0, i) : raw));
+  };
+
+  /**
+   * 结档之后不再接受新行动。
+   *
+   * 用户定调"死亡 = 结档"：这段故事已经收束，继续往里输入只会破坏它。
+   * 想继续玩，走回溯或开新团——两条路都在结档页上摆着。
+   */
+  const blockedByEnding = () => {
+    if (!useStore.getState().gameState.ending) return false;
+    setToast('这一局已经结档了 —— 回溯到关键抉择，或用这个模组再开一局');
+    setTimeout(() => setToast(''), 3200);
+    return true;
   };
 
   const sendToGm = async (engineNote?: string) => {
     if (streaming) return;
+    if (blockedByEnding()) return;
     if (!config.apiKey) {
       addMessage({
         role: 'system',
@@ -347,6 +384,31 @@ export default function App() {
         content: finalBody || '（模型没有返回叙事内容）',
         npcLines,
       });
+
+      /*
+       * 关键决策点（回溯锚点）。
+       * 结档时玩家要能从"值得重来的那几个岔路口"里挑一个退回去，
+       * 而不是在上百条消息里翻。标记规则刻意保守：只标真正改变走向的回合。
+       */
+      if (lastPlayer) {
+        const reasons: string[] = [];
+        if (lastPlayer.check) reasons.push(`掷骰：${lastPlayer.check.skill}`);
+        for (const d of contract?.state_delta ?? []) {
+          if (d.target === 'combat.active') reasons.push(d.value ? '进入战斗' : '战斗结束');
+          else if (d.target === 'location') reasons.push(`移步：${String(d.value ?? '')}`);
+          else if (d.target === 'clues' && d.op === 'add') reasons.push('新线索');
+          else if (d.target === 'threads' && d.op === 'add') reasons.push('新支线');
+          else if (d.target === 'vitals.hp' && d.op === 'dec') {
+            // 数值型只认"掉了不少"；骰子表达式（"1d6"这种真挨了一下）一律算
+            if (typeof d.amount === 'string' || (typeof d.amount === 'number' && d.amount >= 3))
+              reasons.push('受伤');
+          } else if (d.target === 'vitals.san' && d.op === 'dec') {
+            if (typeof d.amount === 'string' || (typeof d.amount === 'number' && d.amount >= 3))
+              reasons.push('理智受创');
+          }
+        }
+        if (reasons.length > 0) useStore.getState().markSnapshotKey(lastPlayer.id, reasons[0]);
+      }
       // 剧情里出现了候选队友的名字 → 标记为"已登场"（未登场不可入队）
       useStore.getState().markCandidatesMet(finalBody);
 
@@ -388,9 +450,54 @@ export default function App() {
 
     // 放在流结束之后：玩家已经在读文本了，压缩不占用等待时间
     await foldChronicleIfNeeded();
+
+    /*
+     * 结档：引擎检测到生命/理智走到尽头时，`ending.text` 是空的——拿它当信号，
+     * 让守密人写一段收束叙事再填进去。写不出来也给一句兜底，绝不留白屏。
+     */
+    const pending = useStore.getState().gameState.ending;
+    if (pending && !pending.text) {
+      await requestEnding(pending.kind);
+      setShowEnding(true);
+    }
+  };
+
+  /** 向守密人要一段结局正文（结档页用） */
+  const requestEnding = async (kind: 'death' | 'insanity' | 'other') => {
+    const s = useStore.getState();
+    try {
+      const text = await chat(
+        [
+          {
+            role: 'system',
+            content: endingSystemPrompt(
+              kind,
+              getGenre(s.genreId, s.customGenres),
+              s.module,
+              s.character
+            ),
+          },
+          {
+            role: 'user',
+            content:
+              `这是这一局最后发生的事：\n${s.chronicle
+                .slice(-10)
+                .map((c) => `${c.turn}. ${c.text}`)
+                .join('\n')}\n\n请写结局。`,
+          },
+        ],
+        { ...s.config, maxTokens: 900, temperature: 0.9 }
+      );
+      useStore.getState().setEnding(kind, text.trim());
+    } catch {
+      /* 要不到正文也要结档，给一句不跳出戏的兜底 */
+      useStore.getState().setEnding(kind, FALLBACK_ENDING[kind] ?? FALLBACK_ENDING.other!);
+    }
   };
 
   const handleSend = async (text: string) => {
+    // 先拦，避免留下一条永远等不到回应的玩家消息
+    if (blockedByEnding()) return;
     addMessage({ role: 'player', content: text });
     await sendToGm();
   };
@@ -402,6 +509,7 @@ export default function App() {
     action = ''
   ) => {
     if (streaming) return;
+    if (blockedByEnding()) return;
     const badge = skillCheck(skill, difficulty);
     // 判定音效：只在大成功 / 大失败这两个"值得记住的瞬间"响
     const audioCfg = useStore.getState().audio;
@@ -465,6 +573,7 @@ export default function App() {
     setPendingStart(false);
     setShowPrep(false);
     setShowSettings(false);
+    setShowEnding(false);
     setMobilePanel('chat');
     setDraft('');
     setToast('已开新团，按模组开场');
@@ -478,6 +587,12 @@ export default function App() {
     const pm = s.messages.find((m) => m.id === msgId);
     if (!pm || pm.role !== 'player') return;
     s.rewindBefore(msgId);
+    /*
+     * 回溯 = 把这段故事退回去，所以结档状态必须一起清掉。
+     * 不清的话，玩家从结档页退回到中途，界面还会顶着"终幕"。
+     */
+    useStore.getState().clearEnding();
+    setShowEnding(false);
     setDraft(pm.content);
     setMobilePanel('chat');
   };
@@ -631,13 +746,21 @@ export default function App() {
           </div>
           <div className={mobilePanel === 'world' ? 'h-full lg:hidden' : 'hidden'}>
             <div className="h-full overflow-y-auto">
-              <WorldPanel onPromptCompanion={promptCompanion} onTravel={travelTo} />
+              <WorldPanel
+                onPromptCompanion={promptCompanion}
+                onTravel={travelTo}
+                onRewind={rewindTo}
+              />
             </div>
           </div>
         </main>
 
         <aside className="hidden w-64 shrink-0 overflow-y-auto border-l border-ink-700 bg-ink-900 lg:block xl:w-72">
-          <WorldPanel onPromptCompanion={promptCompanion} onTravel={travelTo} />
+          <WorldPanel
+            onPromptCompanion={promptCompanion}
+            onTravel={travelTo}
+            onRewind={rewindTo}
+          />
         </aside>
       </div>
 
@@ -786,6 +909,20 @@ export default function App() {
             const skill = checkSkill;
             setCheckSkill(null);
             void handleCheck(skill, 'regular', target, action);
+          }}
+        />
+      )}
+      {/*
+       * 结档页：死亡 / 理智归零 = 这段故事结束。
+       * 它不是"你死了，请重来"的弹窗，而是一屏收束叙事 + 回溯入口。
+       */}
+      {showEnding && gameState.ending?.text && (
+        <EndingScreen
+          onClose={() => setShowEnding(false)}
+          onRewind={rewindTo}
+          onNewGame={() => {
+            setShowEnding(false);
+            startNew();
           }}
         />
       )}

@@ -5,6 +5,7 @@ import {
   detectStatusEvents,
   type AppliedDelta,
   type Companion,
+  type Ending,
   type GameState,
   type InventoryItem,
   type StateDelta,
@@ -131,6 +132,14 @@ export interface TurnSnapshot {
   gameState: GameState;
   chronicle: ChronicleEntry[];
   summary: string;
+  /**
+   * 是否为**关键决策点**（回溯锚点）。
+   * 普通快照是"每一回合都能退回去"，锚点是"值得退回去的那几个岔路口"——
+   * 结档时玩家要从这里选从哪一步重来。
+   */
+  key?: boolean;
+  /** 锚点的一句话说明（如"掷骰：潜行"、"进入战斗"、"受伤 -3"） */
+  label?: string;
 }
 
 /** 快照最多保留的回合数，超出的从最旧的开始丢 */
@@ -1353,6 +1362,10 @@ interface Store {
   clearPendingChecks(): void;
   /** 清掉主页面的状态变化提示 */
   clearChanges(): void;
+  /** 手动清理由 AI 生成的世界书条目（手写条目保留） */
+  clearModuleWorldbook(): void;
+  /** 换模组时调用：清掉属于上一个模组的世界书条目与队友候选 */
+  clearModuleDerived(): void;
   /** 更新正文排版设置 */
   setTypography(patch: Partial<Typography>): void;
   /** 更新音频设置（会同步启动/停止氛围音与 BGM） */
@@ -1372,6 +1385,12 @@ interface Store {
   applyModelDeltas(deltas: StateDelta[]): void;
   /** 记录回合开始时的状态快照（以该回合的玩家消息 id 为键），供回溯使用 */
   snapshotTurn(playerMsgId: string): void;
+  /** 把某个回合标成"关键决策点"（回溯锚点） */
+  markSnapshotKey(playerMsgId: string, label?: string): void;
+  /** 结档：写一段守密人给的结局正文 */
+  setEnding(kind: Ending['kind'], text: string): void;
+  /** 清除结档状态（开新团、或玩家从结档页回溯时） */
+  clearEnding(): void;
   /** 回溯到某条玩家消息之前：恢复当时的状态并截断其后所有消息 */
   rewindBefore(msgId: string): void;
   /** 从导出的存档恢复（会自动做版本迁移） */
@@ -1473,6 +1492,9 @@ export function migrateSave(raw: unknown): Partial<SaveFile> {
     if (!Array.isArray(gs.clues)) gs = { ...gs, clues: [] };
     if (!Array.isArray(gs.npcsAlive)) gs = { ...gs, npcsAlive: [] };
     if (!gs.flags || typeof gs.flags !== 'object') gs = { ...gs, flags: {} };
+    // 濒死标记与结档信息是后加的
+    if (typeof gs.dying !== 'boolean') gs = { ...gs, dying: false };
+    if (gs.ending === undefined) gs = { ...gs, ending: null };
     data.gameState = gs;
   }
 
@@ -1577,6 +1599,34 @@ export const useStore = create<Store>((set, get) => ({
     const pruned = Object.fromEntries(entries);
     saveJson('trpg.snapshots', pruned);
     set({ snapshots: pruned });
+  },
+
+  markSnapshotKey(playerMsgId, label) {
+    const s = get();
+    const snap = s.snapshots[playerMsgId];
+    if (!snap || snap.key) return;
+    const next = {
+      ...s.snapshots,
+      [playerMsgId]: { ...snap, key: true, label: label ?? snap.label ?? '' },
+    };
+    saveJson('trpg.snapshots', next);
+    set({ snapshots: next });
+  },
+
+  setEnding(kind, text) {
+    const s = get();
+    const ending: Ending = { kind, text: text.trim(), at: new Date().toISOString() };
+    const gameState: GameState = { ...s.gameState, ending };
+    saveJson('trpg.gameState', gameState);
+    set({ gameState });
+  },
+
+  clearEnding() {
+    const s = get();
+    if (!s.gameState.ending) return;
+    const gameState: GameState = { ...s.gameState, ending: null, dying: false };
+    saveJson('trpg.gameState', gameState);
+    set({ gameState });
   },
 
   rewindBefore(msgId) {
@@ -1742,6 +1792,31 @@ export const useStore = create<Store>((set, get) => ({
   setWorldbookEntries(list) {
     localStorage.setItem('trpg.worldbook', JSON.stringify(list));
     set({ worldbook: list });
+  },
+
+  /**
+   * 清掉"由 AI 生成的世界书条目"（`fromModule`）。
+   *
+   * 这是 N6 的手动入口：世界书在跨档读档时取并集，不同模组的条目会累积，
+   * 需要一个手动清理的口子。用户手写的条目与内置示例条目**不动**。
+   */
+  clearModuleWorldbook() {
+    const kept = get().worldbook.filter((e) => !e.fromModule);
+    localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
+    set({ worldbook: kept });
+  },
+
+  /**
+   * **换模组**时调用：清掉属于"上一个模组"的派生数据（世界书 fromModule 条目 + 队友候选）。
+   *
+   * 触发点只有这一个（AI 生成模组 / 贴文本导入 / 应用整套预设），
+   * 开新团与读档都**不**清——它们不换模组（协作方 N2）。
+   */
+  clearModuleDerived() {
+    const kept = get().worldbook.filter((e) => !e.fromModule && !e.id.startsWith('sample-'));
+    localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
+    saveJson('trpg.companionCandidates', []);
+    set({ worldbook: kept, companionCandidates: [] });
   },
 
   upsertCompanion(c) {
@@ -2001,17 +2076,16 @@ export const useStore = create<Store>((set, get) => ({
     saveJson('trpg.chronicle', []);
     saveJson('trpg.summary', '');
     saveJson('trpg.snapshots', {});
-    // 队友候选也清掉：它们属于上一局的模组
-    saveJson('trpg.companionCandidates', []);
     /*
-     * **世界书不再清**（协作方 B3）。
+     * **"清 fromModule 类数据"不属于开新团**（协作方 B3 + N2）。
      *
-     * 早期这里会把 `fromModule` 与 `sample-` 的条目全部删掉，理由是"属于上一局的世界"。
-     * 但开新团时**模组并没有换**，那些条目正是当前模组配套的（AI 生成的世界书都是 fromModule），
-     * 一删就空——玩家看到的就是"准备页的世界书没了"。
-     * 换模组时，新生成的世界书本来就会覆盖 fromModule 条目，不需要在这里再删一次。
+     * 开新团时模组并没有换，AI 生成的世界书与队友候选都是 `fromModule`、
+     * 都属于**当前**模组，一删就空——用户看到的"准备页世界书/同行者没了"就是这么来的。
+     * 世界书与候选都不在这里清；真正该清它们的时机是**模组真的换了**，
+     * 那一步由 `clearModuleDerived()` 负责（AI 生成模组 / 贴文本导入 / 应用整套预设时调用）。
      */
     const keptWorldbook = s.worldbook;
+    const keptCandidates = s.companionCandidates;
     // 动作小图与旧地图：都属于上一局，清掉（图片在 IndexedDB 里，要一起清）
     void idbSet('messageImages', {});
     void idbSet('mapImage', '');
@@ -2021,7 +2095,7 @@ export const useStore = create<Store>((set, get) => ({
       chronicle: [],
       summary: '',
       snapshots: {},
-      companionCandidates: [],
+      companionCandidates: keptCandidates,
       worldbook: keptWorldbook,
       messageImages: {},
       mapImage: '',
@@ -2103,15 +2177,45 @@ export const useStore = create<Store>((set, get) => ({
       }
       report.state = { ...report.state, flags };
     }
-    saveJson('trpg.gameState', report.state);
-    set({ gameState: report.state });
+    /*
+     * 结档判定。
+     *
+     * 用户定调（2026-09-14）：**死亡 = 结档**，这段故事就此结束。
+     * 但"归零的那一瞬间"还不算——先给一轮"濒死"的演出机会，
+     * 到下一个结算点生命仍是 0，才真的结档。理智归零同理直接结档（永久疯狂）。
+     *
+     * 注意：数值条被规则包裁剪在 min（hp 的 min 是 0），所以 `hp < 0` 永远不会发生，
+     * 早期 `detectStatusEvents` 里的"死亡"分支其实是死代码。
+     */
+    let nextState = report.state;
+    if (!nextState.ending) {
+      const hp = nextState.vitals.hp;
+      const san = nextState.vitals.san;
+      let kind: Ending['kind'] | null = null;
+      if (typeof san === 'number' && san <= 0) {
+        kind = 'insanity';
+      } else if (typeof hp === 'number' && hp <= 0) {
+        if (nextState.dying) kind = 'death';
+        else nextState = { ...nextState, dying: true };
+      } else if (typeof hp === 'number' && hp > 0 && nextState.dying) {
+        // 救回来了，解除濒死
+        nextState = { ...nextState, dying: false };
+      }
+      if (kind) {
+        // 正文留空：App 会拿它当信号，向守密人要一段结局叙事再填进来
+        nextState = { ...nextState, ending: { kind, text: '', at: new Date().toISOString() } };
+      }
+    }
+
+    saveJson('trpg.gameState', nextState);
+    set({ gameState: nextState });
 
     /*
      * 主页面"状态变化"提示。
      * 角色卡里的数值是静默更新的——玩家摔了一跤、血掉了 3 点，
      * 如果主页面不提示，等他偶然翻到角色卡时已经不知道是什么时候变的。
      */
-    const lines = describeChanges(report.applied, report.state, (k) => {
+    const lines = describeChanges(report.applied, nextState, (k) => {
       const def = getRuleset(rulesetId).vitalDefs.find((v) => v.key === k);
       return def?.label ?? k.toUpperCase();
     });

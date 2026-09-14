@@ -946,14 +946,36 @@ function WorldbookTab() {
   const worldbook = useStore((s) => s.worldbook);
   const upsert = useStore((s) => s.upsertWorldbookEntry);
   const remove = useStore((s) => s.removeWorldbookEntry);
+  const clearGenerated = useStore((s) => s.clearModuleWorldbook);
   const config = useStore((s) => s.config);
   const { genre } = useGenre();
+  const generatedCount = worldbook.filter((e) => e.fromModule).length;
 
   return (
     <div className="space-y-3">
       <p className="text-[11px] leading-relaxed text-mist-500">
         条目只在玩家或 GM 提到关键词时注入提示词。写法上，关键词要覆盖简称和别称，正文只放客观事实。
       </p>
+
+      {/*
+       * 手动清理 AI 生成条目（协作方 N6）：跨档读档时世界书取并集，
+       * 换过几个模组之后会累积不少不属于当前模组的条目，需要一个口子清掉。
+       * 用户手写的条目一律保留。
+       */}
+      {generatedCount > 0 && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-ink-700 bg-ink-850 px-3 py-2">
+          <span className="text-[11px] text-mist-400">
+            其中 {generatedCount} 条是 AI 随模组生成的
+          </span>
+          <button
+            onClick={clearGenerated}
+            className="shrink-0 rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-400 transition hover:border-blood-400/60 hover:text-blood-400"
+            title="只删 AI 生成的条目，你手写的保留"
+          >
+            清理这些
+          </button>
+        </div>
+      )}
 
       {worldbook.map((e) => (
         <div key={e.id} className="rounded-lg border border-ink-700 bg-ink-850 p-3">
@@ -1091,6 +1113,7 @@ function Area({
 function ModuleTab() {
   const gameModule = useStore((s) => s.module);
   const setModule = useStore((s) => s.setModule);
+  const clearModuleDerived = useStore((s) => s.clearModuleDerived);
   const config = useStore((s) => s.config);
   const character = useStore((s) => s.character);
   const rulesetId = useStore((s) => s.rulesetId);
@@ -1538,6 +1561,12 @@ function ModuleTab() {
             notes: data.notes ?? gameModule.notes,
             sourceNote: data.source_note ?? gameModule.sourceNote,
           });
+          /*
+           * 模组**真的换了**才清上一套模组的派生数据（世界书 fromModule 条目 + 队友候选）。
+           * 触发点只有这里、下面"贴文本导入"、以及应用整套预设三处；
+           * 开新团与读档都不清（协作方 N2）。
+           */
+          clearModuleDerived();
 
           // 模组包：派生公开词条 + 队友候选。失败不影响已生成的模组。
           try {
@@ -1714,6 +1743,8 @@ function ModuleTab() {
                     notes: data.notes ?? gameModule.notes,
                     sourceNote: data.source_note ?? gameModule.sourceNote,
                   });
+                  // 同样是"真的换了模组"这一步才清派生数据
+                  clearModuleDerived();
                   setImportText('');
                   setImportOpen(false);
                 } catch (e) {

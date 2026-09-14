@@ -101,9 +101,31 @@ export interface Thread {
   status: string;
 }
 
+/**
+ * 一场游戏的结局（结档）。
+ *
+ * 用户定调：**死亡 = 结档**，这段故事就此结束——不是弹一个"你死了"的窗，
+ * 也不是读档当没发生。回溯能力永远在系统里，玩家想重来随时可以退回去。
+ */
+export interface Ending {
+  /** death = 生命耗尽；insanity = 理智归零；other = 模组自己定义的收束 */
+  kind: 'death' | 'insanity' | 'other';
+  /** 结局正文（由守密人写的一段收束叙事，不是系统提示语） */
+  text: string;
+  /** 结档时刻 */
+  at: string;
+}
+
 export interface GameState {
   /** 生命 / 理智 / 魔法等数值条，key 由规则包定义 */
   vitals: Record<string, number>;
+  /**
+   * 是否处于"濒死"状态（引擎内部标记，模型不可改）。
+   * 生命归零的**第一轮**只算濒死（还有救）；下一个结算点还是 0 → 结档。
+   */
+  dying?: boolean;
+  /** 结档信息（非空即这一局已经结束） */
+  ending?: Ending | null;
   /** 数值条上限（HP/MP 由属性派生，SAN 通常是 99）。模型不可修改 */
   vitalsMax?: Record<string, number>;
   /** NPC 队友 */
@@ -182,6 +204,8 @@ export function createInitialState(overrides: Partial<GameState> = {}): GameStat
     return {
       vitals: {},
       vitalsMax: {},
+      dying: false,
+      ending: null,
       companions: [],
       inventory: [],
       flags: {},

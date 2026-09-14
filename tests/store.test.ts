@@ -733,8 +733,13 @@ describe('开新团要清干净上一局的东西', () => {
 
     store.getState().startNewGame();
 
+    // 已入队的队友清掉（否则老杰克会跟着进新团）
     expect(store.getState().gameState.companions).toEqual([]);
-    expect(store.getState().companionCandidates).toEqual([]);
+    /*
+     * 但**队友候选要保留**（协作方 N2）：开新团时模组没换，
+     * 候选是随当前模组生成的，一清准备页的「同行者」就空了。
+     */
+    expect(store.getState().companionCandidates.map((c) => c.name)).toEqual(['米拉·陈']);
   });
 });
 
@@ -903,5 +908,108 @@ describe('战役数据必须整进整出（B3：消灭半持久化字段）', ()
     });
     store.getState().startNewGame();
     expect(store.getState().worldbook.map((e) => e.content)).toContain('模组生成');
+  });
+
+  it('换模组（clearModuleDerived）才清 AI 生成条目与队友候选', () => {
+    store.setState({
+      worldbook: [
+        { id: 'wb-ai', keys: ['x'], content: 'AI 生成', priority: 50, enabled: true, fromModule: true },
+        { id: 'wb-mine', keys: ['y'], content: '我手写的', priority: 50, enabled: true },
+      ],
+    });
+    store.getState().clearModuleDerived();
+    const contents = store.getState().worldbook.map((e) => e.content);
+    expect(contents).not.toContain('AI 生成');
+    expect(contents).toContain('我手写的');
+    expect(store.getState().companionCandidates).toEqual([]);
+  });
+
+  it('手动清理只删 AI 生成的世界书条目，不动手写的', () => {
+    store.setState({
+      worldbook: [
+        { id: 'wb-ai2', keys: ['x'], content: 'AI 生成', priority: 50, enabled: true, fromModule: true },
+        { id: 'wb-mine2', keys: ['y'], content: '我手写的', priority: 50, enabled: true },
+      ],
+    });
+    store.getState().clearModuleWorldbook();
+    expect(store.getState().worldbook.map((e) => e.content)).toEqual(['我手写的']);
+  });
+});
+
+describe('结档：死亡 / 理智归零（用户定调：死亡 = 结档）', () => {
+  it('生命归零先算濒死，下一个结算点仍是 0 才结档', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 5, san: 60, mp: 10 } }) });
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 5 }]);
+    expect(store.getState().gameState.vitals.hp).toBe(0);
+    expect(store.getState().gameState.dying).toBe(true);
+    expect(store.getState().gameState.ending ?? null).toBeNull();
+
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 1 }]);
+    const ending = store.getState().gameState.ending;
+    expect(ending?.kind).toBe('death');
+    // 正文留空 = "结论已定、等守密人写结局"的信号
+    expect(ending?.text).toBe('');
+  });
+
+  it('理智归零直接结档（永久疯狂）', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 10, san: 3, mp: 10 } }) });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 3 }]);
+    expect(store.getState().gameState.ending?.kind).toBe('insanity');
+  });
+
+  it('救回来会解除濒死，不结档', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 5, san: 60, mp: 10 } }) });
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 5 }]);
+    expect(store.getState().gameState.dying).toBe(true);
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'inc', amount: 3 }]);
+    expect(store.getState().gameState.dying).toBe(false);
+    expect(store.getState().gameState.ending ?? null).toBeNull();
+  });
+
+  it('结档后不会再被后续回合覆盖', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 1, san: 60, mp: 10 } }) });
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 1 }]);
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 1 }]);
+    const first = store.getState().gameState.ending;
+    expect(first?.kind).toBe('death');
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 99 }]);
+    expect(store.getState().gameState.ending?.kind).toBe('death');
+  });
+
+  it('开新团与回溯都会退掉结档', () => {
+    // 先摆一个干净的起点，避免上一个用例留下的 ending 混进来
+    store.setState({ gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }) });
+    const id = store.getState().addMessage({ role: 'player', content: '我推开门' });
+    store.getState().snapshotTurn(id);
+    store.getState().setEnding('death', '故事在这里断了线。');
+    expect(store.getState().gameState.ending?.text).toBe('故事在这里断了线。');
+
+    store.getState().rewindBefore(id);
+    expect(store.getState().gameState.ending ?? null).toBeNull();
+
+    store.getState().setEnding('insanity', '他分不清了。');
+    store.getState().startNewGame();
+    expect(store.getState().gameState.ending ?? null).toBeNull();
+  });
+});
+
+describe('关键抉择（回溯锚点）', () => {
+  it('只有被标记的回合才算锚点，并带一句说明', () => {
+    const id = store.getState().addMessage({ role: 'player', content: '我潜行过去' });
+    store.getState().snapshotTurn(id);
+    expect(store.getState().snapshots[id]!.key).toBeUndefined();
+
+    store.getState().markSnapshotKey(id, '掷骰：潜行');
+    expect(store.getState().snapshots[id]!.key).toBe(true);
+    expect(store.getState().snapshots[id]!.label).toBe('掷骰：潜行');
+
+    // 已经标过就不再覆盖（同一回合多个理由时以第一个为准）
+    store.getState().markSnapshotKey(id, '受伤');
+    expect(store.getState().snapshots[id]!.label).toBe('掷骰：潜行');
+  });
+
+  it('没有快照的回合不会被标上锚点', () => {
+    store.getState().markSnapshotKey('不存在的消息 id', '掷骰：潜行');
+    expect(store.getState().snapshots['不存在的消息 id']).toBeUndefined();
   });
 });
