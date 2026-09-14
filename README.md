@@ -4,9 +4,8 @@
 > 灵感来自酒馆（SillyTavern），补上了它最缺的一环——**权威的数值**。
 > 纯前端 PWA，一套代码同时跑 PC 和手机，数据全部在浏览器本地。
 
-- **在线版**（手机直接打开，添加到主屏即成独立 App）：
-  - GitHub Pages：https://zhyslostland.github.io/-/
-  - WorkBuddy 云：https://paotuan-sim-79663.app.workbuddy.host/
+**这是一个个人自用的项目，不发布源码、不做社区。** 本文档是给自己和协作方看的说明。
+
 - **规则可插拔**：内置 COC 7th（1d100 百分比）与 DnD 5e（1d20 加值制），并支持自建规则包。
 - **题材可切换**：6 个内置题材（克苏鲁 / 东京怪谈 / 二次元 / 粉红团 / 剑与魔法 / 都市异能），题材与规则正交——COC 的百分比也能跑校园日常。
 
@@ -43,39 +42,33 @@ npm run demo       # 跑一段无 UI 的引擎演示（tsx src/demo.ts）
 
 ---
 
-## 部署与分享（论坛分发）
+## 跑起来 / 部署
 
-本项目是**纯前端 PWA、没有后端**，所以直接丢到任意静态托管即可，所有人打开就能玩。仓库已配置 `base: './'`（相对路径），同一份 `dist/` 在下面任一平台都能跑，无需按平台改配置。
+本项目是**纯前端 PWA、没有后端**，构建产物就是一堆静态文件，丢到任意静态托管上都能跑。
+已配置 `base: './'`（相对路径），同一份 `dist/` 在本地、内网、云托管上都能直接用，不需要按平台改配置。
 
-> ⚠️ **给试玩者的最重要提醒**：本应用没有共享密钥，**每个人都要自己去「硅基流动」等平台申请一个免费的 API Key，在「设置」里填好才能对话**。否则打开只能看界面、点开始会报「未配置 Key」。发帖时请务必附上这句话。
+### 方式 1 · 本机 / 局域网（自用最省事）
 
-### 方式 0 · 已有在线版（立刻能发）
+```bash
+npm install
+npm run build
+npm run preview     # 监听 0.0.0.0，手机连同一个 WiFi 访问 http://<电脑IP>:4173
+```
 
-`https://paotuan-sim-79663.app.workbuddy.host/` 已经在线（PWA，手机可添加到主屏）。要马上给论坛的人试，直接发这个链接即可。
+### 方式 2 · 云托管（在外面也能开）
 
-### 方式 1 · GitHub Pages（推荐，推上去自动部署）
+把 `dist/` 整个目录传上去就行，例如：
 
-仓库已带 `.github/workflows/deploy.yml`，推送到 GitHub 后自动构建并发布：
+- **Netlify**：打开 [app.netlify.com/drop](https://app.netlify.com/drop)，把 `dist/` 目录拖进去，秒得一个链接。
+- **Cloudflare Pages**：Direct Upload 同样拖 `dist/`。
+- **WorkBuddy 云**：本项目已有一个在线地址 `https://paotuan-sim-79663.app.workbuddy.host/`（依赖平台套餐，是否保留自行决定）。
 
-1. 把本仓库推到 GitHub（`git remote add origin <你的仓库URL>` → `git push -u origin main`）。
-2. 仓库 **Settings → Pages → Build and deployment → Source 选 `GitHub Actions`**。
-3. 之后每次 `git push` 到 `main` 都会自动重新部署；首次部署完成后，地址是：
-   - 用户/组织页（`用户名.github.io`）：`https://用户名.github.io/`
-   - 项目页（`用户名.github.io/仓库名`）：`https://用户名.github.io/仓库名/`
+> ⚠️ **如果要把链接发给别人试玩**：本应用没有共享密钥，**每个人都要自己去「硅基流动」等平台申请一个免费的 API Key，在「设置」里填好才能对话**。否则打开只能看界面、点开始会报「未配置 Key」。发帖时请务必附上这句话。
 
-> 部署状态在仓库 **Actions** 标签页可见。若 deploy 一直 pending，检查 Settings → Pages 的 Source 是否选了 GitHub Actions。
+### 手机装到主屏
 
-### 方式 2 · 拖拽托管（Netlify / Cloudflare Pages，零 git）
-
-1. 本地构建：`npm install && npm run build`，得到 `dist/`。
-2. 打开 [app.netlify.com/drop](https://app.netlify.com/drop)（或 Cloudflare Pages 的 "Direct Upload"），把 `dist/` 文件夹拖进去，立刻拿到一个 `*.netlify.app` 链接。
-3. 想换自定义域名在对应平台后台绑一下即可。
-
-### 方式 3 · Vercel
-
-导入 GitHub 仓库 → Framework 选 `Vite`、Build 命令 `npm run build`、Output `dist` → 部署。
-
-> 所有方式都是同一份 `dist/`，`base: './'` 已保证资源路径相对，子路径部署（项目页 / 子目录）也不会 404。
+打开链接后：Android/Chrome 走浏览器菜单的「安装应用」，iOS/Safari 走「分享 → 添加到主屏幕」；
+也可以直接用应用内「设置 → 安装到设备」里的引导。装好后没有地址栏、断网也能开（PWA 离线缓存）。
 
 ---
 
@@ -290,6 +283,14 @@ React 19 · TypeScript 5 · Vite 8 + `@tailwindcss/vite` 4 · Zustand 5 · react
 
 ---
 
-## License
+## 使用与版权
 
-本项目以 **MIT** 许可证开源（见 `LICENSE`）。内置 D&D 相关内容遵循 SRD 的 CC-BY-4.0 署名要求（见上文）。
+**本项目是个人自用项目，不对外开源、不发布源码。** 下面只是记录代码里用到的内容边界，避免把不该进来的东西带进来：
+
+- **机制**（骰子表达式、判定公式、成功等级）→ 内嵌为代码。机制属于「思想/系统/程序」，不受版权保护。
+- **数据**（技能表、物品表、怪物数值）→ 外挂成规则包 / 自行填写。
+- **表达**（规则书原文、世界观文本、模组设定文本）→ **绝不进系统**。
+
+内置 D&D 相关内容遵循 **SRD 5.1 / 5.2.1 的 CC-BY-4.0 署名**要求（署名文字见上一节）。
+
+> 以上为一般性信息，不构成法律意见。
