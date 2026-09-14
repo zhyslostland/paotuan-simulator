@@ -175,6 +175,15 @@ function revealedNodeNames(
     const m = find(v);
     if (m) seed.add(m.name);
   }
+  /*
+   * 兜底：当前位置跟任何一个节点都对不上时（AI 写的 start_location 与地图简称不一致），
+   * 至少把第一个节点亮出来。否则玩家看到的是一张全"？"的图、无处可去——
+   * 那比剧透更糟。
+   */
+  if (seed.size === 0 && nodes.length > 0) {
+    const first = nodes.find((x) => x.name.trim());
+    if (first) seed.add(first.name);
+  }
   const out = new Set<string>();
   for (const name of seed) {
     out.add(name);
