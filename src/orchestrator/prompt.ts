@@ -388,6 +388,11 @@ export function buildSystemPrompt(ctx: PromptContext): string {
             )
             .join('\n')}`
         : '',
+      ctx.module.items?.length
+        ? `## 道具表（这个模组里会出现的东西，**作用已经定死，照此演出**）\n${ctx.module.items
+            .map((it) => `- **${it.name}**${it.look ? `（${it.look}）` : ''}：${it.effect ?? ''}`)
+            .join('\n')}\n（玩家拾取或使用时，按这里写的作用如实呈现；不要临时发挥成别的效果）`
+        : '',
       ctx.module.locations ? `## 关键地点\n${ctx.module.locations}` : '',
       ctx.module.clueChain
         ? `## 线索链（按此推进，避免卡关；线索要逐步给出，不要一次抖完）\n${ctx.module.clueChain}`

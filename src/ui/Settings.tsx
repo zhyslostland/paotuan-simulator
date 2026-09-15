@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore, TYPOGRAPHY_PRESETS, checkTargetText, type ThemeName } from './store';
 import { ConfirmDialog } from './ConfirmDialog';
+import { TestSandbox } from './TestSandbox';
 import {
   canInstall,
   isStandalone,
@@ -158,6 +159,7 @@ const SECTIONS = [
   { id: 'sec-audio', label: '音频' },
   { id: 'sec-data', label: '数据与存档' },
   { id: 'sec-install', label: '安装到设备' },
+  { id: 'sec-dev', label: '开发者' },
 ];
 
 /** 设置里的一节标题：带锚点 id，供顶部快速跳转 */
@@ -559,6 +561,9 @@ function PresetImporter() {
 }
 
 export function Settings({ onClose }: { onClose: () => void }) {
+  const devMode = useStore((s) => s.devMode);
+  const setDevMode = useStore((s) => s.setDevMode);
+  const [sandboxOpen, setSandboxOpen] = useState(false);
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
   const theme = useStore((s) => s.theme);
@@ -1443,6 +1448,37 @@ export function Settings({ onClose }: { onClose: () => void }) {
             )}
           </div>
 
+          <GroupTitle
+            id="sec-dev"
+            title="开发者"
+            hint="测试沙盒：一键把环境摆好，省得每次测功能都要从头建角色、想模组。"
+          />
+
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850/60 px-3 py-2">
+              <input
+                type="checkbox"
+                checked={devMode}
+                onChange={(e) => setDevMode(e.target.checked)}
+                className="accent-[#b8953f]"
+              />
+              <span className="text-[12px] text-mist-300">开发者模式</span>
+              <span className="ml-auto text-[10px] text-mist-500">
+                打开后顶栏会出现测试入口
+              </span>
+            </label>
+            <button
+              onClick={() => setSandboxOpen(true)}
+              className="w-full rounded-lg border border-gold-600/50 px-3 py-2 text-[12px] text-gold-400 transition hover:bg-gold-500/10"
+            >
+              打开测试沙盒
+            </button>
+            <p className="text-[10px] leading-relaxed text-mist-500/80">
+              沙盒只写本地数据、不发请求、不需要 API Key：可一键灌入完整测试局、切换三套脚本化模组、
+              把背包塞满、把数值调到濒死或归零、直接触发结档。测完点「回到出厂状态」即可清掉。
+            </p>
+          </div>
+
           <GroupTitle id="sec-keys" title="快捷键" />
 
           <ul className="space-y-1 text-[11px] text-mist-400">
@@ -1475,7 +1511,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
             {toast}
           </div>
         )}
-      </div>
+        </div>
+
+      {sandboxOpen && <TestSandbox onClose={() => setSandboxOpen(false)} />}
 
       {confirmReset && (
         <ConfirmDialog

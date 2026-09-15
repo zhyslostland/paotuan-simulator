@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore, deriveAddress, addressOf, defaultCharacteristics, skillBudget, BUILTIN_MODULES, starterCharacterOf, type CharacterProfile, type Companion, type ModuleNpc, type WorldbookEntry } from './store';
+import { useStore, deriveAddress, addressOf, defaultCharacteristics, skillBudget, BUILTIN_MODULES, starterCharacterOf, type CharacterProfile, type Companion, type ModuleItem, type ModuleNpc, type WorldbookEntry } from './store';
 import { getRuleset } from '../core/rulesets/index.js';
 import type { Ruleset } from '../core/rulesets/types.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
@@ -15,6 +15,9 @@ import {
   characterImagePrompt,
   generateJson,
   moduleUserPrompt,
+  itemTableSystemPrompt,
+  SCALE_LABEL,
+  type ModuleScale,
 } from '../orchestrator/generate.js';
 import { ModelError } from '../providers/model.js';
 import { extractCharacterCard } from './charCard.js';
@@ -1133,6 +1136,49 @@ function ModuleTab() {
   const [importText, setImportText] = useState('');
   const [importing, setImporting] = useState(false);
   const [importErr, setImportErr] = useState('');
+  /** 道具表单独生成 */
+  const [genItemsBusy, setGenItemsBusy] = useState(false);
+  const [genItemsErr, setGenItemsErr] = useState('');
+
+  const genItems = async () => {
+    setGenItemsBusy(true);
+    setGenItemsErr('');
+    try {
+      const data = await generateJson<{
+        items?: { name?: string; look?: string; effect?: string; kind?: string }[];
+      }>(
+        itemTableSystemPrompt(genre, gameModule, getRuleset(rulesetId)),
+        `请为这个模组设计一张道具表：${gameModule.title}\n\n${gameModule.premise}`,
+        { ...config, maxTokens: 2048 }
+      );
+      const items: ModuleItem[] = (data?.items ?? [])
+        .filter((it) => it.name?.trim())
+        .map((it) => ({
+          id: uid(),
+          name: it.name!.trim(),
+          look: it.look?.trim() || '',
+          effect: it.effect?.trim() || '',
+          kind: (['weapon', 'tool', 'clue', 'consumable', 'other'].includes(it.kind ?? '')
+            ? it.kind
+            : 'other') as ModuleItem['kind'],
+        }));
+      if (!items.length) throw new Error('模型没有返回道具，请重试');
+      setModule({ items });
+      setGenItemsErr('');
+    } catch (e) {
+      setGenItemsErr(e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`);
+    } finally {
+      setGenItemsBusy(false);
+    }
+  };
+
+  const upsertItem = (it: ModuleItem) => {
+    const list = gameModule.items ?? [];
+    const idx = list.findIndex((x) => x.id === it.id);
+    setModule({ items: idx >= 0 ? list.map((x) => (x.id === it.id ? it : x)) : [...list, it] });
+  };
+  const removeItem = (id: string) =>
+    setModule({ items: (gameModule.items ?? []).filter((x) => x.id !== id) });
 
   const upsertNpc = (n: ModuleNpc) => {
     const idx = gameModule.npcs.findIndex((x) => x.id === n.id);
@@ -1285,6 +1331,40 @@ function ModuleTab() {
           onChange={(e) => setModule({ title: e.target.value })}
         />
       </label>
+
+      {/*
+       * 篇幅：**决定时间尺度**。
+       * 早期不分篇幅，模型一律把紧迫感写成"只剩 15 分钟"——短篇合适，
+       * 长篇就荒谬了：横跨几周的调查被压进一晚上，玩家一出门就"时间到"。
+       */}
+      <div>
+        <span className="mb-1 block text-[11px] text-mist-400">
+          篇幅 <span className="text-mist-500/70">（决定时间尺度与规模，生成时生效）</span>
+        </span>
+        <div className="flex flex-wrap gap-1.5">
+          {(['short', 'medium', 'long'] as ModuleScale[]).map((sc) => (
+            <button
+              key={sc}
+              onClick={() => setModule({ scale: sc })}
+              className={`rounded-md border px-2.5 py-1 text-[11px] transition ${
+                (gameModule.scale ?? 'short') === sc
+                  ? 'border-gold-600/70 bg-gold-500/10 text-gold-400'
+                  : 'border-ink-600 text-mist-400 hover:border-gold-600/40'
+              }`}
+            >
+              {SCALE_LABEL[sc]}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1 text-[10px] leading-relaxed text-mist-500/70">
+          {SCALE_LABEL[gameModule.scale ?? 'short']} ——{' '}
+          {(gameModule.scale ?? 'short') === 'short'
+            ? '时间压力以小时计，三幕，一局跑完。'
+            : (gameModule.scale ?? 'short') === 'medium'
+              ? '时间压力以天计（3-7 天），四到五幕，可以来回走访。'
+              : '时间压力以周/月计，分章推进，日子一天天过去；具体场景会在进章时再展开。'}
+        </p>
+      </div>
 
       <Area
         label="前言"
@@ -1451,6 +1531,79 @@ function ModuleTab() {
         onChange={(v) => setModule({ locations: v })}
         rows={4}
       />
+      {/*
+       * 道具表：**作用单独生成**。
+       * 和「怪物设定页」同一个思路——能用独立步骤生成的，就别混在一次生成里。
+       * 塞进角色生成时模型一次要想太多东西，结果物品说明短、作用含糊，
+       * 玩家捡到一件东西只有个名字，不知道能干嘛。
+       */}
+      <div className="rounded-lg border border-ink-700 bg-ink-850/40 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <span className="text-[11px] text-mist-400">道具表</span>
+            <span className="ml-1.5 text-[10px] text-mist-500/70">
+              （这个模组里会出现的东西；作用写好后，玩家拾取时自动带进背包）
+            </span>
+          </div>
+          <button
+            onClick={genItems}
+            disabled={genItemsBusy}
+            className="shrink-0 rounded-md border border-gold-600/50 px-2.5 py-1 text-[11px] text-gold-400 transition hover:bg-gold-500/10 disabled:opacity-50"
+            title="单独生成一次道具表：只做这一件事，所以作用写得比混在角色生成里准确得多"
+          >
+            {genItemsBusy ? '生成中…' : '生成道具表'}
+          </button>
+        </div>
+        {genItemsErr && <p className="mt-1.5 text-[10px] text-blood-400">{genItemsErr}</p>}
+        <div className="mt-2 space-y-2">
+          {(gameModule.items ?? []).map((it) => (
+            <div key={it.id} className="rounded-md border border-ink-700 bg-ink-900 p-2">
+              <div className="flex items-center gap-1.5">
+                <input
+                  className={`${inputCls} flex-1`}
+                  value={it.name}
+                  placeholder="物品名"
+                  onChange={(e) => upsertItem({ ...it, name: e.target.value })}
+                />
+                <button
+                  onClick={() => removeItem(it.id)}
+                  className="shrink-0 rounded-md border border-ink-600 px-2 py-1.5 text-[11px] text-mist-500 transition hover:border-blood-400/60 hover:text-blood-400"
+                >
+                  删
+                </button>
+              </div>
+              <input
+                className={`${inputCls} mt-1.5`}
+                value={it.look ?? ''}
+                placeholder="外观 / 来历（一句话）"
+                onChange={(e) => upsertItem({ ...it, look: e.target.value })}
+              />
+              <textarea
+                className={`${inputCls} mt-1.5 resize-none`}
+                rows={2}
+                value={it.effect ?? ''}
+                placeholder="作用：用了会发生什么具体变化（这一条最重要）"
+                onChange={(e) => upsertItem({ ...it, effect: e.target.value })}
+              />
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={() =>
+            upsertItem({
+              id: uid(),
+              name: '',
+              look: '',
+              effect: '',
+              kind: 'other',
+            })
+          }
+          className="mt-2 w-full rounded-md border border-dashed border-ink-600 py-1.5 text-[11px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-200"
+        >
+          ＋ 手动加一件
+        </button>
+      </div>
+
       <Area
         label="线索链"
         hint="（哪条线索通向哪，用 → 串起来，防止卡关）"
@@ -1521,9 +1674,14 @@ function ModuleTab() {
             notes?: string;
             source_note?: string;
           }>(
-            moduleSystemPrompt(genre, getRuleset(rulesetId)),
+            // 篇幅决定时间尺度：短篇以小时计，长篇以周/月计（否则一律被压成 15 分钟）
+            moduleSystemPrompt(genre, getRuleset(rulesetId), gameModule.scale ?? 'short'),
             moduleUserPrompt(desc, canonical, genre),
-            { ...config, maxTokens: 3072 }
+            {
+              ...config,
+              // 长篇要给得下分章的幕结构与 8-12 个地点，token 不够会截断
+              maxTokens: (gameModule.scale ?? 'short') === 'long' ? 6144 : 3072,
+            }
           );
           if (!data) throw new Error('模型没有返回合法 JSON，请重试');
           setModule({

@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { SCALE_LABEL } from '../orchestrator/generate.js';
+import type { ModuleScale } from '../orchestrator/generate.js';
 import {
   applyDeltas,
   createInitialState,
@@ -414,6 +416,35 @@ export interface Module {
   sourceNote?: string;
   /** 题材标签（内置模组用）：决定"选了某题材时，哪些模组最合适" */
   genre?: string;
+  /**
+   * 篇幅（决定时间尺度与地点/幕的数量）。
+   *
+   * 为什么要显式区分：早期不分篇幅，模型默认把"紧迫感"写成
+   * 「只剩 15 分钟 / 天亮之前」——短篇合适，长篇就完全对不上：
+   * 横跨几周的调查被塞进 15 分钟，玩家一出门就"时间到"。
+   */
+  scale?: ModuleScale;
+  /**
+   * 道具表：**单独生成**的一张"这个模组里会出现的东西"清单（含作用）。
+   *
+   * 为什么和角色卡的个人物品分开：塞进角色生成里会让模型一次想太多东西，
+   * 结果物品说明短、作用含糊、拾取后不知道能干嘛。分开生成准确率明显更高。
+   */
+  items?: ModuleItem[];
+}
+
+/** 模组篇幅（定义在 orchestrator/generate，这里只是再导出，避免 UI 反向依赖） */
+export type { ModuleScale };
+
+/** 模组道具表条目（作用由 AI 单独生成，玩家拿到就能看懂能干嘛） */
+export interface ModuleItem {
+  id: string;
+  name: string;
+  /** 一句话外观 / 来历 */
+  look?: string;
+  /** 作用：用掉它会怎样、检定时给什么便利 —— 这一条是玩家最需要的 */
+  effect?: string;
+  kind?: 'weapon' | 'tool' | 'clue' | 'consumable' | 'other';
 }
 
 const DEFAULT_MODULE: Module = {
@@ -1486,6 +1517,12 @@ interface Store {
   clearPendingChecks(): void;
   /** 清掉主页面的状态变化提示 */
   clearChanges(): void;
+  /** 开发者模式：打开后才显示测试沙盒入口（灌测试存档 / 脚本化模组） */
+  devMode: boolean;
+  /** 切换开发者模式 */
+  setDevMode(on: boolean): void;
+  /** 写入模组的道具表（作用单独生成） */
+  setModuleItems(list: ModuleItem[]): void;
   /** 手动清理由 AI 生成的世界书条目（手写条目保留） */
   clearModuleWorldbook(): void;
   /** 换模组时调用：清掉属于上一个模组的世界书条目与队友候选 */
@@ -1976,6 +2013,20 @@ export const useStore = create<Store>((set, get) => ({
    * 触发点只有这一个（AI 生成模组 / 贴文本导入 / 应用整套预设），
    * 开新团与读档都**不**清——它们不换模组（协作方 N2）。
    */
+  setDevMode(on) {
+    localStorage.setItem('trpg.devMode', on ? '1' : '0');
+    set({ devMode: on });
+  },
+
+  setModuleItems(list) {
+    const s = get();
+    const module: Module = { ...s.module, items: list };
+    saveJson('trpg.module', module);
+    set({ module });
+  },
+
+  devMode: localStorage.getItem('trpg.devMode') === '1',
+
   clearModuleDerived() {
     const kept = get().worldbook.filter((e) => !e.fromModule && !e.id.startsWith('sample-'));
     localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
@@ -2369,6 +2420,29 @@ export const useStore = create<Store>((set, get) => ({
         // 正文留空：App 会拿它当信号，向守密人要一段结局叙事再填进来
         nextState = { ...nextState, ending: { kind, text: '', at: new Date().toISOString() } };
       }
+    }
+
+    /*
+     * 拾到模组道具表里的东西时，把它的「作用」自动带进背包说明。
+     *
+     * 以前玩家捡到一件东西，背包里只有一个名字——不知道能干嘛，等于白捡。
+     * 作用已经在道具表里单独生成好了，这里直接取，不用再麻烦模型。
+     */
+    const itemTable = get().module.items ?? [];
+    if (itemTable.length > 0) {
+      let filled = false;
+      const inventory = nextState.inventory.map((it) => {
+        if (it.desc) return it;
+        const def = itemTable.find((d) => d.name.trim() === it.name.trim());
+        if (!def) return it;
+        filled = true;
+        return {
+          ...it,
+          desc: def.effect || def.look || it.desc,
+          kind: it.kind ?? def.kind,
+        };
+      });
+      if (filled) nextState = { ...nextState, inventory };
     }
 
     saveJson('trpg.gameState', nextState);

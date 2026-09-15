@@ -31,6 +31,7 @@ import {
 import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.js';
 import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
 import { EndingScreen } from './EndingScreen';
+import { TestSandbox } from './TestSandbox';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 
@@ -92,6 +93,8 @@ export default function App() {
   const [showEnding, setShowEnding] = useState(false);
   /** 被识别为"主动求死"的那句话，等玩家二次确认 */
   const [pendingSuicide, setPendingSuicide] = useState<string | null>(null);
+  const [showSandbox, setShowSandbox] = useState(false);
+  const devMode = useStore((s) => s.devMode);
   const [installable, setInstallable] = useState(false);
   /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
   const [installHintHidden, setInstallHintHidden] = useState(
@@ -773,6 +776,16 @@ export default function App() {
               未配置 API
             </button>
           )}
+          {/* 开发者模式：一键把测试环境摆好，省得每次测功能都从头建角色想模组 */}
+          {devMode && (
+            <button
+              onClick={() => setShowSandbox(true)}
+              className="rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+              title="测试沙盒：灌入测试存档 / 脚本化模组 / 调数值 / 触发结档"
+            >
+              🧪
+            </button>
+          )}
           {/* 结档后常驻一个入口：关掉结档页看记录之后，还回得去（协作方 I） */}
           {gameState.ending?.text && (
             <button
@@ -995,10 +1008,11 @@ export default function App() {
         <CheckDialog
           skill={checkSkill}
           onCancel={() => setCheckSkill(null)}
-          onConfirm={(target, action) => {
+          onConfirm={(target, action, difficulty) => {
             const skill = checkSkill;
             setCheckSkill(null);
-            void handleCheck(skill, 'regular', target, action);
+            // 难度由检定面板给出（已含描述加权的结果）
+            void handleCheck(skill, difficulty ?? 'regular', target, action);
           }}
         />
       )}
@@ -1027,6 +1041,7 @@ export default function App() {
        * 结档页：死亡 / 理智归零 = 这段故事结束。
        * 它不是"你死了，请重来"的弹窗，而是一屏收束叙事 + 回溯入口。
        */}
+      {showSandbox && <TestSandbox onClose={() => setShowSandbox(false)} />}
       {showEnding && gameState.ending?.text && (
         <EndingScreen
           onClose={() => setShowEnding(false)}
