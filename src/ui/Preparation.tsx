@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore, deriveAddress, addressOf, defaultCharacteristics, skillBudget, BUILTIN_MODULES, starterCharacterOf, type CharacterProfile, type Companion, type ModuleItem, type ModuleNpc, type WorldbookEntry } from './store';
+import { useStore, deriveAddress, addressOf, defaultCharacteristics, skillBudget, BUILTIN_MODULES, starterCharacterOf, type CharacterProfile, type Companion, type ModuleItem, type ModuleMonster, type ModuleNpc, type WorldbookEntry } from './store';
 import { getRuleset } from '../core/rulesets/index.js';
 import type { Ruleset } from '../core/rulesets/types.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
@@ -16,6 +16,7 @@ import {
   generateJson,
   moduleUserPrompt,
   itemTableSystemPrompt,
+  monsterSystemPrompt,
   SCALE_LABEL,
   type ModuleScale,
 } from '../orchestrator/generate.js';
@@ -1172,6 +1173,69 @@ function ModuleTab() {
     }
   };
 
+  /** 敌对者表：默认遮住（剧透），可单独生成 */
+  const monsters = gameModule.monsters ?? [];
+  const [monstersRevealed, setMonstersRevealed] = useState(false);
+  const [genMonstersBusy, setGenMonstersBusy] = useState(false);
+  const [genMonstersErr, setGenMonstersErr] = useState('');
+
+  const genMonsters = async () => {
+    setGenMonstersBusy(true);
+    setGenMonstersErr('');
+    try {
+      const data = await generateJson<{
+        monsters?: {
+          name?: string;
+          look?: string;
+          hp?: number;
+          attack?: string;
+          behavior?: string;
+          weakness?: string;
+        }[];
+      }>(
+        monsterSystemPrompt(genre, getRuleset(rulesetId), gameModule),
+        `请为这个模组设计敌对者：${gameModule.title}\n\n${gameModule.premise}`,
+        { ...config, maxTokens: 2048 }
+      );
+      const list: ModuleMonster[] = (data?.monsters ?? [])
+        .filter((m) => m.name?.trim())
+        .map((m) => ({
+          id: uid(),
+          name: m.name!.trim(),
+          look: m.look?.trim() || '',
+          hp: typeof m.hp === 'number' ? m.hp : undefined,
+          attack: m.attack?.trim() || '',
+          behavior: m.behavior?.trim() || '',
+          weakness: m.weakness?.trim() || '',
+        }));
+      if (!list.length) throw new Error('模型没有返回敌对者，请重试');
+      setModule({ monsters: list });
+      setMonstersRevealed(true);
+    } catch (e) {
+      setGenMonstersErr(e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`);
+    } finally {
+      setGenMonstersBusy(false);
+    }
+  };
+
+  const upsertMonster = (m: ModuleMonster) => {
+    const list = gameModule.monsters ?? [];
+    const idx = list.findIndex((x) => x.id === m.id);
+    setModule({ monsters: idx >= 0 ? list.map((x) => (x.id === m.id ? m : x)) : [...list, m] });
+  };
+  const removeMonster = (id: string) =>
+    setModule({ monsters: (gameModule.monsters ?? []).filter((x) => x.id !== id) });
+
+  /** 按表里的数值把它放进战斗 —— 引擎初始化，模型只负责演 */
+  const throwIntoCombat = (m: ModuleMonster) => () => {
+    if (!m.name.trim()) return;
+    const hp = Math.max(1, m.hp ?? 12);
+    useStore.getState().applyModelDeltas([
+      { target: 'combat.active', op: 'set', value: true },
+      { target: 'combat.foes', op: 'add', value: { name: m.name.trim(), hp, max: hp } },
+    ] as never);
+  };
+
   const upsertItem = (it: ModuleItem) => {
     const list = gameModule.items ?? [];
     const idx = list.findIndex((x) => x.id === it.id);
@@ -1531,6 +1595,114 @@ function ModuleTab() {
         onChange={(v) => setModule({ locations: v })}
         rows={4}
       />
+      {/*
+       * 怪物 / 敌对者表（R38）。
+       * 默认**遮罩**：玩家自己也会翻到准备页，先看见"这东西 12 血、怕火"就没得玩了。
+       * 数值定下来之后由引擎在战斗开始时初始化 `combat.foes`，模型只负责演出。
+       */}
+      <div className="rounded-lg border border-blood-400/30 bg-blood-400/[0.03] p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <span className="text-[11px] text-mist-400">敌对者</span>
+            <span className="ml-1.5 text-[10px] text-mist-500/70">
+              （数值定下来后战斗照此演出；含剧透，默认遮住）
+            </span>
+          </div>
+          <div className="flex shrink-0 gap-1.5">
+            <button
+              onClick={() => setMonstersRevealed((v) => !v)}
+              className="rounded-md border border-ink-600 px-2 py-1 text-[10px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
+            >
+              {monstersRevealed ? '遮住' : '查看'}
+            </button>
+            <button
+              onClick={genMonsters}
+              disabled={genMonstersBusy}
+              className="rounded-md border border-blood-400/50 px-2.5 py-1 text-[11px] text-blood-300 transition hover:bg-blood-400/10 disabled:opacity-50"
+              title="单独生成一次敌对者表：数值定死，之后战斗照此演出"
+            >
+              {genMonstersBusy ? '生成中…' : '生成敌对者'}
+            </button>
+          </div>
+        </div>
+        {genMonstersErr && <p className="mt-1.5 text-[10px] text-blood-400">{genMonstersErr}</p>}
+
+        {!monstersRevealed ? (
+          <p className="mt-2 text-[11px] text-mist-500/70">
+            已设定 {monsters.length} 个敌对者（点「查看」显示，会剧透）
+          </p>
+        ) : (
+          <div className="mt-2 space-y-2">
+            {monsters.map((m) => (
+              <div key={m.id} className="rounded-md border border-ink-700 bg-ink-900 p-2">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    className={`${inputCls} flex-1`}
+                    value={m.name}
+                    placeholder="名称"
+                    onChange={(e) => upsertMonster({ ...m, name: e.target.value })}
+                  />
+                  <input
+                    type="number"
+                    className={`${inputCls} w-16 shrink-0`}
+                    value={m.hp ?? ''}
+                    placeholder="生命"
+                    onChange={(e) =>
+                      upsertMonster({ ...m, hp: Number(e.target.value) || undefined })
+                    }
+                  />
+                  <button
+                    onClick={() => removeMonster(m.id)}
+                    className="shrink-0 rounded-md border border-ink-600 px-2 py-1.5 text-[11px] text-mist-500 transition hover:border-blood-400/60 hover:text-blood-400"
+                  >
+                    删
+                  </button>
+                </div>
+                <input
+                  className={`${inputCls} mt-1.5`}
+                  value={m.look ?? ''}
+                  placeholder="外观 / 声音 / 气味（只写玩家能感知的）"
+                  onChange={(e) => upsertMonster({ ...m, look: e.target.value })}
+                />
+                <input
+                  className={`${inputCls} mt-1.5`}
+                  value={m.attack ?? ''}
+                  placeholder="攻击方式与伤害骰（如：爪击 1d6）"
+                  onChange={(e) => upsertMonster({ ...m, attack: e.target.value })}
+                />
+                <input
+                  className={`${inputCls} mt-1.5`}
+                  value={m.behavior ?? ''}
+                  placeholder="行为：怎么接近、什么时候退"
+                  onChange={(e) => upsertMonster({ ...m, behavior: e.target.value })}
+                />
+                <input
+                  className={`${inputCls} mt-1.5`}
+                  value={m.weakness ?? ''}
+                  placeholder="弱点 / 破解方式（玩家的活路，必须给）"
+                  onChange={(e) => upsertMonster({ ...m, weakness: e.target.value })}
+                />
+                <button
+                  onClick={throwIntoCombat(m)}
+                  className="mt-1.5 w-full rounded-md border border-blood-400/40 py-1 text-[11px] text-blood-300 transition hover:bg-blood-400/10"
+                  title="按这里的数值把它放进战斗（引擎初始化 combat.foes）"
+                >
+                  投入战斗（按此数值）
+                </button>
+              </div>
+            ))}
+            <button
+              onClick={() =>
+                upsertMonster({ id: uid(), name: '', hp: undefined, attack: '', behavior: '', weakness: '' })
+              }
+              className="w-full rounded-md border border-dashed border-ink-600 py-1.5 text-[11px] text-mist-400 transition hover:border-blood-400/50 hover:text-mist-200"
+            >
+              ＋ 手动加一个
+            </button>
+          </div>
+        )}
+      </div>
+
       {/*
        * 道具表：**作用单独生成**。
        * 和「怪物设定页」同一个思路——能用独立步骤生成的，就别混在一次生成里。

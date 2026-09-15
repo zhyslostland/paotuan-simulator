@@ -815,6 +815,24 @@ describe('引擎强制结档（协作方 C/D：求死不走模型）', () => {
   });
 });
 
+describe('描述加权要进引擎，不能只是界面花招', () => {
+  it('skillCheck 的 bonus 会加进目标值（掷骰之前，判定与标签才一致）', () => {
+    store.setState({
+      character: { ...store.getState().character, skills: { 侦查: 50 } },
+    });
+    const plain = store.getState().skillCheck('侦查', 'regular', 0);
+    const boosted = store.getState().skillCheck('侦查', 'regular', 15);
+    expect(plain.target).toBe(50);
+    expect(boosted.target).toBe(65);
+    expect(boosted.bonus).toBe(15);
+  });
+
+  it('未受训技能也能被加权（游泳基础值 20% → +15 = 35%）', () => {
+    store.setState({ character: { ...store.getState().character, skills: {} } });
+    expect(store.getState().skillCheck('游泳', 'regular', 15).target).toBe(35);
+  });
+});
+
 describe('检定目标值文案随规则包变化', () => {
   it('d100 显示成功率百分比，d20 显示加值', () => {
     expect(checkTargetText({ target: 65, mainDice: '1d100' })).toBe('目标值 65%');

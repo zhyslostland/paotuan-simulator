@@ -73,6 +73,14 @@ function CheckCard({ badge }: { badge: CheckBadge }) {
         </span>
         <span className="text-[12px]">{badge.label}</span>
       </div>
+      {/* 描述加权：标出来，玩家才知道这个目标值为什么跟技能表里不一样 */}
+      {badge.bonus ? (
+        <div className="mt-1 text-[10px] opacity-75">
+          含描述{` `}
+          {badge.bonus > 0 ? '加分' : '扣分'} {badge.bonus > 0 ? '+' : ''}
+          {badge.bonus}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -53,6 +53,8 @@ export interface CheckBadge {
   difficulty?: 'regular' | 'hard' | 'extreme';
   /** 主骰表达式（"1d100" / "1d20"），UI 据此决定显示 % 还是 +加值 */
   mainDice?: string;
+  /** 描述加权给出的目标值修正量（正数＝更容易）；重掷时沿用 */
+  bonus?: number;
 }
 
 /** 模型返回的同行者发言，单独渲染，不混进 GM 叙事 */
@@ -425,6 +427,14 @@ export interface Module {
    */
   scale?: ModuleScale;
   /**
+   * 怪物 / 敌对者表（R38 的第一半）。
+   *
+   * 和道具表同一思路：**单独生成**。以前怪物的数值全靠模型临场发挥，
+   * 同一个东西前后两轮血量、攻击方式都对不上，玩家打赢了也不知道赢在哪。
+   * 定下来之后，数值是引擎的事实，模型照此演出。
+   */
+  monsters?: ModuleMonster[];
+  /**
    * 道具表：**单独生成**的一张"这个模组里会出现的东西"清单（含作用）。
    *
    * 为什么和角色卡的个人物品分开：塞进角色生成里会让模型一次想太多东西，
@@ -435,6 +445,25 @@ export interface Module {
 
 /** 模组篇幅（定义在 orchestrator/generate，这里只是再导出，避免 UI 反向依赖） */
 export type { ModuleScale };
+
+/**
+ * 模组里的一个敌对者。**数值一旦定下就是事实**（引擎会拿它初始化 `combat.foes`），
+ * 模型不得临场改。
+ */
+export interface ModuleMonster {
+  id: string;
+  name: string;
+  /** 外观 / 气味 / 声音——玩家能感知到的东西 */
+  look?: string;
+  /** 生命值上限 */
+  hp?: number;
+  /** 攻击方式与伤害（如"爪击 1d6"） */
+  attack?: string;
+  /** 行为特点：怎么打、什么时候退、怕什么 */
+  behavior?: string;
+  /** 弱点 / 破解方式（这一条是给玩家的活路） */
+  weakness?: string;
+}
 
 /** 模组道具表条目（作用由 AI 单独生成，玩家拿到就能看懂能干嘛） */
 export interface ModuleItem {
@@ -1541,7 +1570,12 @@ interface Store {
   /** 本地掷骰（不经过模型） */
   rollExpression(expr: string): DiceBadge;
   /** 技能检定：本地掷骰 + 规则包判定 */
-  skillCheck(skill: string, difficulty?: 'regular' | 'hard' | 'extreme'): CheckBadge;
+  /**
+   * 掷一次技能检定。
+   * `bonus` 是描述加权给出的目标值修正量（正数＝更容易），由引擎在**掷骰之前**加进目标值，
+   * 所以判定、成功率与结果标签都是一致的 —— 不是事后改数。
+   */
+  skillCheck(skill: string, difficulty?: 'regular' | 'hard' | 'extreme', bonus?: number): CheckBadge;
   /** 应用模型返回的状态变更 */
   applyModelDeltas(deltas: StateDelta[]): void;
   /** 记录回合开始时的状态快照（以该回合的玩家消息 id 为键），供回溯使用 */
@@ -2334,13 +2368,18 @@ export const useStore = create<Store>((set, get) => ({
     };
   },
 
-  skillCheck(skill, difficulty = 'regular') {
+  skillCheck(skill, difficulty = 'regular', bonus = 0) {
     const key = skill.trim();
     const rs = getRuleset(get().rulesetId);
     // 目标值可从角色卡技能 / 规则包基础值 / 属性表里解析（属性也可检定）
     const raw = resolveCheckTarget(key, get().character, rs) ?? 0;
     // DnD 要把属性分值折算成加值（15 → +2）；技能本身已是加值则原样
-    const target = rs.toModifier ? rs.toModifier(key, raw) : raw;
+    const base = rs.toModifier ? rs.toModifier(key, raw) : raw;
+    /*
+     * 描述加权：**在掷骰之前**加进目标值。
+     * 放在这里（而不是事后改结果）才能保证判定、成功率与结果标签三者一致。
+     */
+    const target = base + (bonus || 0);
     // COC 走百分骰；其它规则包退回主骰表达式（如 d20）
     const percentile = rs.mainDice === '1d100';
     if (percentile) {
@@ -2355,6 +2394,7 @@ export const useStore = create<Store>((set, get) => ({
         success: res.success,
         difficulty,
         mainDice: rs.mainDice,
+        bonus: bonus || undefined,
       };
     }
     const outcome = roll(rs.mainDice);
@@ -2368,6 +2408,7 @@ export const useStore = create<Store>((set, get) => ({
       success: res.success,
       difficulty,
       mainDice: rs.mainDice,
+      bonus: bonus || undefined,
     };
   },
 

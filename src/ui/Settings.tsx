@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useStore, TYPOGRAPHY_PRESETS, checkTargetText, type ThemeName } from './store';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TestSandbox } from './TestSandbox';
+import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
 import {
   canInstall,
   isStandalone,
@@ -564,6 +565,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const devMode = useStore((s) => s.devMode);
   const setDevMode = useStore((s) => s.setDevMode);
   const [sandboxOpen, setSandboxOpen] = useState(false);
+  const [changelogOpen, setChangelogOpen] = useState(false);
+  const [changelogNew, setChangelogNew] = useState(hasUnreadChangelog);
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
   const theme = useStore((s) => s.theme);
@@ -829,14 +832,33 @@ export function Settings({ onClose }: { onClose: () => void }) {
       <div
         className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-ink-600 bg-ink-900 p-5"
       >
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="font-serif text-lg text-mist-100">设置</h2>
-          <button
-            onClick={onClose}
-            className="rounded-md border border-ink-600 px-2.5 py-1 text-[13px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
-          >
-            关闭
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => {
+                markChangelogRead();
+                setChangelogOpen(true);
+                setChangelogNew(false);
+              }}
+              className="relative rounded-md border border-ink-600 px-2.5 py-1 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+              title="看看这一版改了什么"
+            >
+              更新日志
+              {changelogNew && (
+                <span
+                  className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-gold-400"
+                  title="有新的更新"
+                />
+              )}
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-md border border-ink-600 px-2.5 py-1 text-[13px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+            >
+              关闭
+            </button>
+          </div>
         </div>
 
         {/* 快速跳转：设置项变多了，先给一张"目录" */}
@@ -1514,6 +1536,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
         </div>
 
       {sandboxOpen && <TestSandbox onClose={() => setSandboxOpen(false)} />}
+      {changelogOpen && <ChangelogDialog onClose={() => setChangelogOpen(false)} />}
 
       {confirmReset && (
         <ConfirmDialog

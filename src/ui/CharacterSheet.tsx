@@ -25,7 +25,7 @@ export function CheckDialog({
   onCancel,
 }: {
   skill: string;
-  onConfirm: (target: string, action: string, difficulty: Difficulty) => void;
+  onConfirm: (target: string, action: string, bonus: number) => void;
   onCancel: () => void;
 }) {
   const character = useStore((s) => s.character);
@@ -33,7 +33,6 @@ export function CheckDialog({
   const rulesetId = useStore((s) => s.rulesetId);
   const [target, setTarget] = useState('');
   const [action, setAction] = useState('');
-  const [difficulty, setDifficulty] = useState<Difficulty>('regular');
 
   const rs = getRuleset(rulesetId);
   /*
@@ -66,16 +65,22 @@ export function CheckDialog({
    */
   const needsWeapon =
     skillDef && /射击|投掷|弓/.test(skillDef.name) ? skillDef.name : null;
-  const weight = weighDescription(action, {
-    npcs: gameState.npcsAlive,
-    visited: gameState.visited,
-    clues: gameState.clues,
-    items: gameState.inventory.map((i) => i.name),
-    requiredWeapon: needsWeapon,
-    hasWeapon: needsWeapon
-      ? gameState.inventory.some((i) => i.kind === 'weapon' && i.skill?.trim() === needsWeapon)
-      : true,
-  }, difficulty);
+  const weight = weighDescription(
+    action,
+    {
+      npcs: gameState.npcsAlive,
+      visited: gameState.visited,
+      clues: gameState.clues,
+      items: gameState.inventory.map((i) => i.name),
+      requiredWeapon: needsWeapon,
+      hasWeapon: needsWeapon
+        ? gameState.inventory.some((i) => i.kind === 'weapon' && i.skill?.trim() === needsWeapon)
+        : true,
+    },
+    rs.mainDice === '1d100' ? 'percent' : 'modifier'
+  );
+  /** 加权后的目标值（引擎仍按这个值来判定，不是界面上的花招） */
+  const weightedValue = value + weight.bonus;
   const npcTargets = gameState.npcsAlive;
   const mateTargets = gameState.companions
     .filter((c) => c.alive && c.present)
@@ -162,28 +167,12 @@ export function CheckDialog({
           />
         </div>
 
-        {/* 难度：通常由守密人的要求决定，玩家也可以自己选更稳妥/更冒险的做法 */}
-        <div className="mt-4">
-          <span className="mb-1.5 block text-[11px] text-mist-400">
-            难度
-          </span>
-          <div className="flex flex-wrap gap-1.5">
-            {(['regular', 'hard', 'extreme'] as Difficulty[]).map((d) => (
-              <button
-                key={d}
-                onClick={() => setDifficulty(d)}
-                className={`rounded-md border px-2.5 py-1 text-[12px] transition ${
-                  difficulty === d
-                    ? 'border-gold-600/70 text-gold-400'
-                    : 'border-ink-600 text-mist-400'
-                }`}
-              >
-                {DIFFICULTY_LABEL[d]}
-              </button>
-            ))}
-          </div>
-        </div>
-
+        {/*
+         * 这里**没有**难度选项，是刻意的：
+         * 难度由守密人的要求（或这一次行动本身的性质）决定，不该由玩家自己挑
+         * ——"我宣布这次是极难"毫无意义，等于让玩家决定事情有多难。
+         * 玩家能影响的只有"我描述得有多用心"，也就是下面的描述加权。
+         */}
         <div className="mt-4">
           <span className="mb-1.5 block text-[11px] text-mist-400">
             你想怎么做 <span className="text-mist-500/70">（行为描述，会一起发给守密人）</span>
@@ -197,20 +186,31 @@ export function CheckDialog({
           />
           {/* 描述加权的结果必须让玩家看得见，否则他会以为是系统在偷偷改数值 */}
           <p className="mt-1.5 text-[11px] leading-relaxed">
-            <span className={weight.score >= 2 ? 'text-moss-400' : weight.score <= -1 ? 'text-blood-300' : 'text-mist-500'}>
-              {weight.score >= 2
-                ? `描述加分 +${weight.score} → 难度降到${DIFFICULTY_LABEL[weight.difficulty]}`
-                : weight.score <= -1
-                  ? `描述 ${weight.score} → 难度升到${DIFFICULTY_LABEL[weight.difficulty]}`
-                  : `描述 ${weight.score >= 1 ? `+${weight.score}` : weight.score} → 难度${DIFFICULTY_LABEL[weight.difficulty]}（不变）`}
-            </span>
+            {weight.bonus === 0 ? (
+              <span className="text-mist-500">
+                目标值 {isPercent ? `${value}%` : `${value >= 0 ? '+' : ''}${value}`}（不变）
+              </span>
+            ) : (
+              <span className={weight.bonus > 0 ? 'text-moss-400' : 'text-blood-300'}>
+                目标值{' '}
+                <span className="line-through opacity-60">
+                  {isPercent ? `${value}%` : `${value >= 0 ? '+' : ''}${value}`}
+                </span>{' '}
+                →{' '}
+                {isPercent
+                  ? `${weightedValue}%`
+                  : `${weightedValue >= 0 ? '+' : ''}${weightedValue}`}
+                （描述{weight.bonus > 0 ? '加分' : '扣分'} {weight.bonus > 0 ? '+' : ''}
+                {weight.bonus}）
+              </span>
+            )}
             <span className="ml-1 text-mist-500/70">（{weight.reasons.join('；')}）</span>
           </p>
         </div>
 
         <div className="mt-3 flex gap-2">
           <button
-            onClick={() => onConfirm(target, action, weight.difficulty)}
+            onClick={() => onConfirm(target, action, weight.bonus)}
             className="flex-1 rounded-lg bg-gold-500 px-4 py-2 text-[13px] font-medium text-ink-950 transition hover:bg-gold-400"
           >
             掷骰检定

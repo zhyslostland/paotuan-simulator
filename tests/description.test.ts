@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { weighDescription, DIFFICULTY_LABEL, type WeighContext } from '../src/core/description.js';
+import { weighDescription, type WeighContext } from '../src/core/description.js';
 
 const ctx: WeighContext = {
   npcs: ['老霍华德'],
@@ -8,64 +8,51 @@ const ctx: WeighContext = {
   items: ['撬棍'],
 };
 
-describe('描述加权（每一次检定都算，但只调难度档位）', () => {
-  it('空描述不奖不罚 —— 不逼玩家写作文', () => {
-    expect(weighDescription('', ctx).score).toBe(0);
-    expect(weighDescription('开门', ctx).difficulty).toBe('regular');
-    expect(weighDescription('', ctx).reasons.join()).toContain('难度不变');
+describe('描述加权（改的是目标值，不是难度档位）', () => {
+  it('没有描述 → 不加不减，也不逼玩家写作文', () => {
+    expect(weighDescription('', ctx).bonus).toBe(0);
+    expect(weighDescription('开门', ctx).bonus).toBe(0);
   });
 
-  it('点到了场上真实存在的东西 +1', () => {
-    const w = weighDescription('我向老霍华德打听灯塔的事', ctx);
-    expect(w.score).toBe(1);
-    expect(w.reasons.join()).toContain('老霍华德');
+  it('写得越多分越高（用户报的问题：以前写两句 +1、写一堆 +0）', () => {
+    const two = weighDescription('我撬门', ctx);
+    const many = weighDescription(
+      '我把撬棍卡进门缝，肩膀顶住，先慢慢加力听听里面的动静，再猛地一压',
+      ctx
+    );
+    expect(many.score).toBeGreaterThan(two.score);
+    expect(many.bonus).toBeGreaterThan(two.bonus);
   });
 
-  it('写明具体做法 +1', () => {
-    expect(weighDescription('我慢慢把门推开一条缝', ctx).score).toBe(1);
-  });
-
-  it('两条都占满 → 难度降一档', () => {
-    // 撬棍（随身物品）+1、"用 / 慢慢"（做法）+1
-    const w = weighDescription('我用撬棍卡进门缝，慢慢加力', ctx, 'hard');
+  it('长度达标 +1，详细 +1，提到场上真实存在的东西再 +1（封顶 +2）', () => {
+    const w = weighDescription('我在码头跟老霍华德打听灯塔的事，问他那卷胶卷到底给了谁', ctx);
     expect(w.score).toBe(2);
-    expect(w.difficulty).toBe('regular');
-    expect(weighDescription('我用撬棍卡进门缝，慢慢加力', ctx, 'extreme').difficulty).toBe('hard');
+    expect(w.bonus).toBe(15);
   });
 
-  it('普通难度不能再降（幅度封顶一档）', () => {
-    expect(weighDescription('我用撬棍卡进门缝，慢慢加力', ctx, 'regular').difficulty).toBe(
-      'regular'
-    );
+  it('百分比规则与加值规则的修正量不同', () => {
+    const long = '我把撬棍卡进门缝，肩膀顶住，先慢慢加力听听里面的动静，再猛地一压';
+    expect(weighDescription(long, ctx, 'percent').bonus).toBe(15);
+    expect(weighDescription(long, ctx, 'modifier').bonus).toBe(2);
   });
 
-  it('手里没有需要的武器 → 扣分并升一档', () => {
+  it('手里没有需要的武器 → 直接扣到负', () => {
     const w = weighDescription(
-      '我举枪瞄准他',
+      '我举枪瞄准他，慢慢扣下扳机',
       { ...ctx, requiredWeapon: '射击（手枪）', hasWeapon: false },
-      'regular'
+      'percent'
     );
-    expect(w.score).toBeLessThanOrEqual(-1);
-    expect(w.difficulty).toBe('hard');
+    expect(w.score).toBe(-2);
+    expect(w.bonus).toBe(-15);
     expect(w.reasons.join()).toContain('手里没有');
   });
 
-  it('有武器时不会因为"提到枪"被扣分', () => {
+  it('有武器时不因为"提到枪"被扣分', () => {
     const w = weighDescription(
-      '我举枪瞄准他',
+      '我举枪瞄准他，慢慢扣下扳机',
       { ...ctx, requiredWeapon: '射击（手枪）', hasWeapon: true },
-      'regular'
+      'percent'
     );
-    expect(w.score).toBeGreaterThanOrEqual(0);
-  });
-
-  it('写得长但没有实质内容 → 不加分（防刷描述）', () => {
-    const w = weighDescription('我要想办法把这件事给办了，总之一定要成功才行啊', ctx);
-    expect(w.score).toBeLessThan(2);
-    expect(w.difficulty).toBe('regular');
-  });
-
-  it('难度标签齐全', () => {
-    expect(Object.values(DIFFICULTY_LABEL)).toEqual(['普通', '困难', '极难']);
+    expect(w.bonus).toBeGreaterThanOrEqual(0);
   });
 });

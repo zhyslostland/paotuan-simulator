@@ -32,6 +32,7 @@ import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.
 import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
 import { EndingScreen } from './EndingScreen';
 import { TestSandbox } from './TestSandbox';
+import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 
@@ -94,6 +95,7 @@ export default function App() {
   /** 被识别为"主动求死"的那句话，等玩家二次确认 */
   const [pendingSuicide, setPendingSuicide] = useState<string | null>(null);
   const [showSandbox, setShowSandbox] = useState(false);
+  const [showChangelog, setShowChangelog] = useState(false);
   const devMode = useStore((s) => s.devMode);
   const [installable, setInstallable] = useState(false);
   /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
@@ -121,6 +123,15 @@ export default function App() {
     const t = setTimeout(() => useStore.getState().clearChanges(), 9000);
     return () => clearTimeout(t);
   }, [lastChanges?.id]);
+
+  /*
+   * 新版本进来时自动弹一次更新日志。
+   * 跳过"全新用户"——那种情况欢迎页更重要，两个弹窗叠在一起很烦。
+   */
+  useEffect(() => {
+    if (localStorage.getItem('trpg.welcomed') !== '1') return;
+    if (hasUnreadChangelog()) setShowChangelog(true);
+  }, []);
 
   /*
    * 重新打开页面时，如果这一局已经结档了（结局正文也写好了），把结档页顶上来。
@@ -545,11 +556,12 @@ export default function App() {
     skill: string,
     difficulty: Difficulty,
     target = '',
-    action = ''
+    action = '',
+    bonus = 0
   ) => {
     if (streaming) return;
     if (blockedByEnding()) return;
-    const badge = skillCheck(skill, difficulty);
+    const badge = skillCheck(skill, difficulty, bonus);
     // 判定音效：只在大成功 / 大失败这两个"值得记住的瞬间"响
     const audioCfg = useStore.getState().audio;
     if (audioCfg.enabled) {
@@ -687,7 +699,7 @@ export default function App() {
     if (pm.check) {
       const badge = useStore
         .getState()
-        .skillCheck(pm.check.skill, pm.check.difficulty ?? 'regular');
+        .skillCheck(pm.check.skill, pm.check.difficulty ?? 'regular', pm.check.bonus ?? 0);
       useStore.getState().addMessage({ role: 'player', content: pm.content, check: badge });
       await sendToGm(
         `【引擎判定，不可更改】玩家进行${pm.check.skill}检定，${checkTargetText(badge)}，` +
@@ -697,7 +709,7 @@ export default function App() {
     } else if (pm.checks?.length) {
       // 一次全掷过的那一轮：重掷就把每一条都重新掷一遍
       const badges = pm.checks.map((c) =>
-        useStore.getState().skillCheck(c.skill, c.difficulty ?? 'regular')
+        useStore.getState().skillCheck(c.skill, c.difficulty ?? 'regular', c.bonus ?? 0)
       );
       useStore.getState().addMessage({ role: 'player', content: pm.content, checks: badges });
       const lines = badges
@@ -820,7 +832,10 @@ export default function App() {
 
       <div className="flex min-h-0 flex-1">
         <aside className="hidden w-64 shrink-0 overflow-y-auto border-r border-ink-700 bg-ink-900 lg:block xl:w-72">
-          <CharacterSheet onRequestCheck={setCheckSkill} />
+          <CharacterSheet
+            onRequestCheck={setCheckSkill}
+            onUseItem={(text) => void handleSend(text)}
+          />
         </aside>
 
         <main className="min-w-0 flex-1">
@@ -838,7 +853,10 @@ export default function App() {
           </div>
           <div className={mobilePanel === 'character' ? 'h-full lg:hidden' : 'hidden'}>
             <div className="h-full overflow-y-auto">
-              <CharacterSheet onRequestCheck={setCheckSkill} />
+              <CharacterSheet
+                onRequestCheck={setCheckSkill}
+                onUseItem={(text) => void handleSend(text)}
+              />
             </div>
           </div>
           <div className={mobilePanel === 'world' ? 'h-full lg:hidden' : 'hidden'}>
@@ -1008,11 +1026,10 @@ export default function App() {
         <CheckDialog
           skill={checkSkill}
           onCancel={() => setCheckSkill(null)}
-          onConfirm={(target, action, difficulty) => {
+          onConfirm={(target, action, bonus) => {
             const skill = checkSkill;
             setCheckSkill(null);
-            // 难度由检定面板给出（已含描述加权的结果）
-            void handleCheck(skill, difficulty ?? 'regular', target, action);
+            void handleCheck(skill, 'regular', target, action, bonus ?? 0);
           }}
         />
       )}
@@ -1042,6 +1059,14 @@ export default function App() {
        * 它不是"你死了，请重来"的弹窗，而是一屏收束叙事 + 回溯入口。
        */}
       {showSandbox && <TestSandbox onClose={() => setShowSandbox(false)} />}
+      {showChangelog && (
+        <ChangelogDialog
+          onClose={() => {
+            markChangelogRead();
+            setShowChangelog(false);
+          }}
+        />
+      )}
       {showEnding && gameState.ending?.text && (
         <EndingScreen
           onClose={() => setShowEnding(false)}

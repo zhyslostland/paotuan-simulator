@@ -394,6 +394,15 @@ export function buildSystemPrompt(ctx: PromptContext): string {
             .join('\n')}\n（玩家拾取或使用时，按这里写的作用如实呈现；不要临时发挥成别的效果）`
         : '',
       ctx.module.locations ? `## 关键地点\n${ctx.module.locations}` : '',
+      ctx.module.monsters?.length
+        ? `## 敌对者（**数值已定，照此演出，不得临场改**）\n${ctx.module.monsters
+            .map(
+              (m) =>
+                `- **${m.name}**（生命 ${m.hp ?? '—'}）：${m.look ?? ''}\n` +
+                `  攻击：${m.attack ?? '—'}；行为：${m.behavior ?? '—'}；弱点：${m.weakness ?? '—'}`
+            )
+            .join('\n')}\n（战斗一旦开始，这些就是事实：血量、攻击与弱点都按这里来）`
+        : '',
       ctx.module.clueChain
         ? `## 线索链（按此推进，避免卡关；线索要逐步给出，不要一次抖完）\n${ctx.module.clueChain}`
         : '',
