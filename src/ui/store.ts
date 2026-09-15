@@ -140,6 +140,12 @@ export interface TurnSnapshot {
   key?: boolean;
   /** 锚点的一句话说明（如"掷骰：潜行"、"进入战斗"、"受伤 -3"） */
   label?: string;
+  /**
+   * 这一回合结束时留下的待掷检定队列。
+   * 回溯要能把它一起恢复，否则"GM 一次要了 2 个检定、掷了 1 个、想退回去重来"时，
+   * 另一个检定就再也找不回来了（协作方 F）。
+   */
+  pendingChecks?: PendingCheck[];
 }
 
 /** 快照最多保留的回合数，超出的从最旧的开始丢 */
@@ -151,6 +157,12 @@ export interface Message {
   content: string;
   dice?: DiceBadge[];
   check?: CheckBadge;
+  /**
+   * 一次行动里的多次检定（"一次全掷"）。
+   * 保留 `check` 字段是为了兼容老存档与已有的渲染/重掷逻辑——
+   * 单次检定仍然走 `check`，只有两次以上才用 `checks`。
+   */
+  checks?: CheckBadge[];
   npcLines?: NpcLine[];
   /** 该条 GM 回复配的动作场景小图（生图结果，可空） */
   sceneImage?: string;
@@ -586,6 +598,19 @@ export const STARTER_CHARACTERS: Record<string, Partial<CharacterProfile>> = {
     personality:
       '沉默寡言，观察力强。因三年前一桩始终没查清的失踪案，他对"无法解释的事"有近乎偏执的兴趣。',
     scenario: '深夜，你独自在事务所整理卷宗，门外传来迟疑的敲门声。',
+    items: ['笔记本', '.38 左轮手枪', '禄来福来双反相机', '手电筒'],
+    itemDetails: [
+      { name: '笔记本', desc: '记录案子的随身本，边角磨得起了毛。', kind: 'clue' },
+      {
+        name: '.38 左轮手枪',
+        desc: '警用制式左轮，六发装填，握把缠了防滑胶带。',
+        kind: 'weapon',
+        damage: '1d10',
+        skill: '射击（手枪）',
+      },
+      { name: '禄来福来双反相机', desc: '从战地一起带回来的老相机，还能用。', kind: 'tool' },
+      { name: '手电筒', desc: '黄铜外壳的旧手电，光有点发黄但照得远。', kind: 'tool' },
+    ],
   },
   tokyo: {
     name: '佐仓真白',
@@ -595,6 +620,13 @@ export const STARTER_CHARACTERS: Record<string, Partial<CharacterProfile>> = {
     personality:
       '嘴上大大咧咧、爱开玩笑，其实比谁都怕黑。收集别人的故事，是为了不去想自己那一件。',
     scenario: '凌晨一点，你在便利店门口等人，手机里那条读者私信还亮着：别去那栋公寓。',
+    items: ['录音笔', '旧帆布包', '数码相机', '罐装咖啡'],
+    itemDetails: [
+      { name: '录音笔', desc: '采访用的小录音笔，能连续录十几个小时。', kind: 'tool' },
+      { name: '旧帆布包', desc: '塞满备用电池和稿纸的帆布包，侧袋里藏着一把折叠伞。', kind: 'tool' },
+      { name: '数码相机', desc: '二手单反，闪光灯坏了，白天拍得清楚。', kind: 'tool' },
+      { name: '罐装咖啡', desc: '便利店买的黑咖啡，一口下去能再撑两小时。', kind: 'consumable' },
+    ],
   },
   fantasy: {
     name: '凯尔·渡鸦',
@@ -604,6 +636,19 @@ export const STARTER_CHARACTERS: Record<string, Partial<CharacterProfile>> = {
     personality:
       '话不多，但答应的事一定做到。讨厌贵族和神棍，对钱却算得很清楚——因为欠着债。',
     scenario: '你在铁砧镇的酒馆里啃着干面包，盘算着赏金还差多少能还清那笔债。',
+    items: ['用旧的长剑', '磨损的皮甲', '干粮', '一枚褪色的雇兵徽章'],
+    itemDetails: [
+      {
+        name: '用旧的长剑',
+        desc: '剑刃上满是修磨的痕迹，握柄缠着旧布条，重心很顺手。',
+        kind: 'weapon',
+        damage: '1d8+2',
+        skill: '格斗（斗殴）',
+      },
+      { name: '磨损的皮甲', desc: '前胸有一道没补好的裂口，但还能挡几下。', kind: 'tool' },
+      { name: '干粮', desc: '硬得能敲桌子的黑面包和一条肉干。', kind: 'consumable' },
+      { name: '一枚褪色的雇兵徽章', desc: '你不想再戴却一直没扔的旧徽章。', kind: 'clue' },
+    ],
   },
   acg: {
     name: '神代遥',
@@ -613,6 +658,13 @@ export const STARTER_CHARACTERS: Record<string, Partial<CharacterProfile>> = {
     personality:
       '嘴硬心软，遇事爱吐槽但从不缺席。对"讲不通的事"有种不服输的执拗。',
     scenario: '放课后的活动室只剩你一个人，窗外天色暗得比平时早。',
+    items: ['书包', '手机', '文艺部活动记录本', '一盒薄荷糖'],
+    itemDetails: [
+      { name: '书包', desc: '挂着整串没用的挂件，侧袋里塞着伞和充电宝。', kind: 'tool' },
+      { name: '手机', desc: '屏幕角上贴了防摔膜，聊天记录里存着那几条怪事。', kind: 'tool' },
+      { name: '文艺部活动记录本', desc: '部里传下来的旧本子，最后几页的字迹不是部员的。', kind: 'clue' },
+      { name: '一盒薄荷糖', desc: '提神用，还剩小半盒。', kind: 'consumable' },
+    ],
   },
   urban: {
     name: '江临',
@@ -622,6 +674,13 @@ export const STARTER_CHARACTERS: Record<string, Partial<CharacterProfile>> = {
     personality:
       '表面吊儿郎当、爱贫嘴，真到要紧关头比谁都冷静。讨厌"组织"和说教，却对街上无家可归的孩子格外心软。',
     scenario: '凌晨的便利店，你盯着货架发呆，手机里那条匿名消息又亮了：今晚别坐 7 号线。',
+    items: ['旧耳机', '手机', '一次性打火机', '便利店饭团'],
+    itemDetails: [
+      { name: '旧耳机', desc: '左耳那只从没摘下来过，线皮已经开胶。', kind: 'tool' },
+      { name: '手机', desc: '屏幕右上角碎了一小块，那条匿名消息还在。', kind: 'tool' },
+      { name: '一次性打火机', desc: '便利店顺手拿的，火苗忽大忽小。', kind: 'tool' },
+      { name: '便利店饭团', desc: '刚买的，还温着。', kind: 'consumable' },
+    ],
   },
 };
 
@@ -647,7 +706,52 @@ export function defaultCharacteristics(rulesetId = 'coc7'): Record<string, numbe
 }
 
 /**
+ * 常见技能别名 —— 模型与老档里写过的非规范名，映射到规则包技能表里的标准名。
+ *
+ * 为什么需要：`skillCatalog` 里叫「射击（手枪）」「图书馆使用」，
+ * 但模型（和老角色卡）经常写成「手枪」「图书馆学」。
+ * 名字对不上，就查不到基础值、算不准技能点预算，未受训技能还会被兜底成 50%。
+ */
+export const SKILL_ALIAS: Record<string, string> = {
+  手枪: '射击（手枪）',
+  左轮: '射击（手枪）',
+  射击: '射击（手枪）',
+  步枪: '射击（步枪/霰弹枪）',
+  霰弹枪: '射击（步枪/霰弹枪）',
+  图书馆学: '图书馆使用',
+  图书馆: '图书馆使用',
+  侦察: '侦查',
+  聆听: '聆听',
+  急救术: '急救',
+  医疗: '医学',
+  电脑使用: '计算机使用',
+  电子学: '电子学',
+  母语: '母语',
+  外语: '外语（其他）',
+  攀爬: '攀爬',
+  闪避: '闪避',
+  驾驶: '汽车驾驶',
+};
+
+/** 把技能名规范化成规则包里的标准名（找不到就原样返回） */
+export function canonicalSkillName(name: string, rs: ReturnType<typeof getRuleset>): string {
+  const key = name.trim();
+  const aliased = SKILL_ALIAS[key] ?? key;
+  if (rs.skillCatalog.some((s) => s.name === key)) return key;
+  if (rs.skillCatalog.some((s) => s.name === aliased)) return aliased;
+  // 再退一步：包含关系（"手枪" ⊂ "射击（手枪）"）
+  const partial = rs.skillCatalog.find((s) => s.name.includes(key) || key.includes(s.name));
+  return partial?.name ?? aliased;
+}
+
+/**
  * 按"技能名 或 属性键/中文标签"解析检定目标值。
+ *
+ * 技能查表的顺序是**角色卡的技能 → 规则包技能表的基础值 → 属性**。
+ * 中间这一步很关键：角色卡里没写「游泳」，不代表不能游泳——
+ * 规则包里「游泳」的基础值是 20%，未受训就按基础值掷，
+ * 而不是兜底成 50%（那等于白送 30 个百分点）。
+ *
  * 找不到返回 null（调用方自行决定回退值）。
  */
 export function resolveCheckTarget(
@@ -657,6 +761,12 @@ export function resolveCheckTarget(
 ): number | null {
   const key = name.trim();
   if (character.skills[key] != null) return character.skills[key];
+  // 别名/规范名再查一次角色卡（"手枪" → 卡里可能存的是"射击（手枪）"）
+  const canon = canonicalSkillName(key, rs);
+  if (canon !== key && character.skills[canon] != null) return character.skills[canon];
+  // 规则包技能表的基础值：未受训也能掷，只是低
+  const sk = rs.skillCatalog.find((s) => s.name === canon || s.name === key);
+  if (sk) return sk.base;
   const ch = character.characteristics;
   if (ch[key] != null) return ch[key];
   // 属性可能用中文标签（"力量"→str），或反过来用键
@@ -678,10 +788,12 @@ export function skillBudget(
   const edu = character.characteristics.edu ?? 50;
   const int = character.characteristics.int ?? 50;
   const total = edu * 4 + int * 2;
+  // 名字要先规范化，否则"手枪"查不到「射击（手枪）」的基础值，
+  // 会把 20 点基础当成投入点数，预算直接算错。
   const baseMap = new Map(rs.skillCatalog.map((s) => [s.name, s.base]));
   let spent = 0;
   for (const [name, value] of Object.entries(character.skills)) {
-    const base = baseMap.get(name) ?? 0;
+    const base = baseMap.get(canonicalSkillName(name, rs)) ?? 0;
     spent += Math.max(0, value - base);
   }
   return { total, spent, remaining: total - spent };
@@ -697,17 +809,29 @@ const DEFAULT_CHARACTER: CharacterProfile = {
     '沉默寡言，观察力强。因三年前一桩始终没查清的失踪案，他对"无法解释的事"有近乎偏执的兴趣；面对超自然现象时，用职业性的冷静掩饰内心的动摇。',
   mes_example: '',
   characteristics: defaultCharacteristics(),
+  // 技能名一律用规则包 skillCatalog 里的**标准名**
   skills: {
     侦查: 70,
-    图书馆学: 55,
+    图书馆使用: 55,
     说服: 50,
     心理学: 60,
     潜行: 45,
     锁匠: 30,
-    手枪: 40,
+    '射击（手枪）': 40,
     克苏鲁神话: 8,
   },
   items: ['笔记本', '.38 左轮手枪', '禄来福来双反相机'],
+  itemDetails: [
+    { name: '笔记本', desc: '记录案子的随身本，边角磨得起了毛。', kind: 'clue' },
+    {
+      name: '.38 左轮手枪',
+      desc: '警用制式左轮，六发装填，握把缠了防滑胶带。',
+      kind: 'weapon',
+      damage: '1d10',
+      skill: '射击（手枪）',
+    },
+    { name: '禄来福来双反相机', desc: '从战地一起带回来的老相机，还能用。', kind: 'clue' },
+  ],
 };
 
 export type ThemeName = 'midnight' | 'ash' | 'parchment';
@@ -1387,6 +1511,14 @@ interface Store {
   snapshotTurn(playerMsgId: string): void;
   /** 把某个回合标成"关键决策点"（回溯锚点） */
   markSnapshotKey(playerMsgId: string, label?: string): void;
+  /** 把待掷检定队列写进该回合的快照（回溯时可原样恢复） */
+  setSnapshotPendingChecks(playerMsgId: string, list: PendingCheck[]): void;
+  /**
+   * 引擎强制结档（求死、放弃抵抗等）。
+   * 不走模型：模型对自杀有安全对齐，会产出软拒绝把剧情拉回来，
+   * 玩家的意志反而被"救"了——这种事必须由引擎说了算。
+   */
+  forceEnding(kind: Ending['kind']): void;
   /** 结档：写一段守密人给的结局正文 */
   setEnding(kind: Ending['kind'], text: string): void;
   /** 清除结档状态（开新团、或玩家从结档页回溯时） */
@@ -1590,6 +1722,8 @@ export const useStore = create<Store>((set, get) => ({
         gameState: s.gameState,
         chronicle: s.chronicle,
         summary: s.summary,
+        // 该回合产生的待掷队列会在 GM 回复后由 setSnapshotPendingChecks 补写进来
+        pendingChecks: [],
       },
     };
     // 清掉已被删除消息的快照，并按回合数上限裁剪（丢最旧的）
@@ -1611,6 +1745,24 @@ export const useStore = create<Store>((set, get) => ({
     };
     saveJson('trpg.snapshots', next);
     set({ snapshots: next });
+  },
+
+  setSnapshotPendingChecks(playerMsgId, list) {
+    const snap = get().snapshots[playerMsgId];
+    if (!snap) return;
+    const next = { ...get().snapshots, [playerMsgId]: { ...snap, pendingChecks: list } };
+    saveJson('trpg.snapshots', next);
+    set({ snapshots: next });
+  },
+
+  forceEnding(kind) {
+    const gs: GameState = {
+      ...get().gameState,
+      dying: false,
+      ending: { kind, text: '', at: new Date().toISOString() },
+    };
+    saveJson('trpg.gameState', gs);
+    set({ gameState: gs });
   },
 
   setEnding(kind, text) {
@@ -1648,7 +1800,19 @@ export const useStore = create<Store>((set, get) => ({
     saveJson('trpg.chronicle', chronicle);
     saveJson('trpg.summary', summary);
     saveJson('trpg.snapshots', snapshots);
-    set({ messages: kept, gameState, chronicle, summary, snapshots, pendingChecks: [], lastChanges: null });
+    /*
+     * 待掷队列要按快照恢复，不能一律清空。
+     * 否则"GM 一次要求 2 个检定 → 掷掉 1 个 → 想退回去重来"时，另一个检定就永远找不回来了。
+     */
+    set({
+      messages: kept,
+      gameState,
+      chronicle,
+      summary,
+      snapshots,
+      pendingChecks: snap?.pendingChecks ?? [],
+      lastChanges: null,
+    });
   },
 
   setConfig(patch) {
@@ -2122,8 +2286,8 @@ export const useStore = create<Store>((set, get) => ({
   skillCheck(skill, difficulty = 'regular') {
     const key = skill.trim();
     const rs = getRuleset(get().rulesetId);
-    // 目标值可从技能表或属性表里解析（属性也可检定）
-    const raw = resolveCheckTarget(key, get().character, rs) ?? 50;
+    // 目标值可从角色卡技能 / 规则包基础值 / 属性表里解析（属性也可检定）
+    const raw = resolveCheckTarget(key, get().character, rs) ?? 0;
     // DnD 要把属性分值折算成加值（15 → +2）；技能本身已是加值则原样
     const target = rs.toModifier ? rs.toModifier(key, raw) : raw;
     // COC 走百分骰；其它规则包退回主骰表达式（如 d20）

@@ -46,6 +46,7 @@ let fillPlayerTokens: typeof import('../src/ui/store.js').fillPlayerTokens;
 let sanitizeStateTokens: typeof import('../src/ui/store.js').sanitizeStateTokens;
 let sanitizeModuleTokens: typeof import('../src/ui/store.js').sanitizeModuleTokens;
 let checkTargetText: typeof import('../src/ui/store.js').checkTargetText;
+let canonicalSkillName: typeof import('../src/ui/store.js').canonicalSkillName;
 let migrateSave: typeof import('../src/ui/store.js').migrateSave;
 let SAVE_VERSION: typeof import('../src/ui/store.js').SAVE_VERSION;
 
@@ -71,6 +72,7 @@ beforeAll(async () => {
   sanitizeStateTokens = mod.sanitizeStateTokens;
   sanitizeModuleTokens = mod.sanitizeModuleTokens;
   checkTargetText = mod.checkTargetText;
+  canonicalSkillName = mod.canonicalSkillName;
   migrateSave = mod.migrateSave;
   SAVE_VERSION = mod.SAVE_VERSION;
 });
@@ -740,6 +742,76 @@ describe('开新团要清干净上一局的东西', () => {
      * 候选是随当前模组生成的，一清准备页的「同行者」就空了。
      */
     expect(store.getState().companionCandidates.map((c) => c.name)).toEqual(['米拉·陈']);
+  });
+});
+
+describe('未受训技能按规则包基础值掷（协作方 G）', () => {
+  const rs = getRuleset('coc7');
+  const mk = () => mergeCharacter(JSON.stringify({ name: '甲' }));
+
+  it('角色卡里没有的技能，落到规则包的基础值而不是 50', () => {
+    const c = mk();
+    expect(c.skills['游泳']).toBeUndefined();
+    // COC 游泳基础值 20%（早期会兜底成 50）
+    expect(resolveCheckTarget('游泳', c, rs)).toBe(20);
+  });
+
+  it('别名能对上规范技能名（手枪 → 射击（手枪））', () => {
+    const picked = rs.skillCatalog.find((s) => s.name === '射击（手枪）')!;
+    expect(canonicalSkillName('手枪', rs)).toBe('射击（手枪）');
+    expect(canonicalSkillName('图书馆学', rs)).toBe('图书馆使用');
+    // 卡上存的是规范名 → 用别名去问也能问到卡上的值
+    expect(resolveCheckTarget('手枪', mk(), rs)).toBe(40);
+    // 卡上完全没有这项 → 落到规则包基础值
+    const bare = { ...mk(), skills: {} };
+    expect(resolveCheckTarget('手枪', bare, rs)).toBe(picked.base);
+    expect(resolveCheckTarget('游泳', bare, rs)).toBe(20);
+  });
+
+  it('角色卡里已有的技能仍以卡上数值为准', () => {
+    const c = { ...mk(), skills: { 侦查: 73 } };
+    expect(resolveCheckTarget('侦查', c, rs)).toBe(73);
+  });
+
+  it('属性检定不受影响', () => {
+    const c = mk();
+    expect(resolveCheckTarget('力量', c, rs)).toBe(c.characteristics.str);
+    expect(resolveCheckTarget('str', c, rs)).toBe(c.characteristics.str);
+  });
+
+  it('技能点预算也认别名（否则会把基础值当成投入点数）', () => {
+    const c = { ...mk(), skills: { '射击（手枪）': 40 } };
+    const withCanon = skillBudget(c, 'coc7');
+    const withAlias = skillBudget({ ...c, skills: { 手枪: 40 } }, 'coc7');
+    expect(withAlias.spent).toBe(withCanon.spent);
+  });
+});
+
+describe('回溯要恢复待掷检定队列（协作方 F）', () => {
+  it('快照能存队列，回溯时按快照恢复而不是一律清空', () => {
+    const id = store.getState().addMessage({ role: 'player', content: '我同时看和听' });
+    store.getState().snapshotTurn(id);
+    store.getState().setSnapshotPendingChecks(id, [{ skill: '侦查' }, { skill: '聆听' }]);
+    expect(store.getState().snapshots[id]!.pendingChecks).toHaveLength(2);
+
+    // 掷掉一个
+    store.getState().setPendingChecks([{ skill: '聆听' }]);
+    expect(store.getState().pendingChecks).toHaveLength(1);
+
+    // 回溯 → 两个都回来了
+    store.getState().rewindBefore(id);
+    expect(store.getState().pendingChecks.map((c) => c.skill)).toEqual(['侦查', '聆听']);
+  });
+});
+
+describe('引擎强制结档（协作方 C/D：求死不走模型）', () => {
+  it('forceEnding 直接落结档，且正文留空等结局', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 12, san: 60, mp: 10 } }) });
+    store.getState().forceEnding('death');
+    const gs = store.getState().gameState;
+    expect(gs.ending?.kind).toBe('death');
+    expect(gs.ending?.text).toBe('');
+    expect(gs.dying).toBe(false);
   });
 });
 

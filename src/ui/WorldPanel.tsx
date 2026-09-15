@@ -641,7 +641,23 @@ export function WorldPanel({
   const location = gameState.location?.trim();
 
   // 地图节点：优先用模组给的"可达关系图"，没有就从「关键地点」兜底生成
-  const mapNodes = mapNodesOf(module);
+  const baseNodes = mapNodesOf(module);
+  /*
+   * 地点**软同步**（协作方 E）：
+   * 守密人经常把玩家带到地图上没写的地方（"河边""那间废弃的澡堂"）。
+   * 那种时候不能阻断叙事，也不该让玩家在地图上找不到自己——
+   * 把去过但不在图上的地点作为**孤立节点**补进来，并注明"图上原本没有"。
+   */
+  const namesOnMap = baseNodes.map((n) => n.name);
+  const extraNodes: MapNode[] = [];
+  for (const v of gameState.visited ?? []) {
+    const t = v.trim();
+    if (!t) continue;
+    if (namesOnMap.some((n) => n === t || n.includes(t) || t.includes(n))) continue;
+    if (extraNodes.some((n) => n.name === t)) continue;
+    extraNodes.push({ name: t, links: [], note: '图上原本没有这个地点' });
+  }
+  const mapNodes: MapNode[] = [...baseNodes, ...extraNodes];
   /*
    * 地图迷雾：只画玩家"知道"的地方，避免开局把整张图摊开剧透。
    * 但**没有可达关系时不启用迷雾**——那样玩家会被锁死在原地（不知道任何别的地方，

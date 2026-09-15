@@ -813,10 +813,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/80 p-4 backdrop-blur-sm">
+    <div
+      /* 点外面的遮罩就关：设置项很多，每次都要去找「关闭」按钮很烦。
+         用 mousedown + 目标判定，避免在面板里拖选输入框到外面时被误关 */
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/80 p-4 backdrop-blur-sm"
+    >
       <div
         className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-ink-600 bg-ink-900 p-5"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
           <h2 className="font-serif text-lg text-mist-100">设置</h2>

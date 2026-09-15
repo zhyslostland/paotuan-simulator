@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { useStore } from './store';
 import { generateImage, ModelError } from '../providers/model.js';
+import { ImageLightbox } from './ImageLightbox';
 
 export function ImageField({
   label,
@@ -74,11 +75,13 @@ export function ImageField({
         </div>
       </div>
       {value ? (
-        <img
-          src={value}
-          alt={label}
-          className={`${aspect} w-full rounded-lg border border-ink-600 object-cover`}
-        />
+        <ImageLightbox src={value}>
+          <img
+            src={value}
+            alt={label}
+            className={`${aspect} w-full rounded-lg border border-ink-600 object-cover`}
+          />
+        </ImageLightbox>
       ) : (
         <div
           className={`${aspect} flex w-full items-center justify-center rounded-lg border border-dashed border-ink-600 text-[11px] text-mist-500`}

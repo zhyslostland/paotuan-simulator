@@ -406,8 +406,13 @@ function CharacterTab() {
                 // 数值层按当前规则包重建，别沿用别的规则的数字
                 characteristics: defaultCharacteristics(rulesetId),
                 skills,
-                itemDetails: undefined,
-                items: [],
+                /*
+                 * 随身物品**保留示例角色自带的**。
+                 * 早期这里显式清成空数组，于是"套用示例角色"之后背包永远是空的——
+                 * 人设写着私家侦探、手里没有相机也没有枪（协作方 B）。
+                 */
+                items: starter.items ?? character.items ?? [],
+                itemDetails: starter.itemDetails ?? character.itemDetails,
               });
             }}
             className="rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"

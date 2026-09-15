@@ -157,6 +157,25 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
   });
 });
 
+describe('stripMeta 顺带清掉思考块（模型把思维链写进 content 的兜底）', () => {
+  it('删掉 ＜think＞…＜/think＞ 整块', () => {
+    const raw =
+      '<think>用户想自杀，我需要考虑安全策略……</think>\n\n雨敲在窗上。老霍华德没有说话。';
+    const out = stripMeta(raw);
+    expect(out).not.toContain('安全策略');
+    expect(out).toContain('雨敲在窗上');
+  });
+
+  it('残留的孤立标签也清掉', () => {
+    expect(stripMeta('</thinking>\n他抬起头。')).toBe('他抬起头。');
+  });
+
+  it('正常叙事不受影响', () => {
+    const raw = '他抬起头，看了你一眼，又低下头去。';
+    expect(stripMeta(raw)).toBe(raw);
+  });
+});
+
 describe('stripTravelEcho 去掉被抄进正文的"移动意图"模板', () => {
   it('删掉整段括号模板', () => {
     const raw =

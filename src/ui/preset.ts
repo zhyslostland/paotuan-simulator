@@ -35,6 +35,20 @@ export type GenPresetModule = {
 export type GenPreset = {
   name?: string;
   genre?: Partial<Genre>;
+  /**
+   * 预设自带的角色（可选）。
+   * 剧本/安科里往往已经写好了主角，读进来直接套上比让玩家再建一张卡省事。
+   */
+  character?: {
+    name?: string;
+    description?: string;
+    personality?: string;
+    characteristics?: Record<string, number>;
+    skills?: Record<string, number>;
+    items?:
+      | string[]
+      | { name?: string; desc?: string; kind?: string; damage?: string; skill?: string }[];
+  };
   module?: GenPresetModule;
   worldbook?: { keys?: string[]; content?: string; priority?: number }[];
   companions?: {
@@ -161,6 +175,34 @@ export function applyPreset(data: GenPreset): void {
       }
       s.setRuleset(cfg.id);
     }
+  }
+
+  // 2.5 角色（可选）：剧本里写好主角时一并套上，物品与角色卡同一套合并逻辑
+  const pc = data.character;
+  if (pc && (pc.name || pc.description || pc.skills)) {
+    const itemNames: string[] = [];
+    const itemDetails: { name: string; desc?: string; kind?: string; damage?: string; skill?: string }[] =
+      [];
+    for (const it of pc.items ?? []) {
+      if (typeof it === 'string') {
+        const n = it.trim();
+        if (n) itemNames.push(n);
+        continue;
+      }
+      const n = (it.name ?? '').trim();
+      if (!n) continue;
+      itemNames.push(n);
+      itemDetails.push({ name: n, desc: it.desc, kind: it.kind, damage: it.damage, skill: it.skill });
+    }
+    s.setCharacter({
+      ...(pc.name ? { name: pc.name } : {}),
+      ...(pc.description ? { description: pc.description } : {}),
+      ...(pc.personality ? { personality: pc.personality } : {}),
+      ...(pc.characteristics ? { characteristics: pc.characteristics } : {}),
+      ...(pc.skills ? { skills: pc.skills } : {}),
+      ...(itemNames.length ? { items: itemNames } : {}),
+      ...(itemDetails.length ? { itemDetails } : {}),
+    });
   }
 
   // 3. 模组（故事骨架）

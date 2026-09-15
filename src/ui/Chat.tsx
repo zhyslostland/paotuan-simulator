@@ -12,6 +12,7 @@ import {
 import { generateImage, ModelError } from '../providers/model.js';
 import { actionImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
+import { ImageLightbox } from './ImageLightbox';
 
 function Die({ value, sides }: { value: number; sides: number }) {
   const critical = value === sides || value === 1;
@@ -183,11 +184,13 @@ function InlineSceneImage({
     <div className="mt-3">
       {value ? (
         <div className="space-y-1.5">
-          <img
-            src={value}
-            alt="场景插画"
-            className="max-h-64 w-auto rounded-lg border border-ink-600 object-cover"
-          />
+          <ImageLightbox src={value}>
+            <img
+              src={value}
+              alt="场景插画"
+              className="max-h-64 w-auto rounded-lg border border-ink-600 object-cover"
+            />
+          </ImageLightbox>
           <div className="flex gap-2">
             <GhostBtn onClick={run} title="重新生成这张图">
               {busy ? '生成中…' : '重配'}
@@ -259,6 +262,11 @@ const MessageRow = memo(function MessageRow({
               <CheckCard badge={m.check} />
             </div>
           )}
+          {m.checks?.map((b, i) => (
+            <div key={i} className="flex justify-end">
+              <CheckCard badge={b} />
+            </div>
+          ))}
           {m.dice?.map((d, i) => (
             <div key={i} className="flex justify-end">
               <DiceCard badge={d} />
@@ -321,6 +329,7 @@ export function Chat({
   onRewind,
   onReroll,
   onQuickCheck,
+  onRollAll,
 }: {
   onSend: (text: string) => void;
   onAbort: () => void;
@@ -329,6 +338,8 @@ export function Chat({
   onRewind: (id: string) => void;
   onReroll: () => void;
   onQuickCheck: (skill: string, difficulty?: string, index?: number) => void;
+  /** 把待掷队列里的检定一次全部掷掉（只发一轮 GM） */
+  onRollAll: () => void;
 }) {
   const messages = useStore((s) => s.messages);
   const streaming = useStore((s) => s.streaming);
@@ -470,14 +481,23 @@ export function Chat({
             {pendingChecks.length > 1 && (
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] text-mist-400">
-                  守密人要求了 {pendingChecks.length} 次检定，逐个掷
+                  守密人要求了 {pendingChecks.length} 次检定
                 </span>
-                <GhostBtn
-                  onClick={() => useStore.getState().clearPendingChecks()}
-                  title="把这一轮要求的所有检定都忽略"
-                >
-                  全部忽略
-                </GhostBtn>
+                <span className="flex gap-2">
+                  {/* 一次全掷：连续检定不用来回点，结果合成一条消息只让 GM 回一轮 */}
+                  <button
+                    onClick={onRollAll}
+                    className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+                  >
+                    一次全掷
+                  </button>
+                  <GhostBtn
+                    onClick={() => useStore.getState().clearPendingChecks()}
+                    title="把这一轮要求的所有检定都忽略"
+                  >
+                    全部忽略
+                  </GhostBtn>
+                </span>
               </div>
             )}
             {pendingChecks.map((pc, i) => (

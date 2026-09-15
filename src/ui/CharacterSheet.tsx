@@ -1,5 +1,12 @@
 import { useState } from 'react';
-import { deriveVitalsFor, deriveVitalsMax, resolveCheckTarget, useStore } from './store';
+import {
+  canonicalSkillName,
+  deriveVitalsFor,
+  deriveVitalsMax,
+  resolveCheckTarget,
+  useStore,
+} from './store';
+import { ImageLightbox } from './ImageLightbox';
 import { getRuleset } from '../core/rulesets/index.js';
 import type { InventoryItem } from '../core/state/gameState.js';
 
@@ -22,7 +29,12 @@ export function CheckDialog({
   const [action, setAction] = useState('');
 
   const rs = getRuleset(rulesetId);
-  const rawValue = resolveCheckTarget(skill, character, rs) ?? 50;
+  /*
+   * 解析顺序里已经包含"规则包技能表的基础值"，所以未受训技能（角色卡里没写）
+   * 会拿到它真实的基础值（如游泳 20%），而不是被兜底成 50%。
+   * 只有连名字都对不上的才落到 0 —— 那种情况下 50% 是白送。
+   */
+  const rawValue = resolveCheckTarget(skill, character, rs) ?? 0;
   // DnD 把属性分值折算成加值（15 → +2）；技能本身已是加值则原样
   const value = rs.toModifier ? rs.toModifier(skill, rawValue) : rawValue;
   const isPercent = rs.mainDice === '1d100';
@@ -30,8 +42,12 @@ export function CheckDialog({
   const attrDef = rs.characteristicDefs.find(
     (d) => d.key === skill || d.label === skill
   );
-  const skillDef = rs.skillCatalog.find((s) => s.name === skill);
+  const canon = canonicalSkillName(skill, rs);
+  const skillDef = rs.skillCatalog.find((s) => s.name === canon || s.name === skill);
   const checkDesc = attrDef?.desc ?? skillDef?.desc;
+  /** 角色卡里没写 → 这是"未受训"，按基础值掷 */
+  const untrained =
+    Boolean(skillDef) && character.skills[skill] == null && character.skills[skillDef!.name] == null;
   const npcTargets = gameState.npcsAlive;
   const mateTargets = gameState.companions
     .filter((c) => c.alive && c.present)
@@ -76,6 +92,12 @@ export function CheckDialog({
         {checkDesc && (
           <p className="mt-1.5 rounded-md bg-ink-850 px-2.5 py-1.5 text-[11px] leading-relaxed text-mist-400">
             {checkDesc}
+          </p>
+        )}
+        {untrained && (
+          <p className="mt-1.5 rounded-md border border-ink-600 px-2.5 py-1.5 text-[11px] leading-relaxed text-mist-500">
+            角色卡里没有专门练过这项 —— 按规则包给出的<span className="text-mist-300">基础值</span>
+            掷（未受训就是低，不会白给高成功率）。
           </p>
         )}
 
@@ -192,9 +214,15 @@ function VitalBar({
 function ItemDialog({
   item,
   onClose,
+  onAttack,
+  onUse,
 }: {
   item?: InventoryItem;
   onClose: () => void;
+  /** 武器：走对应技能的检定 */
+  onAttack?: (skill: string) => void;
+  /** 消耗品/其它：本地扣 1，再把"使用意图"发给守密人演出效果 */
+  onUse?: (item: InventoryItem) => void;
 }) {
   if (!item) return null;
   const KIND_LABEL: Record<string, string> = {
@@ -255,6 +283,33 @@ function ItemDialog({
         )}
 
         {item.note && <p className="mt-2 text-[11px] text-mist-500">{item.note}</p>}
+
+        {/* 用起来：武器走检定，消耗品本地扣 1 再交给守密人演效果 */}
+        <div className="mt-3.5 flex flex-wrap gap-2">
+          {item.kind === 'weapon' && (
+            <button
+              onClick={() => {
+                const skill = item.skill?.trim() || '格斗（斗殴）';
+                onClose();
+                onAttack?.(skill);
+              }}
+              className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+            >
+              用此武器攻击
+            </button>
+          )}
+          {(item.kind === 'consumable' || item.kind !== 'weapon') && (
+            <button
+              onClick={() => {
+                onClose();
+                onUse?.(item);
+              }}
+              className="rounded-lg border border-gold-600/60 px-3 py-1.5 text-[12px] text-gold-300 transition hover:border-gold-500 hover:text-gold-200"
+            >
+              {item.kind === 'consumable' ? `使用（剩 ${item.qty}）` : '使用 / 交出去'}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -262,17 +317,26 @@ function ItemDialog({
 
 export function CharacterSheet({
   onRequestCheck,
+  onUseItem,
 }: {
   onRequestCheck: (skill: string) => void;
+  /** 把"使用某件物品"的意图发给守密人（消耗品会先在本地扣数量） */
+  onUseItem?: (text: string) => void;
 }) {
   const character = useStore((s) => s.character);
   const gameState = useStore((s) => s.gameState);
   const rulesetId = useStore((s) => s.rulesetId);
   const streaming = useStore((s) => s.streaming);
   const [showFull, setShowFull] = useState(false);
+  const [showAllSkills, setShowAllSkills] = useState(false);
   const [openItem, setOpenItem] = useState<string | null>(null);
 
   const rs = getRuleset(rulesetId);
+  // 角色卡上没写的技能（用标准名去重，避免"手枪"与"射击（手枪）"重复出现）
+  const ownedCanon = new Set(Object.keys(character.skills).map((k) => canonicalSkillName(k, rs)));
+  const restSkills = rs.skillCatalog.filter(
+    (s) => !ownedCanon.has(s.name) && character.skills[s.name] == null
+  );
   const vitalsMax = deriveVitalsMax(character, rulesetId);
   // 缺键时用属性派生值兜底，而不是显示 0
   const vitalsDerived = deriveVitalsFor(character, rulesetId);
@@ -283,11 +347,13 @@ export function CharacterSheet({
     <div className="space-y-6 p-4">
       <section>
         {character.portrait && (
-          <img
-            src={character.portrait}
-            alt={character.name}
-            className="mb-3 aspect-square w-full rounded-xl border border-ink-600 object-cover"
-          />
+          <ImageLightbox src={character.portrait} className="mb-3">
+            <img
+              src={character.portrait}
+              alt={character.name}
+              className="aspect-square w-full rounded-xl border border-ink-600 object-cover"
+            />
+          </ImageLightbox>
         )}
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="font-serif text-lg text-mist-100">{character.name}</h2>
@@ -452,26 +518,90 @@ export function CharacterSheet({
           {Object.entries(character.skills)
             // 由高到低：一眼看到自己最擅长什么，不用在几十项里找
             .sort((a, b) => b[1] - a[1])
-            .map(([skill, value]) => (
-            <button
-              key={skill}
-              disabled={streaming}
-              onClick={() => onRequestCheck(skill)}
-              className="group flex items-center justify-between rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-left transition hover:border-gold-600/50 hover:bg-ink-800 disabled:opacity-40"
-            >
-              <span className="text-[12px] text-mist-300 group-hover:text-mist-100">
-                {skill}
-              </span>
-              <span className="text-[12px] tabular-nums text-gold-500/80">
-                {rs.mainDice === '1d100'
-                  ? `${value}%`
-                  : `${value >= 0 ? '+' : ''}${value}`}
-              </span>
-            </button>
-          ))}
+            .map(([skill, value]) => {
+            /*
+             * 有枪的技能 ≠ 手里有枪。
+             * 背包里找不到对应武器时给一句灰字提示（仍可点，玩家知情即可）——
+             * 否则会出现"角色卡写着射击 40%，背包里根本没枪"却在剧情里正常开枪。
+             */
+            const needWeapon = rs.skillCatalog.find(
+              (s) => s.name === skill || s.name === canonicalSkillName(skill, rs)
+            );
+            const weaponMissing =
+              needWeapon != null &&
+              /射击|投掷|弓/.test(needWeapon.name) &&
+              !gameState.inventory.some(
+                (i) => i.kind === 'weapon' && i.skill?.trim() === needWeapon.name
+              );
+            const untrainedSkill = character.skills[skill] == null;
+            return (
+              <button
+                key={skill}
+                disabled={streaming}
+                onClick={() => onRequestCheck(skill)}
+                title={
+                  weaponMissing
+                    ? '背包里没有可用武器'
+                    : `${canonicalSkillName(skill, rs) === skill ? '' : `规范名：${canonicalSkillName(skill, rs)} · `}点击检定`
+                }
+                className="group flex items-center justify-between rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-left transition hover:border-gold-600/50 hover:bg-ink-800 disabled:opacity-40"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-[12px] text-mist-300 group-hover:text-mist-100">
+                    {skill}
+                  </span>
+                  {weaponMissing && (
+                    <span className="block text-[9px] text-blood-300/80">无可用武器</span>
+                  )}
+                  {untrainedSkill && (
+                    <span className="block text-[9px] text-mist-500/70">未受训</span>
+                  )}
+                </span>
+                <span className="shrink-0 text-[12px] tabular-nums text-gold-500/80">
+                  {rs.mainDice === '1d100'
+                    ? `${value}%`
+                    : `${value >= 0 ? '+' : ''}${value}`}
+                </span>
+              </button>
+            );
+          })}
         </div>
+
+        {/*
+         * 角色卡上没列的技能也能用——按规则包的基础值掷。
+         * 没这个区，玩家会以为"我没这个技能就不能做这件事"，
+         * 而 GM 又可能直接要求一次"游泳检定"（基础值 20%），两边对不上。
+         */}
+        <button
+          onClick={() => setShowAllSkills((v) => !v)}
+          className="mt-2 text-[11px] text-gold-500/80 transition hover:text-gold-400"
+        >
+          {showAllSkills ? '收起全部技能' : `全部技能（含基础值 ${restSkills.length} 项）`}
+        </button>
+        {showAllSkills && (
+          <div className="mt-2 grid grid-cols-2 gap-1.5">
+            {restSkills.map((s) => (
+              <button
+                key={s.name}
+                disabled={streaming}
+                onClick={() => onRequestCheck(s.name)}
+                title={s.desc}
+                className="group flex items-center justify-between rounded-md border border-dashed border-ink-700 px-2.5 py-1.5 text-left transition hover:border-gold-600/40 disabled:opacity-40"
+              >
+                <span className="truncate text-[12px] text-mist-400 group-hover:text-mist-200">
+                  {s.name}
+                </span>
+                <span className="shrink-0 text-[12px] tabular-nums text-mist-500">
+                  {rs.mainDice === '1d100' ? `${s.base}%` : `+${s.base}`}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <p className="mt-2 text-[10px] leading-relaxed text-mist-500/70">
           {rs.beginnerGuide || '点击技能即可检定，并可指定对象。'}
+          未受训的技能按规则包的基础值掷，只是成功率低。
         </p>
       </section>
 
@@ -516,6 +646,22 @@ export function CharacterSheet({
         <ItemDialog
           item={gameState.inventory.find((i) => i.id === openItem)}
           onClose={() => setOpenItem(null)}
+          onAttack={(skill) => onRequestCheck(skill)}
+          onUse={(it) => {
+            /*
+             * 消耗品：**本地先扣 1**（引擎权威），再把"使用意图"发给守密人演出效果。
+             * 只发意图不扣数量，就是玩家报的"东西永远用不完"；只扣数量不告诉守密人，
+             * 就是"我用了绷带但它没反应"。两件事都要做。
+             */
+            if (it.kind === 'consumable') {
+              useStore
+                .getState()
+                .applyModelDeltas([
+                  { target: 'inventory', op: 'dec', value: it.name, amount: 1 },
+                ] as never);
+            }
+            onUseItem?.(`（使用：${it.name}）`);
+          }}
         />
       )}
 

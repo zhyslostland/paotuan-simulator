@@ -36,6 +36,13 @@ import { getGenre } from '../core/genres.js';
 
 type Panel = 'chat' | 'character' | 'world';
 
+/**
+ * 主动求死的识别。
+ * 刻意偏窄——必须明确表达"要结束自己的角色"，单纯的冒险/试探（"我跳河看看"）不算。
+ */
+const SUICIDE_RE =
+  /(自杀|自尽|寻死|想死|不想活|活不下去|了结自己|了结这一切|结束这一切|放弃抵抗|不再挣扎|任由(自己)?沉|求死|自我了断)/;
+
 /** 结局正文要不来时的兜底：必须是"故事里的句子"，不能变成程序提示 */
 const FALLBACK_ENDING: Record<string, string> = {
   death:
@@ -83,6 +90,8 @@ export default function App() {
   const [toast, setToast] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
   const [showEnding, setShowEnding] = useState(false);
+  /** 被识别为"主动求死"的那句话，等玩家二次确认 */
+  const [pendingSuicide, setPendingSuicide] = useState<string | null>(null);
   const [installable, setInstallable] = useState(false);
   /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
   const [installHintHidden, setInstallHintHidden] = useState(
@@ -277,13 +286,9 @@ export default function App() {
       chronicle,
       summary,
       recentChecks: snapshot
-        .filter((m) => m.check)
+        .flatMap((m) => m.checks ?? (m.check ? [m.check] : []))
         .slice(-6)
-        .map((m) => ({
-          skill: m.check!.skill,
-          roll: m.check!.roll,
-          label: m.check!.label,
-        })),
+        .map((b) => ({ skill: b.skill, roll: b.roll, label: b.label })),
     });
 
     const turns = buildMessages(systemPrompt, snapshot);
@@ -340,6 +345,10 @@ export default function App() {
       const retryWith = async (note: string) => {
         let buf = '';
         const retryTurns = [...turns, { role: 'user' as const, content: note }];
+        // 重写期间给一句可见的反馈：不然屏幕上内容一动不动，像卡死了（协作方 N5 折中）
+        if (full.trim()) {
+          updateMessage(gmId, { content: `${visible(full)}\n\n_（守密人在重写这一段…）_` });
+        }
         for await (const chunk of streamChat(retryTurns, config, ctrl.signal)) {
           buf += chunk;
           if (buf.length >= full.length) updateMessage(gmId, { content: visible(buf) });
@@ -407,7 +416,20 @@ export default function App() {
               reasons.push('理智受创');
           }
         }
-        if (reasons.length > 0) useStore.getState().markSnapshotKey(lastPlayer.id, reasons[0]);
+        if (reasons.length > 0) {
+          /*
+           * label 要能"一眼认出是哪一个岔路口"：只有"新线索"三个字，
+           * 玩家在结档页看到一列相同的标签根本不知道该退回哪一步（协作方 H）。
+           */
+          const turnNo = useStore.getState().chronicle.length;
+          const acted = lastPlayer.content
+            .replace(/[（(][^）)]*[）)]\s*$/, '')
+            .trim();
+          const snippet = (acted || lastPlayer.check?.skill || '抉择').slice(0, 16);
+          useStore
+            .getState()
+            .markSnapshotKey(lastPlayer.id, `第${turnNo}回 · ${snippet} · ${reasons[0]}`);
+        }
       }
       // 剧情里出现了候选队友的名字 → 标记为"已登场"（未登场不可入队）
       useStore.getState().markCandidatesMet(finalBody);
@@ -433,7 +455,10 @@ export default function App() {
               merged.push({ skill: r.skill, difficulty: r.difficulty, reason: r.reason });
             }
           }
-          store.setPendingChecks(merged.slice(-6));
+          const queue = merged.slice(-6);
+          store.setPendingChecks(queue);
+          // 同一份队列也写进这一回合的快照：回溯回来时它还在
+          if (lastPlayer) store.setSnapshotPendingChecks(lastPlayer.id, queue);
         }
       }
     } catch (e) {
@@ -498,6 +523,17 @@ export default function App() {
   const handleSend = async (text: string) => {
     // 先拦，避免留下一条永远等不到回应的玩家消息
     if (blockedByEnding()) return;
+    /*
+     * 主动求死：**引擎直接结算，不发给模型**。
+     *
+     * 为什么：模型对自杀有安全对齐，最常见的反应是写一段劝诫、或者让旁人"刚好"把你救起来。
+     * 玩家的意志被系统否决，既出戏又冒犯人。这件事必须由引擎说了算。
+     * 但要先确认一次——"我跳河看看"和"我跳河自尽"是两回事。
+     */
+    if (SUICIDE_RE.test(text)) {
+      setPendingSuicide(text);
+      return;
+    }
     addMessage({ role: 'player', content: text });
     await sendToGm();
   };
@@ -550,6 +586,30 @@ export default function App() {
   const quickCheck = async (skill: string, difficulty?: string, index = 0) => {
     useStore.getState().removePendingCheck(index);
     await handleCheck(skill, (difficulty as Difficulty) ?? 'regular', '', '');
+  };
+
+  /**
+   * 一次全掷：把待掷队列里的检定全部掷掉，结果合成**一条玩家消息**（多张卡片），
+   * 只让守密人回一轮。否则连着两次检定要来回两次，剧情被切碎（协作方 R39）。
+   */
+  const rollAllChecks = async () => {
+    if (streaming || blockedByEnding()) return;
+    const store = useStore.getState();
+    const list = [...store.pendingChecks];
+    if (list.length === 0) return;
+    store.clearPendingChecks();
+    const badges = list.map((pc) =>
+      useStore.getState().skillCheck(pc.skill, (pc.difficulty as Difficulty) ?? 'regular')
+    );
+    addMessage({ role: 'player', content: `（连续检定：${badges.map((b) => b.skill).join('、')}）`, checks: badges });
+    const lines = badges
+      .map((b) => `${b.skill}：${checkTargetText(b)}，掷出 ${b.roll}，结果 ${b.label}`)
+      .join('；');
+    await sendToGm(
+      `【引擎判定，不可更改】玩家连续做了 ${badges.length} 次检定 —— ${lines}。` +
+        '请严格依据这些结果续写剧情，不要替玩家发起新动作，' +
+        '也不要在正文里复述"检定/判定/成功/失败"等字样——结果已经由界面卡片单独展示。'
+    );
   };
 
   /** 用当前模组 + 角色卡开一团新游戏：清空剧情与进度，重新生成开场 */
@@ -631,6 +691,19 @@ export default function App() {
           `掷出 ${badge.roll}，结果：${badge.label}。请严格依据这个结果续写剧情，` +
           `不要在正文里复述“检定/判定/成功/失败”等字样。`
       );
+    } else if (pm.checks?.length) {
+      // 一次全掷过的那一轮：重掷就把每一条都重新掷一遍
+      const badges = pm.checks.map((c) =>
+        useStore.getState().skillCheck(c.skill, c.difficulty ?? 'regular')
+      );
+      useStore.getState().addMessage({ role: 'player', content: pm.content, checks: badges });
+      const lines = badges
+        .map((b) => `${b.skill}：${checkTargetText(b)}，掷出 ${b.roll}，结果 ${b.label}`)
+        .join('；');
+      await sendToGm(
+        `【引擎判定，不可更改】玩家连续做了 ${badges.length} 次检定 —— ${lines}。` +
+          '请严格依据这些结果续写剧情，不要在正文里复述“检定/判定/成功/失败”等字样。'
+      );
     } else {
       useStore.getState().addMessage({ role: 'player', content: pm.content });
       await sendToGm();
@@ -700,6 +773,16 @@ export default function App() {
               未配置 API
             </button>
           )}
+          {/* 结档后常驻一个入口：关掉结档页看记录之后，还回得去（协作方 I） */}
+          {gameState.ending?.text && (
+            <button
+              onClick={() => setShowEnding(true)}
+              className="rounded-md border border-gold-600/50 px-2.5 py-1.5 text-[12px] text-gold-400 transition hover:bg-gold-500/10"
+              title="回到这一局的结局"
+            >
+              终幕
+            </button>
+          )}
           <button
             onClick={startNew}
             className="rounded-md border border-gold-600/60 bg-gold-500/10 px-3 py-1.5 text-[13px] font-medium text-gold-400 transition hover:bg-gold-500/20"
@@ -737,6 +820,7 @@ export default function App() {
               onRewind={rewindTo}
               onReroll={rerollLast}
               onQuickCheck={quickCheck}
+              onRollAll={rollAllChecks}
             />
           </div>
           <div className={mobilePanel === 'character' ? 'h-full lg:hidden' : 'hidden'}>
@@ -770,7 +854,13 @@ export default function App() {
         {panelBtn('world', '世界', '⌘3')}
       </nav>
 
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {/*
+       * 设置**保持挂载**、用 hidden 切换：设置项很多，每次打开都跳回顶部很烦，
+       * 而且挂载着才能保住"正在生成图片"这类进行中的状态（协作方 R40）。
+       */}
+      <div className={showSettings ? '' : 'hidden'} aria-hidden={!showSettings}>
+        <Settings onClose={() => setShowSettings(false)} />
+      </div>
       {showPrep && <Preparation onClose={() => setShowPrep(false)} onStartNew={startNew} />}
       {pendingStart && (
         <ConfirmDialog
@@ -909,6 +999,27 @@ export default function App() {
             const skill = checkSkill;
             setCheckSkill(null);
             void handleCheck(skill, 'regular', target, action);
+          }}
+        />
+      )}
+      {/* 主动求死的二次确认：这是不可逆的一步，值得多问一句 */}
+      {pendingSuicide && (
+        <ConfirmDialog
+          title="要让这段故事到这里结束吗？"
+          body={`「${pendingSuicide}」\n\n确认后这一局会立刻结档，守密人会给出一段结局；你随时可以从结档页回到任何一个关键抉择重来。`}
+          confirmText="确认，走向终结"
+          danger
+          onCancel={() => setPendingSuicide(null)}
+          onConfirm={() => {
+            const text = pendingSuicide;
+            setPendingSuicide(null);
+            // 引擎直接结算，不给模型劝诫或"刚好救人"的机会
+            useStore.getState().forceEnding('death');
+            useStore.getState().addMessage({ role: 'player', content: text });
+            void (async () => {
+              await requestEnding('death');
+              setShowEnding(true);
+            })();
           }}
         />
       )}

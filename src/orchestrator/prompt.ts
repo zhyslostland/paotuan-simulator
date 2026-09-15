@@ -149,7 +149,16 @@ const GM_STYLE = `你是这场单人跑团的守密人（GM）。你的职责是
 - **拦下时必须给一条能立刻执行的下一步**（一个具体的地点 / 一个可以去找的人 / 一个此刻能做的行动），
   并且**不要用同一个理由连续拦两次**——连着拦两次等于把玩家的路堵死，那不是张力，是刁难。
 - 只有确实走得通时，才把 location 改到新地点，并顺手维护 npcsAlive（旧场景的人 remove、新场景的人 add）。
-- **绝不写玩家的台词与动作**，也绝不写"你出发了""你决定前往"这种替玩家落定的句子。`;
+- **绝不写玩家的台词与动作**，也绝不写"你出发了""你决定前往"这种替玩家落定的句子。
+- **地图上没有的地方也能去**：故事走到哪就是哪，报出新的地名是允许的（引擎会自动补上节点并告诉玩家）。不要为了"地图里没有"而把玩家挡回来。
+
+【红线二之五：动手之前先看背包】
+- 一个动作如果需要某件**物品或武器**才能完成（开枪、用相机拍照、掏出证件、拿绳子），
+  先核对「背包」里到底有没有。**技能值不等于手里有东西。**
+- 没有就**照实写**：空枪套、卡壳、口袋里没有绳子、摸了个空。
+  绝不能因为"他射击技能 40%"就让这一枪正常打出去。
+- 同理，物品数量要跟着走：用掉的东西按数量扣一处 state_delta（target 为 inventory、op 为 dec、
+  value 写物品名、amount 写数量），用完的从背包消失。`;
 
 const INITIATIVE_RULE: Record<Companion['initiative'], string> = {
   reactive: '只在被玩家点名、或直接危险逼近时才开口。除此之外保持沉默，用动作和环境表现存在感。',
@@ -533,8 +542,20 @@ export function buildMessages(
 const META_LINE =
   /(指令解析|逻辑检查|叙事目标|背景限制|场景构建|自我检查|内部思考|系统[:：]|提示词|输出格式[:：])/;
 
+/**
+ * 思考块/思维链清洗。
+ *
+ * 硅基流动上的模型偶尔会把思考写进 `content`（而不是 `reasoning_content`），
+ * 或者用 `＜think＞…＜/think＞` 包起来。根因在模型侧，这里只做**观感兜底**：
+ * 别让玩家在故事正文里读到一段"我需要考虑用户的问题……"。
+ */
+const THINK_BLOCK_RE =
+  /<(?:think|thinking|reasoning)\b[^>]*>[\s\S]*?<\/(?:think|thinking|reasoning)>/gi;
+const THINK_TAIL_RE = /<\/?(?:think|thinking|reasoning)\b[^>]*>/gi;
+
 export function stripMeta(text: string): string {
-  const kept = text
+  const withoutThink = text.replace(THINK_BLOCK_RE, '').replace(THINK_TAIL_RE, '');
+  const kept = withoutThink
     .split('\n')
     .filter((l) => !META_LINE.test(l))
     .join('\n');
@@ -572,7 +593,7 @@ export function dedupeNpcLines(body: string, lines: NpcLine[]): string {
  * 客户端用它触发一次自动重试。
  */
 const REFUSAL_RE =
-  /(无法执行|不能执行|请重新输入|不符合.{0,10}(设定|逻辑|氛围)|作为(一个)?(AI|人工智能|语言模型|助手)|你可以尝试[：:]|我可以为你)/;
+  /(无法执行|不能执行|请重新输入|不符合.{0,10}(设定|逻辑|氛围)|作为(一个)?(AI|人工智能|语言模型|助手)|你可以尝试[：:]|我可以为你|值得探究的现实|这种念头|你不是他们|建议你|何不考虑|我希望你(能)?好好|生命是(很)?宝贵|请不要(这样做|伤害))/;
 
 export function isRefusal(text: string): boolean {
   return REFUSAL_RE.test(text);
