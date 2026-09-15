@@ -20,7 +20,7 @@ import {
   CHECK_RETRY_NOTE,
   CONTRACT_ONLY_NOTE,
 } from '../orchestrator/prompt.js';
-import { playSfx, resumeAudio, startAmbience, startBgm } from './audio.js';
+import { playSfx, resumeAudio, startAmbience, startBgm, stopBgm, stopAmbience, stopSfx } from './audio.js';
 import {
   canInstall,
   initInstallPrompt,
@@ -33,6 +33,7 @@ import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
 import { EndingScreen } from './EndingScreen';
 import { TestSandbox } from './TestSandbox';
 import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
+import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 
@@ -96,6 +97,9 @@ export default function App() {
   const [pendingSuicide, setPendingSuicide] = useState<string | null>(null);
   const [showSandbox, setShowSandbox] = useState(false);
   const [showChangelog, setShowChangelog] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  /** 音频开关的界面状态（与 store 里的 audio.enabled 同步） */
+  const [audioOn, setAudioOn] = useState(() => useStore.getState().audio.enabled);
   const devMode = useStore((s) => s.devMode);
   const [installable, setInstallable] = useState(false);
   /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
@@ -219,6 +223,27 @@ export default function App() {
       window.removeEventListener('keydown', kick);
     };
   }, []);
+
+  /** 音频控制坞用：随时一键静音 / 恢复（BGM + 氛围音 + 正在播的音效） */
+  const toggleAudio = () => {
+    const a = useStore.getState().audio;
+    const setAudio = useStore.getState().setAudio;
+    if (a.enabled) {
+      stopBgm();
+      stopAmbience();
+      stopSfx();
+      setAudio({ enabled: false });
+      setAudioOn(false);
+      return;
+    }
+    setAudio({ enabled: true });
+    setAudioOn(true);
+    void resumeAudio().then(() => {
+      const cur = useStore.getState().audio;
+      startAmbience(cur.ambience, cur.ambienceVol);
+      void startBgm(cur);
+    });
+  };
 
   /** 事件日志超过阈值时，把早期的折进摘要层，只留近期明细 */
   const foldChronicleIfNeeded = async () => {
@@ -449,6 +474,12 @@ export default function App() {
       useStore.getState().markCandidatesMet(finalBody);
 
       if (contract) {
+        /*
+         * 音效触发点：受伤 / 理智受创 / 进入战斗。
+         * 在这一层做（而不是放在 store 里）是因为只有这里分得清"这一轮到底发生了什么"——
+         * 读档、回溯、测试沙盒灌数据时不该响音效。
+         */
+        const before = useStore.getState().gameState;
         if (contract.state_delta?.length) applyModelDeltas(contract.state_delta as never);
         if (contract.location && contract.location !== gameState.location) {
           applyModelDeltas([
@@ -456,6 +487,20 @@ export default function App() {
           ] as never);
         }
         if (contract.summary_delta) addChronicle(contract.summary_delta);
+
+        const after = useStore.getState().gameState;
+        const now = useStore.getState().audio;
+        if (now.enabled) {
+          const hpDrop = (before.vitals.hp ?? 0) - (after.vitals.hp ?? 0);
+          const sanDrop = (before.vitals.san ?? 0) - (after.vitals.san ?? 0);
+          if (!before.combat.active && after.combat.active) {
+            void playSfx('combat', now.sfxVol);
+          } else if (hpDrop >= 2) {
+            void playSfx('hurt', now.sfxVol);
+          } else if (sanDrop >= 2) {
+            void playSfx('sanloss', now.sfxVol);
+          }
+        }
         /*
          * 一键掷骰：把**全部**检定请求挂进队列，界面逐个给出「掷骰」按钮。
          * 早期只取 dice_requests[0]，一轮里要求两个检定时后一个会被整个丢掉。
@@ -504,6 +549,8 @@ export default function App() {
   /** 向守密人要一段结局正文（结档页用） */
   const requestEnding = async (kind: 'death' | 'insanity' | 'other') => {
     const s = useStore.getState();
+    // 结档音：缓慢下行的长音，让"到这里结束了"这件事落地
+    if (s.audio.enabled) void playSfx('ending', s.audio.sfxVol);
     try {
       const text = await chat(
         [
@@ -653,6 +700,9 @@ export default function App() {
     setDraft('');
     setToast('已开新团，按模组开场');
     setTimeout(() => setToast(''), 2200);
+    // 开团音：翻开了第一页
+    const a = useStore.getState().audio;
+    if (a.enabled) void playSfx('start', a.sfxVol);
   };
 
   /** 回溯到某条玩家消息之前：恢复当时状态、截断其后消息，并把内容填回输入框以便改完重发 */
@@ -786,6 +836,35 @@ export default function App() {
               className="rounded-full border border-gold-600/50 bg-gold-500/10 px-2.5 py-1 text-[11px] text-gold-400 transition hover:bg-gold-500/20"
             >
               未配置 API
+            </button>
+          )}
+          {/* 常驻帮助入口：别只依赖"首次进入"那一次弹窗（协作方 R42） */}
+          <button
+            onClick={() => setShowHelp(true)}
+            className="rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
+            title="怎么玩（随时可看）"
+          >
+            ?
+          </button>
+          {/* 音频控制坞：玩的时候不用翻设置就能一键静音 / 掐掉正在播的音效 */}
+          <button
+            onClick={toggleAudio}
+            className={`rounded-md border px-2 py-1.5 text-[12px] transition ${
+              audioOn
+                ? 'border-gold-600/50 text-gold-400 hover:bg-gold-500/10'
+                : 'border-ink-600 text-mist-500 hover:text-mist-300'
+            }`}
+            title={audioOn ? '静音（背景音与音效一起）' : '打开音频'}
+          >
+            {audioOn ? '🔊' : '🔈'}
+          </button>
+          {audioOn && (
+            <button
+              onClick={() => stopSfx()}
+              className="rounded-md border border-ink-600 px-2 py-1.5 text-[12px] text-mist-500 transition hover:text-mist-300"
+              title="掐掉正在播的音效（上传了整首歌时很有用）"
+            >
+              ⏹
             </button>
           )}
           {/* 开发者模式：一键把测试环境摆好，省得每次测功能都从头建角色想模组 */}
@@ -981,46 +1060,17 @@ export default function App() {
           </div>
         </div>
       )}
-      {welcome && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4">
-          <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-ink-600 bg-ink-900 p-6 shadow-2xl">
-            <h2 className="font-serif text-lg text-gold-300">欢迎来到跑团模拟器</h2>
-            <p className="mt-2 text-[13px] leading-relaxed text-mist-300">
-              你是唯一的玩家，AI 当守密人。用自然语言描述你的行动，它会把故事接下去。
-            </p>
-            <ul className="mt-3 space-y-2 text-[12px] leading-relaxed text-mist-400">
-              <li>
-                <b className="text-mist-200">① 先在「准备」里</b>
-                建一张角色卡、生成一个模组（或从文本导入）。
-              </li>
-              <li>
-                <b className="text-mist-200">② 在「设置」里</b>
-                填 API Key 和模型。
-              </li>
-              <li>
-                <b className="text-mist-200">③ 开场后</b>
-                直接用大白话行动——"我推门进去""我问他女儿什么时候失踪的"，不用加任何标记。
-              </li>
-              <li>
-                <b className="text-mist-200">④ 要检定时</b>
-                点角色卡里的技能，或者等守密人弹出"掷骰"按钮。
-              </li>
-              <li>
-                <b className="text-mist-200">⑤ 迷路了？</b>
-                看左侧「世界」面板顶部的「当前目标」——你要做什么、为什么是现在，都写在那儿。
-              </li>
-            </ul>
-            <button
-              onClick={() => {
-                localStorage.setItem('trpg.welcomed', '1');
-                setWelcome(false);
-              }}
-              className="mt-4 w-full rounded-lg bg-gold-500 px-4 py-2 text-[13px] font-medium text-ink-950 transition hover:bg-gold-400"
-            >
-              开始冒险
-            </button>
-          </div>
-        </div>
+      {(welcome || showHelp) && (
+        <HelpDialog
+          firstTime={welcome}
+          onClose={() => {
+            if (welcome) {
+              localStorage.setItem('trpg.welcomed', '1');
+              setWelcome(false);
+            }
+            setShowHelp(false);
+          }}
+        />
       )}
       {checkSkill && (
         <CheckDialog

@@ -10,7 +10,40 @@
  */
 
 export type AmbienceKind = 'none' | 'rain' | 'wind' | 'heart' | 'drone';
-export type SfxSlot = 'critical' | 'fumble';
+
+/**
+ * 音效槽位。
+ * 全是"游戏里真的会发生的事"——玩家可以给每一件事配一段自己的音。
+ */
+export type SfxSlot =
+  | 'critical' // 大成功
+  | 'fumble' // 大失败
+  | 'combat' // 进入战斗
+  | 'hurt' // 受伤
+  | 'sanloss' // 理智受创
+  | 'ending' // 结档 / 死亡
+  | 'start'; // 开团
+
+/** 设置界面的展示顺序与名称 */
+export const SFX_SLOTS: SfxSlot[] = [
+  'critical',
+  'fumble',
+  'combat',
+  'hurt',
+  'sanloss',
+  'ending',
+  'start',
+];
+
+export const SFX_LABEL: Record<SfxSlot, string> = {
+  critical: '大成功',
+  fumble: '大失败',
+  combat: '进入战斗',
+  hurt: '受伤',
+  sanloss: '理智受创',
+  ending: '结档 / 死亡',
+  start: '开团',
+};
 
 export const AMBIENCE_LABEL: Record<AmbienceKind, string> = {
   none: '关闭',
@@ -288,6 +321,34 @@ export function startAmbience(kind: AmbienceKind, vol: number): void {
 
 /* ---------------- 判定音效 ---------------- */
 
+/** 简单包络音：给"音色"用，省得每个槽位都手写一遍振荡器 */
+function blip(
+  c: AudioContext,
+  dest: AudioNode,
+  opts: {
+    freq: number;
+    to?: number;
+    type?: OscillatorType;
+    at?: number;
+    dur?: number;
+    peak?: number;
+  }
+): void {
+  const t = c.currentTime + (opts.at ?? 0);
+  const o = c.createOscillator();
+  o.type = opts.type ?? 'sine';
+  o.frequency.setValueAtTime(opts.freq, t);
+  if (opts.to) o.frequency.exponentialRampToValueAtTime(Math.max(1, opts.to), t + (opts.dur ?? 0.3));
+  const eg = c.createGain();
+  eg.gain.setValueAtTime(0.0001, t);
+  eg.gain.exponentialRampToValueAtTime(opts.peak ?? 0.5, t + 0.02);
+  eg.gain.exponentialRampToValueAtTime(0.0001, t + (opts.dur ?? 0.3));
+  o.connect(eg);
+  eg.connect(dest);
+  o.start(t);
+  o.stop(t + (opts.dur ?? 0.3) + 0.05);
+}
+
 /** 程序化兜底音效：没上传文件时用这个，保证"有反馈"而不是静悄悄 */
 export function playSfxFallback(slot: SfxSlot, vol: number): void {
   const c = getCtx();
@@ -296,6 +357,43 @@ export function playSfxFallback(slot: SfxSlot, vol: number): void {
   g.gain.value = Math.max(0, Math.min(1, vol));
   g.connect(master);
   const t0 = c.currentTime;
+
+  if (slot === 'combat') {
+    // 进入战斗：两下急鼓，短促、不留尾音——"架起来了"
+    blip(c, g, { freq: 150, to: 60, type: 'square', dur: 0.12, peak: 0.5 });
+    blip(c, g, { freq: 130, to: 50, type: 'square', at: 0.16, dur: 0.16, peak: 0.55 });
+    return;
+  }
+
+  if (slot === 'hurt') {
+    // 受伤：一记闷击 + 一声高频刺——疼是短而尖的
+    blip(c, g, { freq: 220, to: 70, type: 'triangle', dur: 0.16, peak: 0.6 });
+    blip(c, g, { freq: 1800, to: 900, type: 'sawtooth', at: 0.02, dur: 0.1, peak: 0.16 });
+    return;
+  }
+
+  if (slot === 'sanloss') {
+    // 理智受创：失谐下滑 + 耳鸣，听着就"不对劲"
+    blip(c, g, { freq: 520, to: 210, type: 'sawtooth', dur: 0.7, peak: 0.22 });
+    blip(c, g, { freq: 517, to: 208, type: 'sine', dur: 0.75, peak: 0.2 });
+    blip(c, g, { freq: 4200, type: 'sine', at: 0.1, dur: 0.9, peak: 0.06 });
+    return;
+  }
+
+  if (slot === 'ending') {
+    // 结档：缓慢下行的长音，让它自然收住，不要"叮"一声了事
+    blip(c, g, { freq: 196, to: 98, type: 'sine', dur: 2.2, peak: 0.32 });
+    blip(c, g, { freq: 147, to: 73, type: 'sine', at: 0.12, dur: 2.4, peak: 0.28 });
+    blip(c, g, { freq: 98, type: 'triangle', at: 0.3, dur: 2.0, peak: 0.18 });
+    return;
+  }
+
+  if (slot === 'start') {
+    // 开团：向上的两音，像翻开了第一页
+    blip(c, g, { freq: 392, type: 'triangle', dur: 0.22, peak: 0.4 });
+    blip(c, g, { freq: 587.33, type: 'triangle', at: 0.14, dur: 0.42, peak: 0.42 });
+    return;
+  }
 
   if (slot === 'critical') {
     // 大成功：上扬的大三和弦琶音，明亮得意
@@ -334,24 +432,88 @@ export function playSfxFallback(slot: SfxSlot, vol: number): void {
   }
 }
 
-/** 播放判定音效：优先用用户上传的文件，没有就退回程序化音效 */
+/**
+ * 当前正在播的音效句柄。
+ *
+ * 为什么需要：玩家上传的可能是**整首歌**（"把这首当大成功音效"），
+ * 一旦响起来就没法停，只能等它放完——必须能掐掉。
+ */
+let sfxEl: HTMLAudioElement | null = null;
+let sfxObjectUrl = '';
+
+/** 停掉正在播的音效（BGM 不受影响） */
+export function stopSfx(): void {
+  if (sfxEl) {
+    try {
+      sfxEl.pause();
+      sfxEl.src = '';
+    } catch {
+      /* 已经没了 */
+    }
+    sfxEl = null;
+  }
+  if (sfxObjectUrl) {
+    URL.revokeObjectURL(sfxObjectUrl);
+    sfxObjectUrl = '';
+  }
+}
+
+/** 当前有没有音效在播（给界面做徽标用） */
+export function isSfxPlaying(): boolean {
+  return sfxEl != null && !sfxEl.paused;
+}
+
+/** 播放音效：优先用用户上传的文件，没有就退回程序化音效。播新的会掐掉旧的。 */
 export async function playSfx(slot: SfxSlot, vol: number): Promise<void> {
   await resumeAudio();
+  // 同一时刻只留一个音效，否则连续两个大成功会叠成噪音
+  stopSfx();
   const blob = await getAudio(`sfx.${slot}`);
   if (blob) {
     try {
       const url = URL.createObjectURL(blob);
       const el = new Audio(url);
       el.volume = Math.max(0, Math.min(1, vol));
-      el.onended = () => URL.revokeObjectURL(url);
+      el.onended = () => {
+        // 播完自己收尾，别让 objectURL 一直挂着
+        if (sfxEl === el) {
+          stopSfx();
+        } else {
+          URL.revokeObjectURL(url);
+        }
+      };
+      sfxEl = el;
+      sfxObjectUrl = url;
       await el.play();
       return;
     } catch {
       /* 文件坏了就兜底 */
+      stopSfx();
     }
   }
   playSfxFallback(slot, vol);
 }
+
+/** 单条音频占用的字节数（设置里显示用；取不到返回 null） */
+export async function audioSize(key: string): Promise<number | null> {
+  const blob = await getAudio(key);
+  return blob ? blob.size : null;
+}
+
+/** 列出所有已上传音频的占用情况 */
+export async function audioUsage(
+  keys: string[]
+): Promise<{ key: string; size: number }[]> {
+  const out: { key: string; size: number }[] = [];
+  for (const k of keys) {
+    const size = await audioSize(k);
+    if (size != null) out.push({ key: k, size });
+  }
+  return out;
+}
+
+/** 单文件软上限：超过就提醒（不阻止，但要让玩家知道为什么慢了） */
+export const AUDIO_SIZE_WARN = 15 * 1024 * 1024;
 
 /* ---------------- 用户自配 BGM ---------------- */
 

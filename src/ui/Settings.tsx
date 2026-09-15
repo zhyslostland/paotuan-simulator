@@ -3,6 +3,7 @@ import { useStore, TYPOGRAPHY_PRESETS, checkTargetText, type ThemeName } from '.
 import { ConfirmDialog } from './ConfirmDialog';
 import { TestSandbox } from './TestSandbox';
 import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
+import { HelpDialog } from './HelpGuide';
 import {
   canInstall,
   isStandalone,
@@ -11,10 +12,15 @@ import {
 } from '../pwa.js';
 import {
   AMBIENCE_LABEL,
+  AUDIO_SIZE_WARN,
+  SFX_LABEL,
+  SFX_SLOTS,
+  audioUsage,
   delAudio,
   getAudio,
   putAudio,
   type AmbienceKind,
+  type SfxSlot,
 } from './audio.js';
 import { listRulesets, registerCustomRuleset, getRuleset, type CustomRulesetConfig } from '../core/rulesets/index.js';
 import { listGenres, type Genre } from '../core/genres.js';
@@ -89,6 +95,61 @@ const inputCls =
 
 const smallBtn =
   'rounded-lg border border-ink-600 bg-ink-850 px-3 py-1.5 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100';
+
+/**
+ * 音频存储占用。
+ * 上传整首歌很容易把 IndexedDB 撑到几十 MB，浏览器给的额度是有限的；
+ * 超限时原来只在 console 里 warn，玩家看到的是"点了上传什么都没发生"。
+ */
+function AudioStorageMeter() {
+  const [rows, setRows] = useState<{ key: string; size: number }[]>([]);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const keys = ['bgm', ...SFX_SLOTS.map((s) => `sfx.${s}`)];
+    void audioUsage(keys).then(setRows);
+  }, [tick]);
+
+  if (rows.length === 0) return null;
+  const total = rows.reduce((n, r) => n + r.size, 0);
+  const mb = (n: number) => `${(n / 1024 / 1024).toFixed(2)}MB`;
+  const over = rows.filter((r) => r.size > AUDIO_SIZE_WARN);
+
+  return (
+    <div className="rounded-lg border border-ink-700 bg-ink-850/60 p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-mist-400">
+          音频占用 <span className="text-mist-300">{mb(total)}</span>
+          <span className="text-mist-500/70">（{rows.length} 个文件）</span>
+        </span>
+        <button
+          onClick={() => setTick((t) => t + 1)}
+          className="text-[10px] text-mist-500 transition hover:text-mist-300"
+        >
+          刷新
+        </button>
+      </div>
+      <div className="mt-1.5 space-y-0.5">
+        {rows.map((r) => (
+          <div key={r.key} className="flex items-center justify-between text-[10px]">
+            <span className="truncate text-mist-500">
+              {r.key === 'bgm' ? 'BGM' : SFX_LABEL[r.key.replace('sfx.', '') as SfxSlot] ?? r.key}
+            </span>
+            <span className={r.size > AUDIO_SIZE_WARN ? 'text-blood-300' : 'text-mist-500'}>
+              {mb(r.size)}
+            </span>
+          </div>
+        ))}
+      </div>
+      {over.length > 0 && (
+        <p className="mt-1.5 text-[10px] leading-relaxed text-blood-300">
+          有 {over.length} 个文件超过 {Math.round(AUDIO_SIZE_WARN / 1024 / 1024)}MB。
+          手机上这么大的音频会让应用变慢、也可能存不下——建议换成短一点的片段。
+        </p>
+      )}
+    </div>
+  );
+}
 
 /** 一行"上传/替换/清除"——用来给某个音效槽位或 BGM 换上自己的音频 */
 function AudioFileRow({ label, storageKey }: { label: string; storageKey: string }) {
@@ -566,6 +627,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const setDevMode = useStore((s) => s.setDevMode);
   const [sandboxOpen, setSandboxOpen] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [changelogNew, setChangelogNew] = useState(hasUnreadChangelog);
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
@@ -835,6 +897,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <div className="mb-3 flex items-center justify-between gap-2">
           <h2 className="font-serif text-lg text-mist-100">设置</h2>
           <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setHelpOpen(true)}
+              className="rounded-md border border-ink-600 px-2.5 py-1 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+              title="怎么玩：操作、检定、地图、背包、结档"
+            >
+              帮助
+            </button>
             <button
               onClick={() => {
                 markChangelogRead();
@@ -1162,8 +1231,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     判定音效 <span className="text-mist-500/70">（不传就用内置的程序化音效）</span>
                   </span>
                   <div className="space-y-1.5">
-                    <AudioFileRow label="大成功" storageKey="sfx.critical" />
-                    <AudioFileRow label="大失败" storageKey="sfx.fumble" />
+                    {/* 全部槽位：每一件事都能配自己的音；不传就用内置的程序化音效 */}
+                    {SFX_SLOTS.map((slot) => (
+                      <AudioFileRow key={slot} label={SFX_LABEL[slot]} storageKey={`sfx.${slot}`} />
+                    ))}
                   </div>
                 </div>
 
@@ -1189,6 +1260,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     </div>
                   </div>
                 </div>
+
+                {/*
+                 * 存储占用：上传的音频走 IndexedDB，浏览器给的额度有限。
+                 * 以前超限只在 console 里 warn，玩家只看到"上传没反应"——必须说出来。
+                 */}
+                <AudioStorageMeter />
               </div>
             )}
           </div>
@@ -1537,6 +1614,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
       {sandboxOpen && <TestSandbox onClose={() => setSandboxOpen(false)} />}
       {changelogOpen && <ChangelogDialog onClose={() => setChangelogOpen(false)} />}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
 
       {confirmReset && (
         <ConfirmDialog
