@@ -32,6 +32,7 @@ import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.
 import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
 import { EndingScreen } from './EndingScreen';
 import { TestSandbox } from './TestSandbox';
+import { applyUpdate, BUILD_ID, checkForUpdate, watchForUpdates } from '../update.js';
 import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
 import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
@@ -146,11 +147,22 @@ export default function App() {
     if (endedText) setShowEnding(true);
   }, [endedText]);
 
-  // PWA 有新版本 → 弹更新横幅，否则用户会一直卡在旧版本
+  /*
+   * 新版本检测，两条独立的路都汇到同一个横幅：
+   * 1. Service Worker 报"有新版本"（registerType: 'prompt'）
+   * 2. **版本号探测**：启动 / 回到前台 / 每 5 分钟各探一次 version.json
+   *
+   * 只做第 1 条是不够的——内嵌浏览器（在微信里打开）与部分手机上 SW 的更新检测未必触发，
+   * 玩家就会一直卡在旧版本里，然后问"我改了你怎么还是旧的"。
+   */
   useEffect(() => {
     const onUpdate = () => setUpdateReady(true);
     window.addEventListener('trpg:update-ready', onUpdate);
-    return () => window.removeEventListener('trpg:update-ready', onUpdate);
+    const stop = watchForUpdates(onUpdate);
+    return () => {
+      window.removeEventListener('trpg:update-ready', onUpdate);
+      stop();
+    };
   }, []);
 
   /**
@@ -536,14 +548,9 @@ export default function App() {
     await foldChronicleIfNeeded();
 
     /*
-     * 结档：引擎检测到生命/理智走到尽头时，`ending.text` 是空的——拿它当信号，
-     * 让守密人写一段收束叙事再填进去。写不出来也给一句兜底，绝不留白屏。
+     * 结档不在这里触发——统一由下面的「结档唯一出口」处理。
+     * 以前只有这条路会去要结局正文，于是别的来源置上 ending 时什么都不会发生。
      */
-    const pending = useStore.getState().gameState.ending;
-    if (pending && !pending.text) {
-      await requestEnding(pending.kind);
-      setShowEnding(true);
-    }
   };
 
   /** 向守密人要一段结局正文（结档页用） */
@@ -580,6 +587,31 @@ export default function App() {
       useStore.getState().setEnding(kind, FALLBACK_ENDING[kind] ?? FALLBACK_ENDING.other!);
     }
   };
+
+  /*
+   * 结档的**唯一出口**。
+   *
+   * 引擎只负责把 `ending = { kind, text: '' }` 写上（正文永远是空），
+   * "去要一段结局正文"这件事以前只写在两条路上：守密人回合结束、主动求死。
+   * 于是任何**别的**来源把 ending 置上（测试沙盒把生命清零、以后可能加的其它裁决）
+   * 都只会静默写下一个空 ending —— 屏幕上什么都不发生，玩家以为没结档。
+   *
+   * 现在统一在这里兜住：只要出现"没有正文的 ending"，就去找守密人要一段。
+   * 用 at 时间戳去重，避免同一次结档被要两遍。
+   */
+  const endingAt = useStore((s) => s.gameState.ending?.at ?? '');
+  const endingText = useStore((s) => s.gameState.ending?.text ?? '');
+  const endingKind = useStore((s) => s.gameState.ending?.kind ?? 'other');
+  const endingAskedRef = useRef('');
+  useEffect(() => {
+    if (!endingAt || endingText) return;
+    if (endingAskedRef.current === endingAt) return;
+    endingAskedRef.current = endingAt;
+    void (async () => {
+      await requestEnding(endingKind);
+      setShowEnding(true);
+    })();
+  }, [endingAt, endingText, endingKind]);
 
   const handleSend = async (text: string) => {
     // 先拦，避免留下一条永远等不到回应的玩家消息
@@ -1022,12 +1054,20 @@ export default function App() {
         </div>
       )}
       {updateReady && (
-        <div className="fixed inset-x-0 bottom-20 z-[75] flex justify-center px-4">
+        <div className="fixed inset-x-0 bottom-20 z-[75] flex justify-center gap-2 px-4">
           <button
-            onClick={() => void updateSW(true)}
+            onClick={() => void applyUpdate()}
             className="rounded-full border border-gold-500/60 bg-ink-900/95 px-4 py-2 text-[13px] text-gold-300 shadow-lg backdrop-blur"
+            title="更新到最新版本（页面会重新加载）"
           >
             有新版本 · 点击立即更新
+          </button>
+          <button
+            onClick={() => setUpdateReady(false)}
+            className="rounded-full border border-ink-600 bg-ink-900/95 px-3 py-2 text-[12px] text-mist-400 shadow-lg backdrop-blur"
+            title="先不更新，等这一轮跑完再说"
+          >
+            稍后
           </button>
         </div>
       )}

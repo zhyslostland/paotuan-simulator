@@ -804,6 +804,46 @@ describe('回溯要恢复待掷检定队列（协作方 F）', () => {
   });
 });
 
+describe('生命归零 → 结档信号（App 的"结档唯一出口"依赖这个契约）', () => {
+  const base = () =>
+    createInitialState({
+      vitals: { hp: 1, san: 60, mp: 10 },
+      vitalsMax: { hp: 10, san: 99, mp: 10 },
+    });
+
+  it('第一次归零只进"濒死"，不给 ending（留一轮演出的机会）', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 0 }] as never);
+    expect(store.getState().gameState.vitals.hp).toBe(0);
+    expect(store.getState().gameState.dying).toBe(true);
+    expect(store.getState().gameState.ending).toBeNull();
+  });
+
+  it('第二次结算才给出 ending，且**正文留空**（由 App 去要结局）', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 0 }] as never);
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 1 }] as never);
+    const gs = store.getState().gameState;
+    expect(gs.ending?.kind).toBe('death');
+    expect(gs.ending?.text).toBe('');
+    expect(gs.ending?.at).toBeTruthy();
+  });
+
+  it('理智归零直接结档（不给缓冲）', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'set', value: 0 }] as never);
+    expect(store.getState().gameState.ending?.kind).toBe('insanity');
+  });
+
+  it('回血能解除濒死', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 0 }] as never);
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 5 }] as never);
+    expect(store.getState().gameState.dying).toBe(false);
+    expect(store.getState().gameState.ending).toBeNull();
+  });
+});
+
 describe('引擎强制结档（协作方 C/D：求死不走模型）', () => {
   it('forceEnding 直接落结档，且正文留空等结局', () => {
     store.setState({ gameState: createInitialState({ vitals: { hp: 12, san: 60, mp: 10 } }) });

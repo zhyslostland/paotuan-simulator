@@ -10,6 +10,7 @@ import {
   onInstallAvailable,
   promptInstall,
 } from '../pwa.js';
+import { applyUpdate, BUILD_ID, checkForUpdate } from '../update.js';
 import {
   AMBIENCE_LABEL,
   AUDIO_SIZE_WARN,
@@ -628,6 +629,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [sandboxOpen, setSandboxOpen] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [updateState, setUpdateState] = useState<'idle' | 'checking' | 'newer' | 'latest' | 'unknown'>(
+    'idle'
+  );
+  const checkNow = async () => {
+    setUpdateState('checking');
+    setUpdateState(await checkForUpdate());
+  };
   const [changelogNew, setChangelogNew] = useState(hasUnreadChangelog);
   const config = useStore((s) => s.config);
   const setConfig = useStore((s) => s.setConfig);
@@ -1544,6 +1552,49 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   </p>
                 </div>
               </>
+            )}
+          </div>
+
+          {/*
+           * 检查更新：不靠"等服务自己刷新"。
+           * 应用平时已经在自动探（启动 / 回到前台 / 每 5 分钟），这里是玩家想要时手动来一发。
+           */}
+          <div className="rounded-lg border border-ink-700 bg-ink-850/60 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-mist-400">
+                当前版本 <span className="font-mono text-mist-500">{BUILD_ID}</span>
+              </span>
+              <button
+                onClick={void checkNow}
+                disabled={updateState === 'checking'}
+                className="shrink-0 rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100 disabled:opacity-50"
+              >
+                {updateState === 'checking' ? '检查中…' : '检查更新'}
+              </button>
+            </div>
+            {updateState === 'newer' ? (
+              <button
+                onClick={() => void applyUpdate()}
+                className="mt-2 w-full rounded-lg bg-gold-500 px-3 py-2 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+              >
+                发现新版本 · 立即更新（页面会重新加载）
+              </button>
+            ) : (
+              <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
+                {updateState === 'latest'
+                  ? '已经是最新版本。'
+                  : updateState === 'unknown'
+                    ? '探测不到版本信息（可能离线，或这份部署还没有 version.json）。想强制拿最新的，用下面这个按钮。'
+                    : '打开应用时、以及每次切回前台都会自动检查一次。'}
+              </p>
+            )}
+            {updateState === 'unknown' && (
+              <button
+                onClick={() => location.reload()}
+                className="mt-2 w-full rounded-lg border border-ink-600 px-3 py-1.5 text-[11px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+              >
+                强制重新加载页面
+              </button>
             )}
           </div>
 
