@@ -51,8 +51,18 @@ export default defineConfig({
       },
     },
     VitePWA({
-      // prompt：检测到新版本时提示用户点一下"更新"，而不是静默等下次打开才生效
-      registerType: 'prompt',
+      /*
+       * **autoUpdate**：新 SW 一装好就 `skipWaiting()` + `clients.claim()`，立刻接管旧页面。
+       *
+       * 为什么从 `prompt` 改过来：prompt 模式下新 SW 会**一直等在 waiting 里**，
+       * 而这期间旧 SW 继续用它那份旧 precache 响应所有导航 —— 玩家于是永远停在旧包，
+       * 只能指望他自己去点横幅。可"点了没反应 / 没看到 / 不知道要点"这三种情况都真实发生过，
+       * 已经两次卡住用户。现在改成自动接管：**他只要再打开/刷新一次就是新版**。
+       *
+       * 玩家侧的"有新版本"横幅与硬重置（`update.ts`）照旧保留 —— 那是另一条独立的路，
+       * 负责"探测到线上更新就主动清一次缓存"，两者互不冲突。
+       */
+      registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
       manifest: {
         name: '跑团模拟器',
@@ -76,6 +86,12 @@ export default defineConfig({
          * 它引用的就是最新 JS —— **打开即最新**，不必等人点。
          * 离线时退到 `html` 运行时缓存（在线访问过一次就有），离线能力不丢。
          */
+        /*
+         * **入口纠正脚本排在 workbox 前面执行**（`importScripts` 会注入到 sw.js 顶部）。
+         * 它把 `/index.html` 的导航请求改写成根路径 —— 那条路径上服务器一直给 09-15 的旧包，
+         * 而那一版的"立即更新"是坏的。详见 `public/entry-redirect.js` 顶部的说明。
+         */
+        importScripts: ['entry-redirect.js'],
         globPatterns: ['**/*.{js,css,svg,woff2}'],
         /*
          * **不要设 `navigateFallback`**：workbox 会为它注册一条优先级最高的 NavigationRoute，

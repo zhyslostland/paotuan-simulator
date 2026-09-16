@@ -90,15 +90,49 @@ async function purgeEverything(): Promise<void> {
   }
 }
 
-/** 带戳导航：连 CDN 边缘缓存一起绕开。replace 不会在历史里留"后退又触发"的记录。 */
+/**
+ * 带戳导航：连 CDN 边缘缓存一起绕开。replace 不会在历史里留"后退又触发"的记录。
+ *
+ * **顺带把 pathname 归一化到根路径**：线上 `/index.html` 与 `/` 是**两条独立缓存**，
+ * 平台每次部署只刷新 `/`，`/index.html` 那条长期残留着很早的旧包。
+ * 从那条路进来的玩家必须被挪走，否则怎么刷新都是旧的。
+ */
 function navigateFresh(): void {
   try {
     const url = new URL(location.href);
+    url.pathname = url.pathname.replace(/\/index\.html$/, '/');
     url.searchParams.set('_v', Date.now().toString(36));
     location.replace(url.toString());
   } catch {
     location.reload();
   }
+}
+
+/**
+ * 自愈：Service Worker **换了主人**（= 浏览器装上了新的 sw.js）时，带戳重来一次。
+ *
+ * 配合 `registerType: 'autoUpdate'`（新 SW 立即 skipWaiting + claim），
+ * 已经卡在旧包里的玩家只要再打开一次页面，就会被自动带到新版 —— 不需要他点任何东西。
+ *
+ * 两个必须的细节：
+ * - **首次安装不算**：页面原本没有 controller 时，安装也会触发 controllerchange，
+ *   那次重载纯属骚扰，跳过。
+ * - **用带戳 replace，不用 `location.reload()`**：reload 正是会被旧 SW/旧缓存接管的那个动作，
+ *   是我们踩过两次的死循环源头。
+ */
+export function initUpdateSelfHeal(): void {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  let hadController = Boolean(navigator.serviceWorker.controller);
+  let jumping = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (jumping) return;
+    if (!hadController) {
+      hadController = true; // 首次安装，不打扰
+      return;
+    }
+    jumping = true;
+    navigateFresh();
+  });
 }
 
 export async function applyUpdate(): Promise<void> {
