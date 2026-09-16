@@ -67,9 +67,40 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,woff2}'],
-        // 版本探测必须走网络，绝不能被缓存接管
-        navigateFallbackDenylist: [/version\.json$/],
+        /*
+         * **关键：`html` 故意不进 precache。**
+         * precache 是 CacheFirst —— index.html 一旦被钉进 precache，
+         * 浏览器就会一直拿那份旧的 HTML（它引用的还是旧 hash 的 JS），
+         * 于是"我明明发布了，你打开还是旧版"必然复发，只能靠玩家手动点更新。
+         * 现在 HTML 改走下面的 NetworkFirst：每次打开先问网络，拿到的是最新 HTML，
+         * 它引用的就是最新 JS —— **打开即最新**，不必等人点。
+         * 离线时退到 `html` 运行时缓存（在线访问过一次就有），离线能力不丢。
+         */
+        globPatterns: ['**/*.{js,css,svg,woff2}'],
+        /*
+         * **不要设 `navigateFallback`**：workbox 会为它注册一条优先级最高的 NavigationRoute，
+         * 用 `createHandlerBoundToURL('index.html')` 去 precache 里找——而 index.html 已经不在
+         * precache 里了，那条路由只能失败（导航失败比"用旧版"更糟）。
+         * 下面 NetworkFirst 会把成功的导航写进 `html` 运行时缓存，离线时照样有兜底。
+         */
+        navigateFallback: undefined,
+        runtimeCaching: [
+          {
+            // 导航（打开页面 / 前进后退）→ 网络优先，拿不到再用缓存
+            urlPattern: ({ request }: { request: Request }) => request.mode === 'navigate',
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'html',
+              networkTimeoutSeconds: 4,
+              expiration: { maxEntries: 8, maxAgeSeconds: 30 * 24 * 60 * 60 },
+            },
+          },
+          {
+            // 版本探测必须走网络，绝不能被任何一层缓存接管
+            urlPattern: /version\.json$/,
+            handler: 'NetworkOnly',
+          },
+        ],
       },
     }),
   ],

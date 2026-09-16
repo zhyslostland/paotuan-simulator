@@ -98,6 +98,7 @@ export default function App() {
   const [pendingStart, setPendingStart] = useState(false);
   const [toast, setToast] = useState('');
   const [updateReady, setUpdateReady] = useState(false);
+  const [autoUpdating, setAutoUpdating] = useState(false);
   const [showEnding, setShowEnding] = useState(false);
   /** 被识别为"主动求死"的那句话，等玩家二次确认 */
   const [pendingSuicide, setPendingSuicide] = useState<string | null>(null);
@@ -161,7 +162,34 @@ export default function App() {
    * 玩家就会一直卡在旧版本里，然后问"我改了你怎么还是旧的"。
    */
   useEffect(() => {
-    const onUpdate = () => setUpdateReady(true);
+    /**
+     * **自动更新一次**（自愈）。
+     *
+     * 为什么需要：横幅要玩家点，而"点了没反应 / 根本没弹 / 不知道要点"这三种情况
+     * 都会让他一直卡在旧包里——这就是"更新问题"反复复发的样子。
+     * 现在探测到线上确实更新时，**主动替他清缓存重来一次**，他要做的只是等三秒。
+     *
+     * 为什么不会死循环：`localStorage` 记了上次自动更新的时间，10 分钟内不再自动。
+     * 万一这次硬重置还是没换到新版，横幅照样在，他还能手动点或去设置里强制重载。
+     */
+    const AUTO_KEY = 'trpg:autoUpdateAt';
+    const COOLDOWN = 10 * 60 * 1000;
+    const maybeAutoUpdate = () => {
+      try {
+        const last = Number(localStorage.getItem(AUTO_KEY) ?? 0);
+        if (Date.now() - last < COOLDOWN) return;
+        localStorage.setItem(AUTO_KEY, String(Date.now()));
+      } catch {
+        return; // 存不了就别自动了，交给手动
+      }
+      setAutoUpdating(true);
+      window.setTimeout(() => void applyUpdate(), 2500);
+    };
+
+    const onUpdate = () => {
+      setUpdateReady(true);
+      maybeAutoUpdate();
+    };
     window.addEventListener('trpg:update-ready', onUpdate);
     const stop = watchForUpdates(onUpdate);
     return () => {
@@ -1121,20 +1149,28 @@ export default function App() {
       )}
       {updateReady && (
         <div className="fixed inset-x-0 bottom-20 z-[75] flex justify-center gap-2 px-4">
-          <button
-            onClick={() => void applyUpdate()}
-            className="rounded-full border border-gold-500/60 bg-ink-900/95 px-4 py-2 text-[13px] text-gold-300 shadow-lg backdrop-blur"
-            title="更新到最新版本（页面会重新加载）"
-          >
-            有新版本 · 点击立即更新
-          </button>
-          <button
-            onClick={() => setUpdateReady(false)}
-            className="rounded-full border border-ink-600 bg-ink-900/95 px-3 py-2 text-[12px] text-mist-400 shadow-lg backdrop-blur"
-            title="先不更新，等这一轮跑完再说"
-          >
-            稍后
-          </button>
+          {autoUpdating ? (
+            <div className="rounded-full border border-gold-500/60 bg-ink-900/95 px-4 py-2 text-[13px] text-gold-300 shadow-lg backdrop-blur">
+              发现新版本，正在自动更新…
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={() => void applyUpdate()}
+                className="rounded-full border border-gold-500/60 bg-ink-900/95 px-4 py-2 text-[13px] text-gold-300 shadow-lg backdrop-blur"
+                title="更新到最新版本（页面会重新加载）"
+              >
+                有新版本 · 点击立即更新
+              </button>
+              <button
+                onClick={() => setUpdateReady(false)}
+                className="rounded-full border border-ink-600 bg-ink-900/95 px-3 py-2 text-[12px] text-mist-400 shadow-lg backdrop-blur"
+                title="先不更新，等这一轮跑完再说"
+              >
+                稍后
+              </button>
+            </>
+          )}
         </div>
       )}
       {/* 装到主屏之后才没有地址栏、能离线开，也不容易被系统清缓存——手机上是重点 */}

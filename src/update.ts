@@ -46,7 +46,11 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     const url = new URL('version.json', document.baseURI);
     // 时间戳 + no-store：任何一层缓存（HTTP 缓存、SW、中间代理）都不许给我旧答案
     url.searchParams.set('t', Date.now().toString(36));
-    const res = await fetch(url.toString(), { cache: 'no-store' });
+    const res = await fetch(url.toString(), {
+      cache: 'no-store',
+      // 有的 CDN 只认请求头上的 Cache-Control，不看 fetch 的 cache 选项
+      headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+    });
     if (!res.ok) return 'unknown';
     const data = (await res.json()) as { version?: string; id?: string };
     if (!data?.version && !data?.id) return 'unknown';
@@ -70,15 +74,8 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
  * 强制下一次导航真走网络拿到新 `index.html` 和新包；
  * SW 会在下次加载时由 `main.tsx → ./pwa` 自动重新注册，离线能力自动恢复，代价为零。
  */
-export async function applyUpdate(): Promise<void> {
-  // 1) 有 waiting SW 就让位（有则更好，没有也不影响下面的兜底）
-  try {
-    await updateSW(true);
-  } catch {
-    /* 没有 SW（比如用 file:// 打开）*/
-  }
-
-  // 2) 主动拆掉旧 SW 与所有缓存
+/** 拆掉旧 SW 与所有缓存。失败也吞掉——清不掉也要往下走。 */
+async function purgeEverything(): Promise<void> {
   try {
     if ('serviceWorker' in navigator) {
       const regs = await navigator.serviceWorker.getRegistrations();
@@ -89,12 +86,12 @@ export async function applyUpdate(): Promise<void> {
       await Promise.all(keys.map((k) => caches.delete(k).catch(() => {})));
     }
   } catch {
-    /* 尽力而为，清不掉也要往下刷新 */
+    /* 尽力而为 */
   }
+}
 
-  // 3) 带戳导航：连 CDN 边缘缓存一起绕开
-  //    用 replace 而非 reload —— reload 正是被旧 SW 接管的那个动作，也是死循环的一半；
-  //    replace 还不会在历史里留一条会被"后退"重新触发的记录。
+/** 带戳导航：连 CDN 边缘缓存一起绕开。replace 不会在历史里留"后退又触发"的记录。 */
+function navigateFresh(): void {
   try {
     const url = new URL(location.href);
     url.searchParams.set('_v', Date.now().toString(36));
@@ -102,6 +99,31 @@ export async function applyUpdate(): Promise<void> {
   } catch {
     location.reload();
   }
+}
+
+export async function applyUpdate(): Promise<void> {
+  // 1) 有 waiting SW 就让位（有则更好，没有也不影响下面的兜底）
+  try {
+    await updateSW(true);
+  } catch {
+    /* 没有 SW（比如用 file:// 打开）*/
+  }
+  // 2) 主动拆掉旧 SW 与所有缓存
+  await purgeEverything();
+  // 3) 带戳重新加载
+  navigateFresh();
+}
+
+/**
+ * **强制重载** —— 不管探测结果是什么，直接清缓存重新拉一次。
+ *
+ * 为什么要有：探测只能判断"服务器上有没有新版本"，判断不了"我这份是不是真的新"。
+ * 玩家明明点了更新却还是旧界面、或者版本号对上了但功能就是不见——这些时候
+ * 唯一有效的动作就是把这个按钮给他，让他自己清一次。**这是兜底，不是常态。**
+ */
+export async function forceReload(): Promise<void> {
+  await purgeEverything();
+  navigateFresh();
 }
 
 /**

@@ -10,7 +10,7 @@ import {
   onInstallAvailable,
   promptInstall,
 } from '../pwa.js';
-import { applyUpdate, checkForUpdate, versionLabel } from '../update.js';
+import { applyUpdate, checkForUpdate, forceReload, versionLabel } from '../update.js';
 import {
   AMBIENCE_LABEL,
   AUDIO_SIZE_WARN,
@@ -1588,14 +1588,19 @@ export function Settings({ onClose }: { onClose: () => void }) {
                     : '打开应用时、以及每次切回前台都会自动检查一次。'}
               </p>
             )}
-            {updateState === 'unknown' && (
-              <button
-                onClick={() => location.reload()}
-                className="mt-2 w-full rounded-lg border border-ink-600 px-3 py-1.5 text-[11px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
-              >
-                强制重新加载页面
-              </button>
-            )}
+            {/*
+             * 「强制重载」常驻，不再只在探测失败时才出现。
+             * 探测只能回答"服务器上有没有新版本"，回答不了"我这份是不是真的新"——
+             * 玩家遇到"点了更新却还是旧界面"时，唯一有效的动作就是这个。
+             * 它清掉 SW 与全部缓存后带时间戳重新加载，等价于一次干净安装。
+             */}
+            <button
+              onClick={() => void forceReload()}
+              className="mt-2 w-full rounded-lg border border-ink-600 px-3 py-1.5 text-[11px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+              title="注销 Service Worker、清空缓存，然后带时间戳重新加载。存档不受影响"
+            >
+              卡在旧版本？强制重载（清缓存重来，存档不受影响）
+            </button>
           </div>
 
           <GroupTitle
