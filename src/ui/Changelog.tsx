@@ -20,6 +20,14 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.2.3',
+    date: '2026-09-16',
+    items: [
+      '修：**换掉了页面缓存的老巢** —— 你机器上那个"离线缓存"的旧版本一直在拦路，它自己又更新不动。这次直接把它依赖的地址换掉，让浏览器**自动把它扔掉**，你只要重新打开就能到新版',
+      '如果你打开后仍是老界面：按 `F12` → 上方选「应用 / Application」→ 左侧「Service Workers」→ 点 **Unregister（注销）** → 回到页面按 `Ctrl+Shift+R`。**这一步不会动你的存档**',
+    ],
+  },
+  {
     version: '0.2.2',
     date: '2026-09-16',
     items: [

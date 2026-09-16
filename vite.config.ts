@@ -1,3 +1,5 @@
+import { copyFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -63,6 +65,17 @@ export default defineConfig({
        * 负责"探测到线上更新就主动清一次缓存"，两者互不冲突。
        */
       registerType: 'autoUpdate',
+      /*
+       * **故意用一个新文件名，而不是默认的 `sw.js`。**
+       *
+       * 卡在旧包里的玩家，浏览器里注册的是旧的 `/sw.js`（prompt 模式：新 SW 一直等在 waiting，
+       * 而那一版的"立即更新"是坏的 → 永远出不来）。
+       * 现在 `/sw.js` 这个地址在新部署里**不存在了** —— 浏览器去检查它时拿到 404（或一段不是 JS 的东西），
+       * 会**自动卸载那枚旧注册**，页面于是重新走网络拿到新包。**不需要玩家做任何事。**
+       *
+       * 顺带也绕开了 CDN 可能残留的 `/sw.js` 旧副本。
+       */
+      filename: 'sw-v2.js',
       includeAssets: ['icon.svg'],
       manifest: {
         name: '跑团模拟器',
@@ -119,6 +132,28 @@ export default defineConfig({
         ],
       },
     }),
+    /**
+     * 把新 SW **再镜像一份到 `sw.js`**（必须排在 `VitePWA` 之后：它也是在 closeBundle 里产出 SW）。
+     *
+     * 为什么非要这一份：卡住的玩家浏览器里，注册的是**旧版的 `/sw.js`**，
+     * 而 `prompt` 模式下新 SW 永远等在 waiting 里、那一版的"立即更新"又是坏的 →
+     * `sw.js` 的内容不变成"他没救"，内容一变"他自愈"。
+     * 每次构建都往 `sw.js` 写一份当前的新 SW：浏览器下次导航时一比对发现不同，
+     * 就会装上它、靠 `skipWaiting()` 立即接管 —— **玩家什么都不用做就脱困**。
+     *
+     * 注册名仍以 `sw-v2.js` 为准（绕开 CDN 上可能残留的旧副本）；
+     * 两者同在时，页面侧注册新名会替换同 scope 的旧注册，不会打架。
+     */
+    {
+      name: 'mirror-legacy-sw',
+      apply: 'build',
+      enforce: 'post',
+      closeBundle() {
+        const from = resolve(process.cwd(), 'dist/sw-v2.js');
+        const to = resolve(process.cwd(), 'dist/sw.js');
+        if (existsSync(from)) copyFileSync(from, to);
+      },
+    },
   ],
   server: {
     host: true, // 允许手机通过局域网访问
