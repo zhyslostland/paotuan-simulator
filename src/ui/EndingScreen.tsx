@@ -3,12 +3,18 @@ import { useStore, type TurnSnapshot } from './store';
 const KIND_TITLE: Record<string, string> = {
   death: '终幕 · 殒命',
   insanity: '终幕 · 理智尽头',
+  success: '终幕 · 达成',
+  failure: '终幕 · 失守',
+  grey: '终幕 · 灰色',
   other: '终幕',
 };
 
 const KIND_NOTE: Record<string, string> = {
   death: '这段故事到这里结束了。',
   insanity: '这段故事到这里结束了。',
+  success: '你要做的事做成了，故事在这里收束。',
+  failure: '该来的终究来了，故事在这里收束。',
+  grey: '你脱身了，代价也留下了。故事在这里收束。',
   other: '这段故事到这里结束了。',
 };
 
@@ -83,6 +89,13 @@ export function EndingScreen({
           {KIND_NOTE[ending.kind] ?? KIND_NOTE.other}
           {ending.at ? ` · ${ending.at.slice(0, 10)}` : ''}
         </p>
+
+        {/* 守密人声明收束时写的一句话：让玩家知道"为什么故事到这里就结束了" */}
+        {ending.reason && (
+          <p className="mt-3 rounded-md border-l-2 border-gold-600/60 bg-ink-850 px-3 py-2 text-[12px] leading-relaxed text-mist-400">
+            {ending.reason}
+          </p>
+        )}
 
         <div className="prose-trpg mt-6 font-serif text-[15px] leading-[1.9] text-mist-300">
           {ending.text.split(/\n+/).map((p, i) => (

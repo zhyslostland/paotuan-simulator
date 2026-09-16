@@ -49,6 +49,7 @@ let checkTargetText: typeof import('../src/ui/store.js').checkTargetText;
 let canonicalSkillName: typeof import('../src/ui/store.js').canonicalSkillName;
 let migrateSave: typeof import('../src/ui/store.js').migrateSave;
 let SAVE_VERSION: typeof import('../src/ui/store.js').SAVE_VERSION;
+let defaultCharacteristics: typeof import('../src/ui/store.js').defaultCharacteristics;
 
 beforeAll(async () => {
   vi.stubGlobal('localStorage', new MemStorage());
@@ -75,6 +76,7 @@ beforeAll(async () => {
   canonicalSkillName = mod.canonicalSkillName;
   migrateSave = mod.migrateSave;
   SAVE_VERSION = mod.SAVE_VERSION;
+  defaultCharacteristics = mod.defaultCharacteristics;
 });
 
 beforeEach(() => {
@@ -222,6 +224,66 @@ describe('开场白跟随角色姓名与称呼', () => {
     expect(c.personality).toBe('');
     expect(Object.keys(c.characteristics)).toContain('str');
     expect(addressOf(c)).toBe('林深女士');
+  });
+
+  it('换模组（改 goal）也会同步开场白，不用重新开团', () => {
+    /*
+     * 用户 2026-09-16 实测："换模组后上一条模组的文案没清。"
+     * 根因：setModule 只判断 `patch.opening !== undefined`，
+     * 于是任何"不带 opening 的换模组"（测试沙盒的切模组按钮就是）
+     * 都会把上一个模组的开场白留在屏幕上。
+     */
+    store.setState({
+      messages: [{ id: 'welcome', role: 'gm', content: '上一个模组的开场白。', ts: 0 }],
+    });
+    store.getState().setModule({ goal: '找到灯塔并点亮它' });
+    expect(store.getState().messages[0]!.content).toContain('找到灯塔并点亮它');
+  });
+
+  it('换模组不会动到后面已经玩出来的消息', () => {
+    store.setState({
+      messages: [
+        { id: 'welcome', role: 'gm', content: '旧开场白。', ts: 0 },
+        { id: 'p1', role: 'player', content: '我推门进去。', ts: 1 },
+        { id: 'g1', role: 'gm', content: '门开了。', ts: 2 },
+      ],
+    });
+    store.getState().setModule({ goal: '拿到那卷胶卷' });
+    const msgs = store.getState().messages;
+    expect(msgs).toHaveLength(3);
+    expect(msgs[1]!.content).toBe('我推门进去。');
+    expect(msgs[2]!.content).toBe('门开了。');
+  });
+});
+
+describe('属性默认值要有起伏（用户："默认属性太平均了"）', () => {
+  /*
+   * 原来 defaultCharacteristics 直接返回每个属性的 default —— COC 全是 50，
+   * 八个属性一模一样，那不是一个人，是一张表格。
+   */
+  it('COC 的属性不全相等，且都落在规则包范围内', () => {
+    const ch = defaultCharacteristics('coc7');
+    const rs = getRuleset('coc7');
+    const values = Object.values(ch);
+    expect(values).toHaveLength(rs.characteristicDefs.length);
+    expect(new Set(values).size).toBeGreaterThan(1);
+    for (const def of rs.characteristicDefs) {
+      expect(ch[def.key]).toBeGreaterThanOrEqual(def.min);
+      expect(ch[def.key]).toBeLessThanOrEqual(def.max);
+    }
+  });
+
+  it('确定性：同一个规则包每次得到同一套（属性不会自己跳）', () => {
+    expect(defaultCharacteristics('coc7')).toEqual(defaultCharacteristics('coc7'));
+  });
+
+  it('换规则包按各自的属性表生成（DnD 是 3-18）', () => {
+    const ch = defaultCharacteristics('dnd5e');
+    const rs = getRuleset('dnd5e');
+    for (const def of rs.characteristicDefs) {
+      expect(ch[def.key]).toBeGreaterThanOrEqual(def.min);
+      expect(ch[def.key]).toBeLessThanOrEqual(def.max);
+    }
   });
 });
 
@@ -852,6 +914,29 @@ describe('引擎强制结档（协作方 C/D：求死不走模型）', () => {
     expect(gs.ending?.kind).toBe('death');
     expect(gs.ending?.text).toBe('');
     expect(gs.dying).toBe(false);
+  });
+
+  /*
+   * 守密人声明收束（契约里的 ending）。
+   * 用户 2026-09-16 实测："我是坐逃生艇下的船，没触发任何结局"——
+   * 模组写好了三条 endings，但引擎里没有任何路径能让"达成目标"结束一局。
+   */
+  it('可以带上"为什么收束"的理由，供结档页展示', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 12, san: 60, mp: 10 } }) });
+    store.getState().forceEnding('success', '你上了救生艇，驶离了货船');
+    const gs = store.getState().gameState;
+    expect(gs.ending?.kind).toBe('success');
+    expect(gs.ending?.reason).toBe('你上了救生艇，驶离了货船');
+    expect(gs.ending?.text).toBe(''); // 正文仍留空 = 等守密人写
+  });
+
+  it('之后写结局正文时不会把理由弄丢', () => {
+    store.setState({ gameState: createInitialState({ vitals: { hp: 12, san: 60, mp: 10 } }) });
+    store.getState().forceEnding('grey', '你逃出来了，但货沉了');
+    store.getState().setEnding('grey', '你在救生艇上回头看了一眼，海面上什么都没有了。');
+    const gs = store.getState().gameState;
+    expect(gs.ending?.reason).toBe('你逃出来了，但货沉了');
+    expect(gs.ending?.text).toContain('救生艇');
   });
 });
 

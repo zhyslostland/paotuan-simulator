@@ -14,6 +14,7 @@ import {
   defaultCharacteristics,
   type Companion,
   type ModuleItem,
+  type ModuleMonster,
 } from './store';
 import { createInitialState } from '../core/state/gameState.js';
 import { getRuleset } from '../core/rulesets/index.js';
@@ -56,6 +57,17 @@ const SCRIPTED_MODULES = {
       { id: uid('item'), name: '备用灯油', look: '杂货铺货架最底下的一桶', effect: '给灯塔的灯加满油，可让它亮一整夜', kind: 'consumable' as const },
       { id: uid('item'), name: '湿透的账本', look: '礁石滩上捡到的', effect: '记着走私的日期与数量，可用来逼问老周', kind: 'clue' as const },
     ] as ModuleItem[],
+    monsters: [
+      {
+        id: uid('mon'),
+        name: '背光的男人',
+        look: '灯下看不清脸，一直背对着光；被你注意到的瞬间会往暗处挪半步',
+        hp: 11,
+        attack: '1d4+1 推搡，或把人往水里按',
+        behavior: '尽量避免正面冲突，先谈条件；被逼到墙角才动手',
+        weakness: '他怕你认出他是谁——点破身份会让他退让',
+      },
+    ] as ModuleMonster[],
   },
   combat: {
     title: '【测试】货舱里的东西',
@@ -82,7 +94,25 @@ const SCRIPTED_MODULES = {
     items: [
       { id: uid('item'), name: '撬棍', look: '货舱角落里的一根铁棍', effect: '撬开卡死的舱门；本应失败的尝试可再来一次', kind: 'tool' as const },
       { id: uid('item'), name: '消防斧', look: '挂在舱壁上的', effect: '伤害 1d8+2，格斗（斗殴）', kind: 'weapon' as const },
+      { id: uid('item'), name: '信号枪', look: '救生箱里翻出来的', effect: '伤害 1d6，射击（手枪）；打出的强光能让黑暗里的东西退缩一回合', kind: 'weapon' as const },
+      { id: uid('item'), name: '信号弹', look: '与信号枪配套的三发', effect: '一发照亮整个货舱一分钟；也能当火源', kind: 'consumable' as const },
     ] as ModuleItem[],
+    /*
+     * 敌对者表（R38）。
+     * 之前三个脚本化模组都没有 monsters，战斗全靠模型即兴——它经常**忘了给敌人起名字**，
+     * 而没有 name 的 combat.foes 会被引擎拒绝，玩家就"对着空气打"（用户 2026-09-16 实测）。
+     */
+    monsters: [
+      {
+        id: uid('mon'),
+        name: '舱底的东西',
+        look: '积水里立起来的一团，看不清形状，只有湿漉漉的响动；它不发出声音，但你总能听见水在动',
+        hp: 14,
+        attack: '1d6 撕咬，或把人往水里拖',
+        behavior: '只在暗处移动，被强光照到会退缩一回合；不会追击离舱的人',
+        weakness: '强光 / 火',
+      },
+    ] as ModuleMonster[],
   },
   long: {
     title: '【测试】雨季结束之前',
@@ -125,6 +155,17 @@ const SCRIPTED_MODULES = {
       { id: uid('item'), name: '干粮三份', look: '旅店给的', effect: '每份恢复 1d4 生命，只在休整时可用', kind: 'consumable' as const },
       { id: uid('item'), name: '铜锣', look: '祠堂里的旧物', effect: '在雾里敲响，能让人循声走回来一次', kind: 'tool' as const },
     ] as ModuleItem[],
+    monsters: [
+      {
+        id: uid('mon'),
+        name: '雾里的东西',
+        look: '雾里一个高瘦的轮廓，站得比人久，也比人安静；雾散时它就不在了',
+        hp: 18,
+        attack: '1d6 拖拽，把人带进雾里',
+        behavior: '只在起雾时现身；不会主动杀人，但会一遍遍把人往回带',
+        weakness: '铜锣声 / 被人叫出它原来的名字',
+      },
+    ] as ModuleMonster[],
   },
 } as const;
 
@@ -178,6 +219,7 @@ function fillTestSave() {
     notes: '测试用模组。',
     scale: mod.scale,
     items: mod.items.map((i) => ({ ...i })),
+    monsters: mod.monsters.map((x) => ({ ...x })),
   });
 
   s.startNewGame();
@@ -293,6 +335,7 @@ export function TestSandbox({ onClose }: { onClose: () => void }) {
                   endings: m.endings,
                   scale: m.scale,
                   items: m.items.map((i) => ({ ...i })),
+                  monsters: m.monsters.map((x) => ({ ...x })),
                 });
               })
             }
@@ -320,6 +363,7 @@ export function TestSandbox({ onClose }: { onClose: () => void }) {
                   endings: m.endings,
                   scale: m.scale,
                   items: m.items.map((i) => ({ ...i })),
+                  monsters: m.monsters.map((x) => ({ ...x })),
                 });
               })
             }
@@ -347,6 +391,7 @@ export function TestSandbox({ onClose }: { onClose: () => void }) {
                   endings: m.endings,
                   scale: m.scale,
                   items: m.items.map((i) => ({ ...i })),
+                  monsters: m.monsters.map((x) => ({ ...x })),
                 });
               })
             }

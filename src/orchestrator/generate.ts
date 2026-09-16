@@ -252,7 +252,7 @@ ${module.truth ? `\n（内部真相，用来判断这些敌对者是什么、从
  * 也不许出现"游戏结束""请重新开局"这类跳出戏外的话。
  */
 export function endingSystemPrompt(
-  kind: 'death' | 'insanity' | 'other',
+  kind: 'death' | 'insanity' | 'success' | 'failure' | 'grey' | 'other',
   genre: Genre,
   module: { title?: string; premise?: string; truth?: string; endings?: string },
   character: { name?: string; gender?: string }
@@ -262,7 +262,13 @@ export function endingSystemPrompt(
       ? '角色的生命走到了尽头。'
       : kind === 'insanity'
         ? '角色的理智彻底崩塌，他对世界的理解已经回不去了。'
-        : '这段故事走到了它的终点。';
+        : kind === 'success'
+          ? '**玩家达成了这一局的目标**——模组预设的"成功"结局成立了。'
+          : kind === 'failure'
+            ? '**玩家没能达成目标，代价落了下来**——模组预设的"失败"结局成立了。'
+            : kind === 'grey'
+              ? '**玩家逃过了最坏的结果，但也付出了代价**——模组预设的"灰色"结局成立了。'
+              : '这段故事走到了它的终点。';
   return `你是这场单人跑团的守密人，现在要为这一局写**结局正文**。
 
 ## 题材与舞台

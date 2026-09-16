@@ -18,6 +18,30 @@ import type { InventoryItem } from '../core/state/gameState.js';
 export type { Difficulty };
 export { DIFFICULTY_LABEL };
 
+/**
+ * 「全部技能」里低于这个基础值的折叠起来。
+ * COC 的 base 1 技能（人类学、考古学、锁匠、医学、驾驶船只……）全列出来就是"一堆 1%"，
+ * 会把真正能用的那几项淹掉。规则上它们仍然可用，只是不值得占版面。
+ */
+const LOW_SKILL_BASE = 5;
+
+/**
+ * 已知的"重状态"用告警色。其余中文 flag 照常显示，只是用中性色——
+ * 这样一来，守密人新写的任何状态（流血、中毒、被通缉）都不会再"界面上一片安静"。
+ */
+const SEVERE_FLAG_TONE: Record<string, 'blood' | 'arcane'> = {
+  永久疯狂: 'blood',
+  濒临死亡: 'blood',
+  濒死: 'blood',
+  死亡: 'blood',
+  流血: 'blood',
+  重伤: 'blood',
+  中毒: 'blood',
+  临时疯狂: 'arcane',
+  恐惧: 'arcane',
+  被跟踪: 'arcane',
+};
+
 /** 检定面板：一次选好技能、难度、目标，并描述自己想怎么做——行为与检定一起发送 */
 export function CheckDialog({
   skill,
@@ -65,6 +89,14 @@ export function CheckDialog({
    */
   const needsWeapon =
     skillDef && /射击|投掷|弓/.test(skillDef.name) ? skillDef.name : null;
+  /**
+   * 需要武器但背包里没有对应武器。
+   * 这一条是**硬闸门**：技能值不等于手里有东西，没有枪就不该掷这一枪
+   * （用户 2026-09-16 实测：手枪被误扣后系统还在触发手枪检定）。
+   */
+  const weaponMissing =
+    needsWeapon != null &&
+    !gameState.inventory.some((i) => i.kind === 'weapon' && i.skill?.trim() === needsWeapon);
   const weight = weighDescription(
     action,
     {
@@ -73,9 +105,7 @@ export function CheckDialog({
       clues: gameState.clues,
       items: gameState.inventory.map((i) => i.name),
       requiredWeapon: needsWeapon,
-      hasWeapon: needsWeapon
-        ? gameState.inventory.some((i) => i.kind === 'weapon' && i.skill?.trim() === needsWeapon)
-        : true,
+      hasWeapon: !weaponMissing,
     },
     rs.mainDice === '1d100' ? 'percent' : 'modifier'
   );
@@ -131,6 +161,12 @@ export function CheckDialog({
           <p className="mt-1.5 rounded-md border border-ink-600 px-2.5 py-1.5 text-[11px] leading-relaxed text-mist-500">
             角色卡里没有专门练过这项 —— 按规则包给出的<span className="text-mist-300">基础值</span>
             掷（未受训就是低，不会白给高成功率）。
+          </p>
+        )}
+        {weaponMissing && (
+          <p className="mt-1.5 rounded-md border border-blood-400/40 bg-blood-400/[0.06] px-2.5 py-1.5 text-[11px] leading-relaxed text-blood-300">
+            背包里没有可用于「{needsWeapon ?? ''}」的武器，这一次掷不了。
+            先把武器拿到手（找回、借、捡），或者换一种不依赖它的做法。
           </p>
         )}
 
@@ -211,9 +247,10 @@ export function CheckDialog({
         <div className="mt-3 flex gap-2">
           <button
             onClick={() => onConfirm(target, action, weight.bonus)}
-            className="flex-1 rounded-lg bg-gold-500 px-4 py-2 text-[13px] font-medium text-ink-950 transition hover:bg-gold-400"
+            disabled={weaponMissing}
+            className="flex-1 rounded-lg bg-gold-500 px-4 py-2 text-[13px] font-medium text-ink-950 transition hover:bg-gold-400 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-mist-500"
           >
-            掷骰检定
+            {weaponMissing ? '手里没有可用武器' : '掷骰检定'}
           </button>
           <button
             onClick={onCancel}
@@ -390,14 +427,27 @@ export function CharacterSheet({
   const streaming = useStore((s) => s.streaming);
   const [showFull, setShowFull] = useState(false);
   const [showAllSkills, setShowAllSkills] = useState(false);
+  const [showLowSkills, setShowLowSkills] = useState(false);
   const [openItem, setOpenItem] = useState<string | null>(null);
 
   const rs = getRuleset(rulesetId);
   // 角色卡上没写的技能（用标准名去重，避免"手枪"与"射击（手枪）"重复出现）
   const ownedCanon = new Set(Object.keys(character.skills).map((k) => canonicalSkillName(k, rs)));
-  const restSkills = rs.skillCatalog.filter(
-    (s) => !ownedCanon.has(s.name) && character.skills[s.name] == null
-  );
+  /*
+   * 未受训技能也**按基础值从高到低排**——这张表是给玩家"挑一个来掷"用的，
+   * 按规则书的字典序排等于让他自己在几十项里找（用户 2026-09-16 实测反馈）。
+   */
+  const restSkills = rs.skillCatalog
+    .filter((s) => !ownedCanon.has(s.name) && character.skills[s.name] == null)
+    .sort((a, b) => b.base - a.base);
+  /*
+   * 基础值太低的单独折叠。
+   * COC 里有一批 base 1 的技能（人类学、考古学、锁匠、医学、驾驶船只……），
+   * 它们按规则确实存在，但摊在一张表里就是"一堆 1%"，把真正能用的那几项淹掉了。
+   * 默认只列 >= LOW_SKILL_BASE 的，剩下的藏进二级折叠（想找还是找得到）。
+   */
+  const usefulRestSkills = restSkills.filter((s) => s.base >= LOW_SKILL_BASE);
+  const lowRestSkills = restSkills.filter((s) => s.base < LOW_SKILL_BASE);
   const vitalsMax = deriveVitalsMax(character, rulesetId);
   // 缺键时用属性派生值兜底，而不是显示 0
   const vitalsDerived = deriveVitalsFor(character, rulesetId);
@@ -530,33 +580,44 @@ export function CharacterSheet({
 
       <section className="space-y-3">
         <h3 className="text-[11px] tracking-wider text-mist-500">状态</h3>
-        {(Boolean(gameState.flags['永久疯狂']) ||
-          Boolean(gameState.flags['濒临死亡']) ||
-          Boolean(gameState.flags['濒死']) ||
-          Boolean(gameState.flags['临时疯狂'])) && (
-          <div className="flex flex-wrap gap-1.5">
-            {Boolean(gameState.flags['永久疯狂']) && (
-              <span className="rounded-md bg-blood-400/15 px-2 py-0.5 text-[10px] text-blood-300">
-                永久疯狂
-              </span>
-            )}
-            {Boolean(gameState.flags['濒临死亡']) && (
-              <span className="rounded-md bg-blood-400/15 px-2 py-0.5 text-[10px] text-blood-300">
-                濒临死亡
-              </span>
-            )}
-            {Boolean(gameState.flags['濒死']) && (
-              <span className="rounded-md bg-blood-400/15 px-2 py-0.5 text-[10px] text-blood-300">
-                濒死
-              </span>
-            )}
-            {Boolean(gameState.flags['临时疯狂']) && (
-              <span className="rounded-md bg-arcane-400/15 px-2 py-0.5 text-[10px] text-arcane-300">
-                临时疯狂
-              </span>
-            )}
-          </div>
-        )}
+        {/*
+         * 状态标签**动态来自 flags**，不再只认四个写死的键。
+         *
+         * 原来是 `Boolean(flags['永久疯狂']) || ... ` 这样一串写死的判断，
+         * 结果守密人写的任何别的状态（"流血""中毒""被跟踪"）在界面上**一个字都不显示**——
+         * 玩家只能从正文里猜自己是不是在掉血（用户 2026-09-16 实测："流血状态界面不显示"）。
+         *
+         * 引擎/守密人约定的几个重状态用告警色，其余的用中性色照常列出。
+         */}
+        {(() => {
+          const statusFlags = Object.entries(gameState.flags).filter(
+            ([k, v]) => /[\u4e00-\u9fa5]/.test(k) && v !== false && v !== '' && v !== 0 && v != null
+          );
+          if (statusFlags.length === 0) return null;
+          return (
+            <div className="flex flex-wrap gap-1.5">
+              {statusFlags.map(([key, value]) => {
+                const tone = SEVERE_FLAG_TONE[key];
+                const text = value === true ? key : `${key}：${String(value)}`;
+                return (
+                  <span
+                    key={key}
+                    title={tone ? '这是引擎或守密人给出的严重状态，会直接影响判定与结局' : undefined}
+                    className={`rounded-md px-2 py-0.5 text-[10px] ${
+                      tone === 'blood'
+                        ? 'bg-blood-400/15 text-blood-300'
+                        : tone === 'arcane'
+                          ? 'bg-arcane-400/15 text-arcane-300'
+                          : 'bg-ink-700 text-mist-400'
+                    }`}
+                  >
+                    {text}
+                  </span>
+                );
+              })}
+            </div>
+          );
+        })()}
         {rs.vitalDefs.map((v) => (
           <VitalBar
             key={v.key}
@@ -582,8 +643,10 @@ export function CharacterSheet({
             .map(([skill, value]) => {
             /*
              * 有枪的技能 ≠ 手里有枪。
-             * 背包里找不到对应武器时给一句灰字提示（仍可点，玩家知情即可）——
-             * 否则会出现"角色卡写着射击 40%，背包里根本没枪"却在剧情里正常开枪。
+             *
+             * 背包里找不到对应武器时**直接禁用这一项**，而不是"给个灰字提示但照点不误"——
+             * 用户 2026-09-16 实测：手枪早就被误扣掉了，系统还在给他触发手枪检定。
+             * 技能值不等于手里有东西（红线二之五），没有枪就不该有这一次掷骰。
              */
             const needWeapon = rs.skillCatalog.find(
               (s) => s.name === skill || s.name === canonicalSkillName(skill, rs)
@@ -598,21 +661,21 @@ export function CharacterSheet({
             return (
               <button
                 key={skill}
-                disabled={streaming}
+                disabled={streaming || weaponMissing}
                 onClick={() => onRequestCheck(skill)}
                 title={
                   weaponMissing
-                    ? '背包里没有可用武器'
+                    ? `背包里没有可用于「${needWeapon!.name}」的武器——先把它拿到手`
                     : `${canonicalSkillName(skill, rs) === skill ? '' : `规范名：${canonicalSkillName(skill, rs)} · `}点击检定`
                 }
-                className="group flex items-center justify-between rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-left transition hover:border-gold-600/50 hover:bg-ink-800 disabled:opacity-40"
+                className="group flex items-center justify-between rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-left transition hover:border-gold-600/50 hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <span className="min-w-0">
                   <span className="block truncate text-[12px] text-mist-300 group-hover:text-mist-100">
                     {skill}
                   </span>
                   {weaponMissing && (
-                    <span className="block text-[9px] text-blood-300/80">无可用武器</span>
+                    <span className="block text-[9px] text-blood-300/80">无可用武器 · 不可检定</span>
                   )}
                   {untrainedSkill && (
                     <span className="block text-[9px] text-mist-500/70">未受训</span>
@@ -637,11 +700,11 @@ export function CharacterSheet({
           onClick={() => setShowAllSkills((v) => !v)}
           className="mt-2 text-[11px] text-gold-500/80 transition hover:text-gold-400"
         >
-          {showAllSkills ? '收起全部技能' : `全部技能（含基础值 ${restSkills.length} 项）`}
+          {showAllSkills ? '收起全部技能' : `全部技能（含基础值 ${usefulRestSkills.length} 项）`}
         </button>
         {showAllSkills && (
           <div className="mt-2 grid grid-cols-2 gap-1.5">
-            {restSkills.map((s) => (
+            {usefulRestSkills.map((s) => (
               <button
                 key={s.name}
                 disabled={streaming}
@@ -658,6 +721,44 @@ export function CharacterSheet({
               </button>
             ))}
           </div>
+        )}
+
+        {/*
+         * 基础值极低的（COC 里那一批 1%）单独收在二层。
+         * 它们不是"不该存在"（人类学 1%、医学 1% 都是规则书里的标准基础值），
+         * 只是列出来会把上面真正能用的几项淹掉（用户报的"一堆 1% 的技能"）。
+         */}
+        {showAllSkills && lowRestSkills.length > 0 && (
+          <>
+            <button
+              onClick={() => setShowLowSkills((v) => !v)}
+              className="mt-2 text-[11px] text-mist-500 transition hover:text-mist-300"
+            >
+              {showLowSkills
+                ? '收起几乎用不上的技能'
+                : `还有 ${lowRestSkills.length} 项基础值低于 ${LOW_SKILL_BASE}% 的（几乎不会，展开可掷）`}
+            </button>
+            {showLowSkills && (
+              <div className="mt-2 grid grid-cols-2 gap-1.5 opacity-70">
+                {lowRestSkills.map((s) => (
+                  <button
+                    key={s.name}
+                    disabled={streaming}
+                    onClick={() => onRequestCheck(s.name)}
+                    title={s.desc}
+                    className="group flex items-center justify-between rounded-md border border-dashed border-ink-800 px-2.5 py-1.5 text-left transition hover:border-gold-600/30 disabled:opacity-40"
+                  >
+                    <span className="truncate text-[12px] text-mist-500 group-hover:text-mist-300">
+                      {s.name}
+                    </span>
+                    <span className="shrink-0 text-[12px] tabular-nums text-mist-500/80">
+                      {rs.mainDice === '1d100' ? `${s.base}%` : `+${s.base}`}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
         )}
 
         <p className="mt-2 text-[10px] leading-relaxed text-mist-500/70">

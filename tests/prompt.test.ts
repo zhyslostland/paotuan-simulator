@@ -101,8 +101,9 @@ describe('isCheckLeak 识别正文里泄漏的检定结果', () => {
 });
 
 describe('输出契约里的状态白名单不能和战斗规则自相矛盾', () => {
-  it('combat.active / round / foes 都写在允许的 target 前缀里', () => {
-    const prompt = buildSystemPrompt({
+  /** 一份最小可用的提示词上下文：这些用例只关心"提示词里到底说了什么" */
+  const buildPrompt = () =>
+    buildSystemPrompt({
       rulesetName: 'COC 7th',
       genre: {
         id: 'coc',
@@ -148,12 +149,53 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
       worldbook: [],
       chronicle: [],
     });
+
+  it('combat.active / round / foes 都写在允许的 target 前缀里', () => {
+    const prompt = buildPrompt();
     // 战斗规则让模型写 combat.*，白名单里就必须有，否则写多少被拒多少
     expect(prompt).toContain('combat.active');
     expect(prompt).toContain('combat.round');
     expect(prompt).toContain('combat.foes');
     // 检定结论不许写进正文，这条红线要在提示词里
     expect(prompt).toContain('检定结论只由引擎的卡片呈现');
+  });
+
+  /*
+   * 下面这些是**用户实测踩过的坑**，每条都对应过一次真实的坏体验。
+   * 写成断言是为了防止以后改提示词时不小心把它们删掉——
+   * 提示词删一行不会有任何报错，但游戏会立刻变回原来的样子。
+   */
+  it('武器不被当作消耗品（"开一枪把手枪消耗掉"）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('武器本身不是消耗品');
+  });
+
+  it('敌人必须有名字（"敌对生物没有命名"）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('name 是必填的');
+  });
+
+  it('空间连贯：移动必须走 location（"一会在房间外，一会在房间内"）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('空间与位置');
+    expect(prompt).toContain('移动必须走 location');
+  });
+
+  it('不得替玩家编造身体特征（"给我加了右腿有旧伤的设定"）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('不要替玩家编造他自己');
+    expect(prompt).toContain('身体特征或病史');
+  });
+
+  it('负面状态必须进 flags（"流血状态界面不显示"）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('持续的负面状态一律写进 flags');
+  });
+
+  it('能声明结局收束（"上了救生艇却没触发任何结局"）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('宣告结局');
+    expect(prompt).toContain('success | failure | grey');
   });
 });
 
@@ -210,5 +252,26 @@ describe('extractContract', () => {
     const { body, contract } = extractContract('只有正文');
     expect(body).toBe('只有正文');
     expect(contract).toBeNull();
+  });
+
+  /*
+   * 收束声明。
+   * 用户 2026-09-16 实测："我是坐逃生艇下的船，没触发任何结局"——
+   * 模组里写好了"成功：跳船逃生"，但引擎**没有任何路径**能让"达成目标"结束一局。
+   */
+  it('能解析 ending（守密人声明收束）', () => {
+    const raw =
+      '你翻过船舷，落在救生艇里。\n\n```json\n' +
+      '{"summary_delta":"你上了救生艇并划离货船","state_delta":[],' +
+      '"ending":{"kind":"success","reason":"你离开了这条船，目标达成"}}\n```';
+    const { contract } = extractContract(raw);
+    expect(contract?.ending?.kind).toBe('success');
+    expect(contract?.ending?.reason).toBe('你离开了这条船，目标达成');
+  });
+
+  it('不填 ending 时是 undefined（绝大多数回合都不该填）', () => {
+    const raw = '正文。\n\n```json\n{"summary_delta":"一句话"}\n```';
+    const { contract } = extractContract(raw);
+    expect(contract?.ending).toBeUndefined();
   });
 });

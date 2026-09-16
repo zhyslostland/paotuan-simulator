@@ -37,6 +37,7 @@ import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Change
 import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
+import type { Ending } from '../core/state/gameState.js';
 
 type Panel = 'chat' | 'character' | 'world';
 
@@ -53,6 +54,9 @@ const FALLBACK_ENDING: Record<string, string> = {
     '意识一层层退下去，最后剩下的是很远处的声音。故事在这里断了线——具体断在哪一处，要看你自己记得的那一段。',
   insanity:
     '他终于看清了那件东西本来的样子。只是从这一刻起，再也分不清哪些是眼前的、哪些不是了。',
+  success: '你要做的那件事做成了。身后的事还在继续，但对你来说，它已经结束了。',
+  failure: '最后还是没有拦住。该来的都来了，你只能看着它发生。',
+  grey: '你活着出来了，但不是全身而退——有些东西留在了那里，再也拿不回来。',
   other: '事情告一段落。留下来的东西比带走的要多。',
 };
 
@@ -500,6 +504,30 @@ export default function App() {
         }
         if (contract.summary_delta) addChronicle(contract.summary_delta);
 
+        /*
+         * 收束声明：守密人判断模组预设的某个结局成立了。
+         *
+         * 以前**没有任何路径**能让"玩家达成了目标"这件事结束一局——
+         * 引擎只会因为生命/理智归零而结档，模组里那三条 endings 纯粹是给模型看的文本。
+         * 于是玩家上了救生艇、划远了（本来就是模组写的"成功：跳船逃生"），
+         * 故事却继续往一个模组里没有的荒岛续写，最后在荒岛上流血而死（用户 2026-09-16 实测）。
+         *
+         * 这里只负责写下"空正文的 ending"，结局正文由下面的唯一出口去要。
+         * **死亡与疯狂优先**：引擎已经判了 death / insanity 时，不接受模型来"降级"成 success。
+         */
+        const declared = contract.ending?.kind;
+        const declaredKind =
+          declared === 'success' || declared === 'failure' || declared === 'grey'
+            ? declared
+            : null;
+        if (declaredKind) {
+          const cur = useStore.getState().gameState.ending;
+          const severe = cur?.kind === 'death' || cur?.kind === 'insanity';
+          if (!cur || (!severe && !cur.text)) {
+            useStore.getState().forceEnding(declaredKind, contract.ending?.reason);
+          }
+        }
+
         const after = useStore.getState().gameState;
         const now = useStore.getState().audio;
         if (now.enabled) {
@@ -554,7 +582,7 @@ export default function App() {
   };
 
   /** 向守密人要一段结局正文（结档页用） */
-  const requestEnding = async (kind: 'death' | 'insanity' | 'other') => {
+  const requestEnding = async (kind: Ending['kind']) => {
     const s = useStore.getState();
     // 结档音：缓慢下行的长音，让"到这里结束了"这件事落地
     if (s.audio.enabled) void playSfx('ending', s.audio.sfxVol);

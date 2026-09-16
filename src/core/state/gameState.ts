@@ -108,12 +108,20 @@ export interface Thread {
  * 也不是读档当没发生。回溯能力永远在系统里，玩家想重来随时可以退回去。
  */
 export interface Ending {
-  /** death = 生命耗尽；insanity = 理智归零；other = 模组自己定义的收束 */
-  kind: 'death' | 'insanity' | 'other';
+  /**
+   * 结档类型。
+   * - `death` / `insanity`：引擎裁决（生命耗尽 / 理智归零），模型不得声明
+   * - `success` / `failure` / `grey`：**模组自己写的收束**，由守密人在契约里声明
+   *   （模组的 `endings` 就是这三条：成功 / 失败 / 灰色）
+   * - `other`：兜底
+   */
+  kind: 'death' | 'insanity' | 'success' | 'failure' | 'grey' | 'other';
   /** 结局正文（由守密人写的一段收束叙事，不是系统提示语） */
   text: string;
   /** 结档时刻 */
   at: string;
+  /** 模型声明收束时给的一句话理由（如"你上了救生艇并划离了货船"），结档页展示 */
+  reason?: string;
 }
 
 export interface GameState {
@@ -499,6 +507,23 @@ export function applyDeltas(
           continue;
         }
         const item = (list as InventoryItem[])[idx]!;
+        /*
+         * **武器不按数量消耗。**
+         *
+         * 模型天然会写"我开了一枪"，然后按"用掉一件东西"扣数量——扣的却是那把枪。
+         * 用户 2026-09-16 实测："开一枪把我手枪消耗掉了"，而且枪没了之后
+         * 系统还在给他触发手枪检定，整局都崩了。
+         *
+         * 弹药才是消耗品，枪本身不该因为使用而消失。要丢掉武器请用 remove，
+         * 并写明理由（被缴械 / 送人 / 掉进水里）。
+         */
+        if (item.kind === 'weapon') {
+          rejected.push({
+            delta,
+            reason: `「${item.name}」是武器，不按数量消耗（开枪用掉的是弹药，不是枪本身）`,
+          });
+          continue;
+        }
         const current = Number.isFinite(item.qty) ? item.qty : 1;
         const after = delta.op === 'dec' ? current - amount : current + amount;
         if (after <= 0) {
@@ -561,6 +586,19 @@ export function applyDeltas(
           if (idx < 0) idx = (list as InventoryItem[]).findIndex((i) => i.name === key);
           if (idx < 0) {
             rejected.push({ delta, reason: `背包中不存在物品 ${key}` });
+            continue;
+          }
+          /*
+           * 丢弃武器是合法的（被缴械、送人、掉进水里），
+           * 但"**因为用了一下**就整件消失"不是——那是 dec 被拒之后的另一种绕法。
+           * 所以只在 reason 写着"使用语义"时才拦（真正的丢枪/缴械照常放行）。
+           */
+          const removing = (list as InventoryItem[])[idx] as InventoryItem;
+          if (removing.kind === 'weapon' && /使用|用掉|消耗|开火|射击|发射|打出/.test(String(delta.reason ?? ''))) {
+            rejected.push({
+              delta,
+              reason: `「${removing.name}」是武器，不会因为使用而消失（丢掉它请写明缴械 / 送人 / 丢失）`,
+            });
             continue;
           }
           list.splice(idx, 1);

@@ -549,3 +549,49 @@ describe('背包按数量消耗', () => {
     expect(bad.rejected).toHaveLength(1);
   });
 });
+
+describe('武器不会被"用掉"', () => {
+  /*
+   * 用户 2026-09-16 实测："开一枪把我手枪消耗掉了。"
+   * 模型天然会写"我开了一枪"然后按消耗品的写法扣数量，扣的却是那把枪；
+   * 枪没了之后系统还在给他触发手枪检定，整局都崩了。
+   */
+  const withGun = (): GameState => ({
+    ...base(),
+    inventory: [
+      { id: 'gun', name: '柯尔特左轮', qty: 1, kind: 'weapon', damage: '1d10', skill: '射击（手枪）' },
+      { id: 'ammo', name: '子弹', qty: 6 },
+    ],
+  });
+
+  it('dec 命中武器一律拒绝，武器数量不变', () => {
+    const { state, rejected } = applyDeltas(withGun(), [
+      { target: 'inventory', op: 'dec', value: '柯尔特左轮', amount: 1 },
+    ]);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toContain('武器');
+    expect(state.inventory.find((i) => i.name === '柯尔特左轮')?.qty).toBe(1);
+  });
+
+  it('remove 写着"使用/射击"这类理由时也拒绝（那是 dec 被拒后的绕法）', () => {
+    const { state, rejected } = applyDeltas(withGun(), [
+      { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason: '开枪使用后消耗' },
+    ]);
+    expect(rejected).toHaveLength(1);
+    expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(true);
+  });
+
+  it('真正的丢枪（缴械 / 送人 / 丢失）照常放行', () => {
+    const { state } = applyDeltas(withGun(), [
+      { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason: '被押运员夺走' },
+    ]);
+    expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(false);
+  });
+
+  it('弹药仍然可以正常消耗（别把消耗品一起管死）', () => {
+    const { state } = applyDeltas(withGun(), [
+      { target: 'inventory', op: 'dec', value: '子弹', amount: 1 },
+    ]);
+    expect(state.inventory.find((i) => i.name === '子弹')!.qty).toBe(5);
+  });
+});

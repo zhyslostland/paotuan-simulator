@@ -758,11 +758,41 @@ const DEFAULT_CONFIG: ApiConfig = {
   maxTokens: 3072,
 };
 
-/** 属性默认值由规则包提供，换规则就自动换一套属性 */
+/**
+ * 属性默认值由规则包提供，换规则就自动换一套属性。
+ *
+ * **不能直接填 `d.default`**：COC 的 default 是 50，八个属性全套 50
+ * 意味着"力量、体质、智力、教育完全一样"——那不是一个活人，是一张表格。
+ * （用户 2026-09-16 实测反馈："默认模组里面的人物属性是不是太平均了"。）
+ *
+ * 这里按 `(rulesetId, 属性下标)` 做一次**确定性散列**，给每个属性一个固定的偏移。
+ * 为什么必须确定性：这个函数在"缺省回退"（角色卡里没填的属性）与"新建角色"两处被调用，
+ * 每次返回不同的值会让界面上的数字自己跳。
+ *
+ * 摆幅按规则包的属性全幅算：COC（1-99）得到 ±20，落在 30-70；
+ * DnD（3-18）全幅小，改用更大的比例，得到 ±6，落在 4-16（贴近标准数组的手感）。
+ */
 export function defaultCharacteristics(rulesetId = 'coc7'): Record<string, number> {
+  const rs = getRuleset(rulesetId);
   return Object.fromEntries(
-    getRuleset(rulesetId).characteristicDefs.map((d) => [d.key, d.default])
+    rs.characteristicDefs.map((d, i) => {
+      const span = Math.max(d.max - d.min, 1);
+      const swing = Math.max(3, Math.round(span * (span < 20 ? 0.4 : 0.2)));
+      const off = Math.round(deterministicUnit(`${rulesetId}#${d.key}`) * swing);
+      const v = Math.max(d.min, Math.min(d.max, d.default + off));
+      return [d.key, v];
+    })
   );
+}
+
+/** 由字符串得到 [-1, 1] 的确定性伪随机数（同一个串永远同一个值） */
+function deterministicUnit(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 2001) / 1000 - 1;
 }
 
 /**
@@ -1588,8 +1618,11 @@ interface Store {
    * 引擎强制结档（求死、放弃抵抗等）。
    * 不走模型：模型对自杀有安全对齐，会产出软拒绝把剧情拉回来，
    * 玩家的意志反而被"救"了——这种事必须由引擎说了算。
+   *
+   * 也是**守密人声明收束**（契约里的 `ending`）的落点：那种情况同样只需要
+   * 写下一个"空正文的 ending"，结局正文由 App 的唯一出口去要。
    */
-  forceEnding(kind: Ending['kind']): void;
+  forceEnding(kind: Ending['kind'], reason?: string): void;
   /** 结档：写一段守密人给的结局正文 */
   setEnding(kind: Ending['kind'], text: string): void;
   /** 清除结档状态（开新团、或玩家从结档页回溯时） */
@@ -1826,11 +1859,16 @@ export const useStore = create<Store>((set, get) => ({
     set({ snapshots: next });
   },
 
-  forceEnding(kind) {
+  forceEnding(kind, reason) {
     const gs: GameState = {
       ...get().gameState,
       dying: false,
-      ending: { kind, text: '', at: new Date().toISOString() },
+      ending: {
+        kind,
+        text: '',
+        at: new Date().toISOString(),
+        ...(reason?.trim() ? { reason: reason.trim() } : {}),
+      },
     };
     saveJson('trpg.gameState', gs);
     set({ gameState: gs });
@@ -1838,7 +1876,13 @@ export const useStore = create<Store>((set, get) => ({
 
   setEnding(kind, text) {
     const s = get();
-    const ending: Ending = { kind, text: text.trim(), at: new Date().toISOString() };
+    const ending: Ending = {
+      kind,
+      text: text.trim(),
+      at: new Date().toISOString(),
+      // 声明收束时的理由要留着——结档页要回答"为什么故事到这里就结束了"
+      ...(s.gameState.ending?.reason ? { reason: s.gameState.ending.reason } : {}),
+    };
     const gameState: GameState = { ...s.gameState, ending };
     saveJson('trpg.gameState', gameState);
     set({ gameState });
@@ -1996,14 +2040,28 @@ export const useStore = create<Store>((set, get) => ({
     const next = sanitizeModuleTokens({ ...get().module, ...patch }, get().character);
     saveJson('trpg.module', next);
     set({ module: next });
-    // 开场白属于模组（第一幕），改了要同步首条消息
-    if (patch.opening !== undefined) {
+    /*
+     * 开场白属于模组（第一幕），改了要同步首条消息。
+     *
+     * 原来只判断 `patch.opening !== undefined`，于是**任何"不带 opening 的换模组"
+     * 都会把上一条开场白留在屏幕上**——测试沙盒的「切到某个脚本化模组」按钮就是这样，
+     * 玩家看到的还是上一个模组的前言（用户 2026-09-16 实测："换模组后文案没清"）。
+     * 而 `openingText()` 里其实还拼了 goal / stakes / urgency 三行，它们变了同样得同步。
+     */
+    const affectsOpening =
+      patch.opening !== undefined ||
+      patch.goal !== undefined ||
+      patch.stakes !== undefined ||
+      patch.urgency !== undefined;
+    if (affectsOpening) {
       const opening = openingText(get().character, next, get().genreId);
-      const messages = get().messages.map((m) =>
-        m.id === WELCOME_ID ? { ...m, content: opening } : m
-      );
-      saveJson('trpg.messages', messages);
-      set({ messages });
+      const current = get().messages;
+      const messages = current.map((m) => (m.id === WELCOME_ID ? { ...m, content: opening } : m));
+      // 内容没变就不写盘（换模组时反复点同一个按钮不该产生无谓的序列化）
+      if (messages.some((m, i) => m.content !== current[i]!.content)) {
+        saveJson('trpg.messages', messages);
+        set({ messages });
+      }
     }
   },
 
