@@ -13,6 +13,7 @@ import {
   type Difficulty,
 } from '../core/description.js';
 import { getRuleset } from '../core/rulesets/index.js';
+import { getGenre } from '../core/genres.js';
 import type { InventoryItem } from '../core/state/gameState.js';
 
 export type { Difficulty };
@@ -74,6 +75,7 @@ export function CheckDialog({
   const character = useStore((s) => s.character);
   const gameState = useStore((s) => s.gameState);
   const rulesetId = useStore((s) => s.rulesetId);
+  const genreId = useStore((s) => s.genreId);
   const [target, setTarget] = useState('');
   const [action, setAction] = useState('');
 
@@ -101,10 +103,10 @@ export function CheckDialog({
   /*
    * 描述加权：**每一次检定都算**，不只是重掷。
    *
-   * 只调难度档位（普通 / 困难 / 极难），不动目标值——规则包仍是权威，
-   * 模型也看不到这个调整。分值封顶一档，避免"写一段小说就能必过"。
-   * 判据只看"有没有提到场上真实存在的东西"和"有没有写明怎么做"，
-   * 写得长不等于有分。
+   * 判据以**可行性**为主（用户原话："描述越科学、合理、可行，成功率越高"）：
+   * 用到手里的工具、针对环境的具体特征、说清步骤、顾及风险，各算一分；
+   * 字数只在明显偏长且没有别的得分点时补一分——不再"凑够 45 字就满分"。
+   * 题材极性 `rationalityBias` 由当前题材决定：克苏鲁里"用科学原理解题"是减分项。
    */
   const needsWeapon =
     skillDef && /射击|投掷|弓/.test(skillDef.name) ? skillDef.name : null;
@@ -123,6 +125,9 @@ export function CheckDialog({
       visited: gameState.visited,
       clues: gameState.clues,
       items: gameState.inventory.map((i) => i.name),
+      // 环境的可操作特征：模组地点与线索名称本身就是"能下手的地方"
+      features: [...(gameState.visited ?? []), ...gameState.clues],
+      rationalityBias: getGenre(genreId).rationalityBias,
       requiredWeapon: needsWeapon,
       hasWeapon: !weaponMissing,
     },

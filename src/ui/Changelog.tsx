@@ -5,20 +5,42 @@
  * 尤其是"某个 bug 修好了"，他会以为还在。这里放一份随应用一起发布的清单，
  * 新版本进来时打个「新」标记，点开就能看到这一轮改了什么。
  */
+import { APP_VERSION } from '../version.js';
+
 export interface ChangelogEntry {
-  /** 版本标识（用来比对"读没读过"，只增不改） */
-  id: string;
+  /** 版本号（语义化，与 `src/version.ts` 的 APP_VERSION 对应，用来比对"读没读过"） */
+  version: string;
   date: string;
   items: string[];
 }
 
 /**
  * 更新记录，**新版本加在最前面**。
- * `id` 一旦发布就不要再改——它决定玩家那边的"未读"提示是否正确。
+ * `version` 一旦发布就不要再改——它决定玩家那边的"未读"提示是否正确。
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
-    id: '2026-09-15d',
+    version: '0.1.0',
+    date: '2026-09-16',
+    items: [
+      '修：更新弹窗死循环 —— 以前检测到新版本后点「立即更新」永远更新不动（旧的 Service Worker 把页面钉在缓存里），现在改成硬重置：注销缓存 + 带时间戳刷新，一次到位',
+      '修：开枪之后手枪被"用掉"消失 —— 武器不再会因为使用而消失（被缴械 / 送人 / 炸膛 / 掉进水里这类**写明理由**的才算数）',
+      '新：被引擎拦下的变更会告诉你（以前是静默忽略，你只觉得"东西怎么没扣"）',
+      '改：描述加权改成看**可行性**，不再看字数 —— 用上手里的工具、针对具体特征、说清步骤、顾及风险才有加分，"我开门"硬凑长句不再拿满分',
+      '新：题材会影响"讲道理有没有用" —— 克苏鲁与东京怪谈里，越用科学原理解释反而越容易被注意到；剑与魔法、都市异能、二次元日常则奖励有根据的做法',
+      '改：关键抉择（回溯锚点）收敛 —— 地点只在**第一次去**时记一条，反复跑腿不再刷屏；掷骰 / 战斗 / 新线索 / 受伤照旧全记',
+      '新：版本号改成 v0.1.0 这种格式，设置里一眼能看出新旧；更新日志按版本号归档',
+      '修：属性默认值改成确定性生成 —— 以前可能出现"次次都很平均"的角色',
+      '修：角色卡拆成「概况 / 技能 / 背包」三个页签，技能按基础值排序、低价值技能自动折叠',
+      '新：结档可导出分享（Markdown）—— 分「分享版（不含真相）」与「完整留档（含真相）」',
+      '修：换模组时开场白 / 目标不同步',
+      '修：敌对生物没有名字（测试模组已补上）',
+      '新：守密人可以在契约里声明"该收束了"，触发结局结算（死亡 / 疯狂优先）',
+      '改：提示词加固 —— 空间连贯（移动必须落到具体地点）、不许替玩家编造身体特征与来历、状态与伤口要写清楚',
+    ],
+  },
+  {
+    version: '2026-09-15d',
     date: '2026-09-15',
     items: [
       '新：更新检测 —— 打开应用时、每次切回前台、以及每 5 分钟都会自动看一眼有没有新版本，有就弹「有新版本 · 点击立即更新」',
@@ -28,7 +50,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    id: '2026-09-15c',
+    version: '2026-09-15c',
     date: '2026-09-15',
     items: [
       '新：音效槽位补齐 —— 大成功 / 大失败 / 进入战斗 / 受伤 / 理智受创 / 结档 / 开团，七件事都能配自己的音（不传就用内置的）',
@@ -39,7 +61,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    id: '2026-09-15b',
+    version: '2026-09-15b',
     date: '2026-09-15',
     items: [
       '修：背包里普通物品点「使用」没反应（消耗品只有数量在减，守密人收不到使用的意图）',
@@ -51,7 +73,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    id: '2026-09-15a',
+    version: '2026-09-15a',
     date: '2026-09-15',
     items: [
       '新：测试沙盒（设置 → 开发者）一键灌入测试局、切换脚本化模组、调数值、触发结档',
@@ -67,7 +89,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    id: '2026-09-14b',
+    version: '2026-09-14b',
     date: '2026-09-14',
     items: [
       '新：结档结算 —— 死亡 / 理智归零 = 这段故事收束，守密人会写一段结局正文',
@@ -79,7 +101,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     ],
   },
   {
-    id: '2026-09-14a',
+    version: '2026-09-14a',
     date: '2026-09-14',
     items: [
       '修：3d6 及以上的骰子概率分布算错（3d6 被算成 8d6）',
@@ -97,12 +119,16 @@ export const CHANGELOG: ChangelogEntry[] = [
 
 const READ_KEY = 'trpg.changelogRead';
 
-/** 最新版本的 id（用来判断有没有新东西） */
-export const LATEST_CHANGELOG_ID = CHANGELOG[0]?.id ?? '';
+/**
+ * 最新版本的版本号（用来判断有没有新东西）。
+ * 比对的是**语义化版本号** —— 与更新检测用的是同一个真源（`src/version.ts`），
+ * 所以"设置里说有新版本"和"日志上有新条目"永远同步。
+ */
+export const LATEST_CHANGELOG_VERSION = APP_VERSION;
 
 export function hasUnreadChangelog(): boolean {
   try {
-    return localStorage.getItem(READ_KEY) !== LATEST_CHANGELOG_ID;
+    return localStorage.getItem(READ_KEY) !== LATEST_CHANGELOG_VERSION;
   } catch {
     return false;
   }
@@ -110,7 +136,7 @@ export function hasUnreadChangelog(): boolean {
 
 export function markChangelogRead(): void {
   try {
-    localStorage.setItem(READ_KEY, LATEST_CHANGELOG_ID);
+    localStorage.setItem(READ_KEY, LATEST_CHANGELOG_VERSION);
   } catch {
     /* 存不下就算了，下次还会提示 */
   }
@@ -138,8 +164,9 @@ export function ChangelogDialog({ onClose }: { onClose: () => void }) {
 
         <div className="mt-3 space-y-4">
           {CHANGELOG.map((entry, i) => (
-            <div key={entry.id}>
+            <div key={entry.version}>
               <div className="flex items-baseline gap-2">
+                <span className="font-mono text-[12px] text-gold-400">v{entry.version}</span>
                 <span className="text-[12px] text-mist-300">{entry.date}</span>
                 {i === 0 && (
                   <span className="rounded-full border border-gold-600/60 px-1.5 py-0.5 text-[9px] text-gold-400">

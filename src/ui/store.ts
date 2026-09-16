@@ -88,8 +88,8 @@ export interface PendingCheck {
 /** 主页面"状态变化"提示里的一行 */
 export interface StateChangeLine {
   text: string;
-  /** down = 变坏（掉血 / 掉理智 / 失去物品），up = 变好，info = 中性 */
-  tone: 'down' | 'up' | 'info';
+  /** down = 变坏（掉血 / 掉理智 / 失去物品），up = 变好，info = 中性，warn = 引擎拦下的变更 */
+  tone: 'down' | 'up' | 'info' | 'warn';
 }
 
 /**
@@ -2556,6 +2556,21 @@ export const useStore = create<Store>((set, get) => ({
       const def = getRuleset(rulesetId).vitalDefs.find((v) => v.key === k);
       return def?.label ?? k.toUpperCase();
     });
+    /*
+     * 被引擎拦下的变更也要给玩家看见。
+     * 典型是武器：模型想"用掉"手枪被拒，但玩家只会发现"东西怎么没扣/枪还在"——
+     * 引擎内部记账不算反馈，这里把它翻成一句人话放进同一条"状态变化"提示里。
+     */
+    for (const r of report.rejected) {
+      if (r.delta?.target !== 'inventory') continue;
+      const name = String(r.delta.value ?? '物品');
+      lines.push({
+        text: r.reason?.includes('武器')
+          ? `守密人想处理「${name}」，已忽略（武器不按数量消耗）`
+          : `「${name}」的变更被忽略（${r.reason ?? '无效变更'}）`,
+        tone: 'warn',
+      });
+    }
     const now = Date.now();
     const prev = get().lastChanges;
     const sameTurn = Boolean(prev) && now - prev!.ts < CHANGE_MERGE_MS;

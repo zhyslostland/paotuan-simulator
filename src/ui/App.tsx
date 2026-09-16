@@ -32,7 +32,7 @@ import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.
 import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
 import { EndingScreen } from './EndingScreen';
 import { TestSandbox } from './TestSandbox';
-import { applyUpdate, BUILD_ID, checkForUpdate, watchForUpdates } from '../update.js';
+import { applyUpdate, checkForUpdate, watchForUpdates } from '../update.js';
 import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
 import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
@@ -453,14 +453,24 @@ export default function App() {
        * 关键决策点（回溯锚点）。
        * 结档时玩家要能从"值得重来的那几个岔路口"里挑一个退回去，
        * 而不是在上百条消息里翻。标记规则刻意保守：只标真正改变走向的回合。
+       *
+       * **事件与位移要分开对待**（协作方 3.2）：
+       * - **位移**（location）：只在**首次到访该地点**时记。长局里来回跑腿几十次，
+       *   每次都记会让结档页变成一串"移步：走廊"，把真正的岔路口淹没掉。
+       * - **事件**（掷骰 / 战斗 / 新线索 / 新支线 / 受伤 / 理智受创）：**保持全记**，
+       *   这些才是玩家真想回退的地方。
        */
       if (lastPlayer) {
         const reasons: string[] = [];
         if (lastPlayer.check) reasons.push(`掷骰：${lastPlayer.check.skill}`);
         for (const d of contract?.state_delta ?? []) {
           if (d.target === 'combat.active') reasons.push(d.value ? '进入战斗' : '战斗结束');
-          else if (d.target === 'location') reasons.push(`移步：${String(d.value ?? '')}`);
-          else if (d.target === 'clues' && d.op === 'add') reasons.push('新线索');
+          else if (d.target === 'location') {
+            // 首次到访才算锚点：走去过的地方不记，避免锚点被通勤淹没
+            const dest = String(d.value ?? '');
+            const known = useStore.getState().gameState.visited ?? [];
+            if (dest && !known.includes(dest)) reasons.push(`移步：${dest}`);
+          } else if (d.target === 'clues' && d.op === 'add') reasons.push('新线索');
           else if (d.target === 'threads' && d.op === 'add') reasons.push('新支线');
           else if (d.target === 'vitals.hp' && d.op === 'dec') {
             // 数值型只认"掉了不少"；骰子表达式（"1d6"这种真挨了一下）一律算
@@ -481,9 +491,19 @@ export default function App() {
             .replace(/[（(][^）)]*[）)]\s*$/, '')
             .trim();
           const snippet = (acted || lastPlayer.check?.skill || '抉择').slice(0, 16);
-          useStore
-            .getState()
-            .markSnapshotKey(lastPlayer.id, `第${turnNo}回 · ${snippet} · ${reasons[0]}`);
+          const label = `第${turnNo}回 · ${snippet} · ${reasons[0]}`;
+          /*
+           * 连续两条完全相同的 label 折叠成一条：
+           * "掷骰：侦查 → 新线索 → 掷骰：侦查"这种连续同质回合不值得各占一格。
+           * 拿**上一次被标记的那条**比（不是上一条快照）。
+           */
+          const snaps = useStore.getState().snapshots;
+          const labels = Object.values(snaps)
+            .filter((s) => s.key)
+            .map((s) => s.label ?? '');
+          if (labels[labels.length - 1] !== label) {
+            useStore.getState().markSnapshotKey(lastPlayer.id, label);
+          }
         }
       }
       // 剧情里出现了候选队友的名字 → 标记为"已登场"（未登场不可入队）
@@ -1067,7 +1087,9 @@ export default function App() {
                     ? 'text-blood-300'
                     : l.tone === 'up'
                       ? 'text-moss-400'
-                      : 'text-mist-300'
+                      : l.tone === 'warn'
+                        ? 'text-gold-300'
+                        : 'text-mist-300'
                 }`}
               >
                 {l.text}

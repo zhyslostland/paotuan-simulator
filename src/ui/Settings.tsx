@@ -10,7 +10,7 @@ import {
   onInstallAvailable,
   promptInstall,
 } from '../pwa.js';
-import { applyUpdate, BUILD_ID, checkForUpdate } from '../update.js';
+import { applyUpdate, checkForUpdate, versionLabel } from '../update.js';
 import {
   AMBIENCE_LABEL,
   AUDIO_SIZE_WARN,
@@ -1562,7 +1562,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div className="rounded-lg border border-ink-700 bg-ink-850/60 p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] text-mist-400">
-                当前版本 <span className="font-mono text-mist-500">{BUILD_ID}</span>
+                当前版本 <span className="font-mono text-gold-400">{versionLabel()}</span>
               </span>
               <button
                 onClick={void checkNow}

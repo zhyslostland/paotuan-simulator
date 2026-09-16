@@ -15,15 +15,22 @@
  * 两条路任一命中都会亮出「有新版本」横幅，用户可以立刻更新，也可以去设置里手动点「检查更新」。
  */
 import { updateSW } from './pwa.js';
+import { APP_VERSION, BUILD_ID as BUILD_ID_RAW, compareVersions } from './version.js';
 
-/** 当前正在运行的这份构建的标识 */
-export const BUILD_ID: string =
-  typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
+/** 当前正在运行的这份构建的标识（构建号，排查用） */
+export const BUILD_ID: string = BUILD_ID_RAW;
+
+/** 当前运行的应用版本号（`0.1.0`）。玩家在设置里看到、更新检测比对的都是它。 */
+export const CURRENT_VERSION: string = APP_VERSION;
 
 export type UpdateCheckResult =
   | 'newer' // 服务器上有更新的版本
   | 'latest' // 已是最新
   | 'unknown'; // 取不到（离线 / 文件不存在 / 老版本还没发布过 version.json）
+
+export { compareVersions };
+/** 玩家可读的版本串（`v0.1.0`），UI 上显示当前版本用这个 */
+export { versionLabel } from './version.js';
 
 /** 探测一次线上版本。永远不抛异常——探测失败不该打扰玩家。 */
 export async function checkForUpdate(): Promise<UpdateCheckResult> {
@@ -34,30 +41,68 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     url.searchParams.set('t', Date.now().toString(36));
     const res = await fetch(url.toString(), { cache: 'no-store' });
     if (!res.ok) return 'unknown';
-    const data = (await res.json()) as { id?: string };
-    if (!data?.id) return 'unknown';
-    // 上一次发布的版本还没带 version.json（老客户端）→ 也算"不是最新"
-    return data.id === BUILD_ID ? 'latest' : 'newer';
+    const data = (await res.json()) as { version?: string; id?: string };
+    /*
+     * 认 `version`（语义化版本）为主。
+     * 老部署只写了 `id`（构建号），那种情况下**无法判断新旧**——
+     * 构建号是随机的，比对它只会得出"永远有新版本"的假阳性。
+     * 所以老格式一律回 `unknown`（设置里会提示"探测不到版本信息，可强制更新"），
+     * 而不是误报有新版本。
+     */
+    if (!data?.version) return 'unknown';
+    const cmp = compareVersions(data.version, CURRENT_VERSION);
+    return cmp > 0 ? 'newer' : 'latest';
   } catch {
     return 'unknown';
   }
 }
 
 /**
- * 应用更新。
- * 先让 Service Worker 接管新版本（`updateSW(true)` = skipWaiting + 重新加载），
- * 拿不到 SW 就退回一次普通刷新。
+ * 应用更新 —— **硬重置**，不依赖 Service Worker 自己换版本。
+ *
+ * ## 为什么不能只调 `updateSW(true)` + `reload()`
+ * `index.html` 和打包出来的 JS 都在 precache 里（`vite.config.ts` 的 workbox `globPatterns` 含 `html`）。
+ * 浏览器没去取新的 `sw.js` 时（内嵌浏览器、部分国产手机很常见），**根本没有 waiting SW**，
+ * `updateSW(true)` 无事可做，紧接着的 `reload()` 又落回旧 precache：
+ * 新包永远进不来 → `BUILD_ID` 永远是旧的 → `version.json` 永远算"更新" → **弹窗死循环**。
+ * 更新日志当然也不变，因为跑的还是旧包。
+ *
+ * ## 做法：注销 SW + 清 Cache Storage + 带戳导航
+ * 强制下一次导航真走网络拿到新 `index.html` 和新包；
+ * SW 会在下次加载时由 `main.tsx → ./pwa` 自动重新注册，离线能力自动恢复，代价为零。
  */
 export async function applyUpdate(): Promise<void> {
+  // 1) 有 waiting SW 就让位（有则更好，没有也不影响下面的兜底）
   try {
     await updateSW(true);
   } catch {
-    /* 没有 SW（比如用 file:// 打开）时下面的刷新兜底 */
+    /* 没有 SW（比如用 file:// 打开）*/
   }
-  // updateSW 正常会自己刷新；万一没刷（或没有 SW），这里补救一次
-  window.setTimeout(() => {
+
+  // 2) 主动拆掉旧 SW 与所有缓存
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister().catch(() => {})));
+    }
+    if (typeof caches !== 'undefined') {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k).catch(() => {})));
+    }
+  } catch {
+    /* 尽力而为，清不掉也要往下刷新 */
+  }
+
+  // 3) 带戳导航：连 CDN 边缘缓存一起绕开
+  //    用 replace 而非 reload —— reload 正是被旧 SW 接管的那个动作，也是死循环的一半；
+  //    replace 还不会在历史里留一条会被"后退"重新触发的记录。
+  try {
+    const url = new URL(location.href);
+    url.searchParams.set('_v', Date.now().toString(36));
+    location.replace(url.toString());
+  } catch {
     location.reload();
-  }, 800);
+  }
 }
 
 /**

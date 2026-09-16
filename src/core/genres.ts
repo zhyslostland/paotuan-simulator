@@ -11,6 +11,7 @@
  * 设计要点：题材与规则**正交**。你可以用 COC 的百分比检定跑东京怪谈，
  * 也可以用 DnD 跑校园日常。换题材不强制换规则。
  */
+import type { RationalityBias } from './description.js';
 
 export interface Genre {
   id: string;
@@ -25,6 +26,13 @@ export interface Genre {
   imageStyle: string;
   /** 队友与 NPC 的生成倾向 */
   castHint: string;
+  /**
+   * 理性极性（描述加权的题材层）。
+   * 克苏鲁信条是"知道得越多越危险"，用科学原理解题反而是负担 → `punish`；
+   * 主流冒险/日常题材奖励讲道理的做法 → `reward`；
+   * 不关心解题方式的题材 → `neutral`（默认）。
+   */
+  rationalityBias?: RationalityBias;
   /** 建议搭配的规则包 id */
   suggestRuleset?: string;
   /** 内置题材不可删；自建/导入的为 false */
@@ -40,6 +48,8 @@ export const GENRE_COC: Genre = {
   tone: '克制的悬疑与不安。恐怖来自"未知与无力"——规律失效、熟悉之物变得陌生、理智无法解释，而不是血腥猎奇。语言冷静具体，多用时代细节（档案、电报、旧报纸）建立真实感，少写内脏与残肢。',
   imageStyle: '1920 年代欧美复古色调，阴郁克制的赛璐璐动画插画，服装与建筑有明确的年代感',
   castHint: '同时代的普通人：记者、医生、大学教授、私家侦探、警察、神职人员、落魄贵族。',
+  // 克苏鲁的信条：知道得越多越危险。用科学原理解题更容易把自己搭进去
+  rationalityBias: 'punish',
   suggestRuleset: 'coc7',
   builtin: true,
 };
@@ -53,6 +63,8 @@ export const GENRE_TOKYO: Genre = {
   tone: '都市传说的湿冷感。日常与非日常只隔一层纸——熟悉的便利店、手机屏幕、电车广播里出现不该有的东西。节奏快、留白狠，用现代生活细节制造错位感；不解释全部，让玩家自己拼。',
   imageStyle: '现代日本都市夜景，霓虹与阴影对比强烈，雨夜湿滑的街道反光，赛璐璐动画插画风格',
   castHint: '现代日本人：高中生、大学生、便利店店员、自由记者、神社巫女、刑警、YouTuber。名字用日式姓名。',
+  // 怪谈里"用科学解释"往往是最快出事的那条路
+  rationalityBias: 'punish',
   suggestRuleset: 'coc7',
   builtin: true,
 };
@@ -67,6 +79,8 @@ export const GENRE_ACG: Genre = {
   imageStyle: '明亮清新的二次元动漫插画，柔和通透的光影，丰富的日常环境细节与生活小物',
   castHint:
     '同学、社团伙伴、学妹学姐、店长、邻家少女——**以美少女角色为主**，性格反差要大（元气/傲娇/天然/腹黑），每人有口癖与独特反应。',
+  // 日常团里没有"理性即危险"的信条，讲道理的做法值得奖励
+  rationalityBias: 'reward',
   suggestRuleset: 'coc7',
   builtin: true,
 };
@@ -81,6 +95,8 @@ export const GENRE_PINK: Genre = {
   imageStyle: '柔和通透的二次元插画，暖调光线与浅景深，近距离构图，注重表情与氛围',
   castHint:
     '**默认全部为女性角色**（美少女），性格反差要大：温柔、傲娇、冷淡、元气、大姐姐型……每人都要有**对玩家独有的态度与称呼方式**，并保留一条可推进的关系线。',
+  // 情感团不在乎"讲不讲道理"，别用理性极性干扰玩家写心动
+  rationalityBias: 'neutral',
   suggestRuleset: 'coc7',
   builtin: true,
 };
@@ -94,6 +110,8 @@ export const GENRE_FANTASY: Genre = {
   tone: '冒险与未知的奇幻基调。危险是真实的（怪物、陷阱、诅咒），但勇敢与智谋能得到回报。世界有它的规则（魔法体系、神明、种族关系），要让玩家感到"这个世界真的在运转"，而不只是背景板。',
   imageStyle: '史诗奇幻动漫插画，明亮饱和的色彩，盔甲、长袍与魔法光效，开阔的风景与宏大建筑',
   castHint: '冒险者同伴：战士、法师、游侠、牧师、盗贼、骑士、吟游诗人；可包含精灵、矮人等非人族。',
+  // 奇幻冒险奖励智谋：懂原理、会计算是本事
+  rationalityBias: 'reward',
   suggestRuleset: 'dnd5e',
   builtin: true,
 };
@@ -108,6 +126,8 @@ export const GENRE_URBAN: Genre = {
   imageStyle: '现代都市背景的动漫插画，强烈的明暗对比与霓虹色，异能光效与动作场面，赛璐璐上色',
   castHint:
     '同为异能者的同伴：格斗系、念动系、情报贩子、能力者组织的联络人……多为年轻人，性格鲜明，有人藏着不可告人的身份。',
+  // 异能战讲战术与规则，理性描述该有回报
+  rationalityBias: 'reward',
   suggestRuleset: 'dnd5e',
   builtin: true,
 };

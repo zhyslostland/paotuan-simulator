@@ -581,11 +581,28 @@ describe('武器不会被"用掉"', () => {
     expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(true);
   });
 
-  it('真正的丢枪（缴械 / 送人 / 丢失）照常放行', () => {
+  it('【回归】remove 不带 reason 也拒绝 —— 模型常常干脆不写理由', () => {
+    const { state, rejected } = applyDeltas(withGun(), [
+      { target: 'inventory', op: 'remove', value: '柯尔特左轮' },
+    ]);
+    expect(rejected).toHaveLength(1);
+    expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(true);
+  });
+
+  it('【回归】"开火时炸膛"这种合理损坏要放行（旧黑名单会误伤）', () => {
     const { state } = applyDeltas(withGun(), [
-      { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason: '被押运员夺走' },
+      { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason: '开火时炸膛，枪管报废' },
     ]);
     expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(false);
+  });
+
+  it('真正的丢枪（缴械 / 送人 / 丢失 / 扔进水里）照常放行', () => {
+    for (const reason of ['被押运员夺走', '送给老霍华德防身', '掉进水里了', '扔进海里']) {
+      const { state } = applyDeltas(withGun(), [
+        { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason },
+      ]);
+      expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(false);
+    }
   });
 
   it('弹药仍然可以正常消耗（别把消耗品一起管死）', () => {

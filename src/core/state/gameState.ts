@@ -208,6 +208,15 @@ const ALLOWED_ROOTS = new Set([
   'threads',
 ]);
 
+/**
+ * 武器「明确失去」的理由白名单（见 inventory remove 分支）。
+ * 命中 = 放行删除；未命中（含空 reason）= 拒绝。
+ * 注意这里刻意**不含**使用语义的词：`开火时炸膛` 因为含"炸膛"而放行，
+ * 而单写 `开火`/`射出` 之类不会放行——那才是模型绕道删枪的写法。
+ */
+const LOSS_RE =
+  /缴械|被夺|夺走|抢夺|抢走|没收|上缴|送|赠送|交给|交给|留给|留作|递给|转交|丢失|遗失|丢了|掉落|掉进|掉入|掉下|沉入|损坏|摔坏|炸膛|炸毁|报废|毁坏|损毁|烧毁|焚毁|断裂|折断|出售|卖掉|交易|典当|丢弃|扔掉|扔进|扔下|抛掉|丢下|投弃|抵押|捐赠|上交/;
+
 export function createInitialState(overrides: Partial<GameState> = {}): GameState {
     return {
       vitals: {},
@@ -589,15 +598,20 @@ export function applyDeltas(
             continue;
           }
           /*
-           * 丢弃武器是合法的（被缴械、送人、掉进水里），
+           * 丢弃武器是合法的（被缴械、送人、炸膛、掉进水里），
            * 但"**因为用了一下**就整件消失"不是——那是 dec 被拒之后的另一种绕法。
-           * 所以只在 reason 写着"使用语义"时才拦（真正的丢枪/缴械照常放行）。
+           *
+           * 判据用**失去理由白名单**，不用"使用词黑名单"：
+           * 模型经常干脆不写 reason，黑名单就被绕过去了（用户报的"枪没了"正是这条）；
+           * 而白名单下，只有明确写了失去理由才放行，空 reason 一律拒。
+           * 顺带修掉黑名单的误伤：「开火时炸膛」含"开火"会被拦，但它其实是枪该坏的合法剧情——
+           * 现在因为含"炸膛"而正确放行。
            */
           const removing = (list as InventoryItem[])[idx] as InventoryItem;
-          if (removing.kind === 'weapon' && /使用|用掉|消耗|开火|射击|发射|打出/.test(String(delta.reason ?? ''))) {
+          if (removing.kind === 'weapon' && !LOSS_RE.test(String(delta.reason ?? ''))) {
             rejected.push({
               delta,
-              reason: `「${removing.name}」是武器，不会因为使用而消失（丢掉它请写明缴械 / 送人 / 丢失）`,
+              reason: `「${removing.name}」是武器，不会因为使用而消失（要丢掉请写明缴械 / 送人 / 损坏 / 丢失）`,
             });
             continue;
           }
