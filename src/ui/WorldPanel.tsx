@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore, mapNodesOf, type MapNode } from './store';
 import { ImageField } from './ImageField';
+import { NpcCardModal, npcProfileOf, type NpcProfile } from './NpcCard';
 import { AnchorList } from './EndingScreen';
 import { mapImagePrompt, sceneImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
@@ -636,6 +637,8 @@ export function WorldPanel({
   const mapImage = useStore((s) => s.mapImage);
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
+  // 点击在地人物弹出的档案卡
+  const [npcCard, setNpcCard] = useState<NpcProfile | null>(null);
   // 剧情标记是给玩家看的，只显示中文键名；模型漏填的英文 key 直接藏起来
   const flags = Object.entries(gameState.flags).filter(([k]) => /[\u4e00-\u9fa5]/.test(k));
   const location = gameState.location?.trim();
@@ -802,14 +805,19 @@ export function WorldPanel({
               </li>
             ))}
           {gameState.npcsAlive.map((npc) => (
-            <li
-              key={npc}
-              className="rounded-md border-l-2 border-blood-400/50 bg-ink-850 px-2.5 py-1.5 text-[12px] text-mist-300"
-            >
-              {npc}
+            <li key={npc}>
+              <button
+                onClick={() => setNpcCard(npcProfileOf(npc, gameState, module))}
+                className="w-full rounded-md border-l-2 border-blood-400/50 bg-ink-850 px-2.5 py-1.5 text-left text-[12px] text-mist-300 transition hover:bg-ink-800 hover:text-mist-100"
+              >
+                {npc}
+              </button>
             </li>
           ))}
         </ul>
+        <p className="mt-2 text-[10px] leading-relaxed text-mist-500/70">
+          点击人物可看他是什么人
+        </p>
       </Section>
 
       <Section title="线索">
@@ -907,6 +915,8 @@ export function WorldPanel({
           </ol>
         )}
       </Section>
+
+      {npcCard && <NpcCardModal profile={npcCard} onClose={() => setNpcCard(null)} />}
     </div>
   );
 }

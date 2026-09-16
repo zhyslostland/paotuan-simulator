@@ -10,12 +10,19 @@
  * 1. **SW 路线**（原有）：`registerSW({ registerType: 'prompt' })` → 检测到新版本发事件 → 弹横幅 → 点一下刷新。
  * 2. **版本号路线**（新增，与 SW 无关）：构建时把 `version.json` 一起发布，
  *    应用启动 / 回到前台 / 每隔几分钟就 `no-store` 拉一次（带时间戳绕缓存）。
- *    拉到的 id 和当前运行的 `__BUILD_ID__` 不一样 → 说明有新版本。
+ *    比的是**语义化版本 `version`，版本相同再比构建号 `id`**（详见 `isNewer`）——
+ *    只比其中一个都会出事：只比版本会漏掉"忘了改版本号"的那次发布，
+ *    只比构建号又分不出方向。
  *
  * 两条路任一命中都会亮出「有新版本」横幅，用户可以立刻更新，也可以去设置里手动点「检查更新」。
  */
 import { updateSW } from './pwa.js';
-import { APP_VERSION, BUILD_ID as BUILD_ID_RAW, compareVersions } from './version.js';
+import {
+  APP_VERSION,
+  BUILD_ID as BUILD_ID_RAW,
+  compareVersions,
+  isNewer,
+} from './version.js';
 
 /** 当前正在运行的这份构建的标识（构建号，排查用） */
 export const BUILD_ID: string = BUILD_ID_RAW;
@@ -28,7 +35,7 @@ export type UpdateCheckResult =
   | 'latest' // 已是最新
   | 'unknown'; // 取不到（离线 / 文件不存在 / 老版本还没发布过 version.json）
 
-export { compareVersions };
+export { compareVersions, isNewer };
 /** 玩家可读的版本串（`v0.1.0`），UI 上显示当前版本用这个 */
 export { versionLabel } from './version.js';
 
@@ -42,16 +49,8 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     const res = await fetch(url.toString(), { cache: 'no-store' });
     if (!res.ok) return 'unknown';
     const data = (await res.json()) as { version?: string; id?: string };
-    /*
-     * 认 `version`（语义化版本）为主。
-     * 老部署只写了 `id`（构建号），那种情况下**无法判断新旧**——
-     * 构建号是随机的，比对它只会得出"永远有新版本"的假阳性。
-     * 所以老格式一律回 `unknown`（设置里会提示"探测不到版本信息，可强制更新"），
-     * 而不是误报有新版本。
-     */
-    if (!data?.version) return 'unknown';
-    const cmp = compareVersions(data.version, CURRENT_VERSION);
-    return cmp > 0 ? 'newer' : 'latest';
+    if (!data?.version && !data?.id) return 'unknown';
+    return isNewer(data);
   } catch {
     return 'unknown';
   }

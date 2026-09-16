@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildArchiveMarkdown,
   buildJourneyMarkdown,
   buildResultMarkdown,
   safeFilename,
@@ -129,6 +130,42 @@ describe('导出不剧透', () => {
     } as ExportInput & { module: { truth: string } };
     expect(buildResultMarkdown(withTruth)).not.toContain('走私的活体');
     expect(buildJourneyMarkdown(withTruth)).not.toContain('走私的活体');
+  });
+});
+
+describe('完整留档（含真相）', () => {
+  const withTruth = (): ExportInput => ({
+    ...makeInput(),
+    module: {
+      ...makeInput().module,
+      truth: '货舱里运的是走私的活体，押运的人把你当成来接货的人一起锁了进来。',
+    },
+  });
+
+  /*
+   * 用户 09-16 追加的需求：留档要能带真相（自己存着看/发给已跑完的人），
+   * 但必须**默认不带**、且放在末尾折叠块里——不能一打开就糊一脸。
+   */
+  it('完整版含真相', () => {
+    expect(buildArchiveMarkdown(withTruth())).toContain('走私的活体');
+  });
+
+  it('真相折在 <details> 里，且有剧透提示', () => {
+    const md = buildArchiveMarkdown(withTruth());
+    expect(md).toContain('<details>');
+    expect(md).toContain('守密人真相');
+    expect(md).toContain('</details>');
+    // 折叠块在末尾——结尾那一段就是它
+    expect(md.trimEnd().endsWith('</details>')).toBe(true);
+  });
+
+  it('分享版依然不含真相（默认不能被改动）', () => {
+    expect(buildJourneyMarkdown(withTruth())).not.toContain('走私的活体');
+  });
+
+  it('模组没写真相时，完整版也不凭空造一段', () => {
+    const md = buildArchiveMarkdown(makeInput());
+    expect(md).not.toContain('<details>');
   });
 });
 

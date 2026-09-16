@@ -115,7 +115,7 @@ export function resolveCocCheck(
 }
 
 const COC_VITALS: VitalDef[] = [
-  { key: 'hp', label: '生命值', min: 0, max: 99, default: 12 },
+  { key: 'hp', label: '生命值', min: 0, max: 99, default: 12, isLife: true },
   { key: 'mp', label: '魔法值', min: 0, max: 99, default: 14 },
   { key: 'san', label: '理智值', min: 0, max: 99, default: 70 },
 ];
@@ -214,6 +214,16 @@ export const coc7: Ruleset = {
   deriveExtras: deriveCocExtras,
   resolveCheck: resolveCocCheck,
   tierLabel: (t) => TIER_LABELS[t],
+  /*
+   * 负重上限：力量 + 体格越大扛得越多（与伤害加成同一组属性）。
+   *
+   * 量纲＝"一件随身小东西 1 点"（手电筒、笔记本、一盒子弹都算这个级别）。
+   * 常人（各 50）＝ 50 点：够装一身行头加几份补给，只有真扛了沉家伙才会顶到上限。
+   * 刻意给得宽——早期按 10 点算，玩家带 12 发子弹就直接"超重"了，那是误伤不是玩法。
+   */
+  carryCapacity(ch) {
+    return Math.max(10, Math.round((g(ch, 'str') + g(ch, 'siz')) / 2));
+  },
 };
 
 /** 取属性值，缺省回退 50（未填的属性按常人水平处理） */

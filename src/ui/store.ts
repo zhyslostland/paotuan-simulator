@@ -5,6 +5,7 @@ import {
   applyDeltas,
   createInitialState,
   detectStatusEvents,
+  DYING_FREEZE_REASON,
   type AppliedDelta,
   type Companion,
   type Ending,
@@ -15,10 +16,14 @@ import {
 } from '../core/state/gameState.js';
 
 export type { Companion };
+import { DYING_NOTE } from '../orchestrator/prompt.js';
 import { roll, type DieGroup } from '../core/dice/index.js';
 import { rollPercentile } from '../core/rulesets/coc7.js';
 import { getRuleset, listRulesets, loadCustomRulesets } from '../core/rulesets/index.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
+import { encumbranceOf, encumbranceNote, type Encumbrance } from '../core/encumbrance.js';
+
+export type { Encumbrance };
 
 // 先注册 localStorage 里存的自定义规则包，再初始化 store（否则 loadRulesetId 认不到它们）
 loadCustomRulesets();
@@ -88,8 +93,11 @@ export interface PendingCheck {
 /** 主页面"状态变化"提示里的一行 */
 export interface StateChangeLine {
   text: string;
-  /** down = 变坏（掉血 / 掉理智 / 失去物品），up = 变好，info = 中性，warn = 引擎拦下的变更 */
-  tone: 'down' | 'up' | 'info' | 'warn';
+  /**
+   * down = 变坏（掉血 / 掉理智 / 失去物品），up = 变好，info = 中性，
+   * warn = 引擎拦下的变更，good = 引擎特意留的一线生机（濒死冻结）。
+   */
+  tone: 'down' | 'up' | 'info' | 'warn' | 'good';
 }
 
 /**
@@ -275,18 +283,34 @@ function hasToken(text: string | undefined): boolean {
  * 只在真的含 `{{` 时才重建对象，避免每轮都换新引用导致无谓重渲染。
  */
 export function sanitizeStateTokens(s: GameState, c: CharacterProfile): GameState {
+  const notes = s.npcNotes ?? {};
   const dirty =
     hasToken(s.location) ||
     s.npcsAlive.some(hasToken) ||
     s.clues.some(hasToken) ||
     s.inventory.some((i) => hasToken(i.name) || hasToken(i.desc) || hasToken(i.note)) ||
     Object.keys(s.flags).some(hasToken) ||
-    Object.values(s.flags).some((v) => typeof v === 'string' && hasToken(v));
+    Object.values(s.flags).some((v) => typeof v === 'string' && hasToken(v)) ||
+    // 档案的键就是 NPC 名字，值也常写"你认识的那个{{称呼}}"，同样要洗
+    Object.entries(notes).some(
+      ([k, v]) =>
+        hasToken(k) ||
+        hasToken(v?.role) ||
+        hasToken(v?.note)
+    );
   if (!dirty) return s;
   const f = (t: string) => fillPlayerTokens(t, c);
   const flags: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(s.flags)) {
     flags[f(k)] = typeof v === 'string' ? f(v) : v;
+  }
+  const npcNotes: Record<string, { role?: string; note?: string; met?: number }> = {};
+  for (const [k, v] of Object.entries(notes)) {
+    npcNotes[f(k)] = {
+      role: v?.role ? f(v.role) : v?.role,
+      note: v?.note ? f(v.note) : v?.note,
+      met: v?.met,
+    };
   }
   return {
     ...s,
@@ -300,6 +324,7 @@ export function sanitizeStateTokens(s: GameState, c: CharacterProfile): GameStat
       note: i.note ? f(i.note) : i.note,
     })),
     flags,
+    npcNotes: Object.keys(npcNotes).length ? npcNotes : s.npcNotes,
   };
 }
 
@@ -1524,6 +1549,14 @@ interface Store {
   pendingChecks: PendingCheck[];
   /** 最近一轮的状态变化摘要，主页面用它弹提示 */
   lastChanges: StateChangeNotice | null;
+  /**
+   * 待注入的「濒死施救引导」——**一次性**：下一次发给守密人时带上，带完即清。
+   *
+   * 为什么不在提示词里常驻：常驻等于每一轮都在提醒"你要死了"，
+   * 血没见底时也占着上下文。只在濒死那一轮说一次，才叫引导而不是唠叨。
+   * 纯运行时字段，**不进存档**（刷新页面丢失也不影响，死亡结算照旧）。
+   */
+  dyingNote: string | null;
   /** 正文排版设置 */
   typography: Typography;
   /** 音频设置（氛围音 / 自配 BGM / 判定音效） */
@@ -1576,6 +1609,12 @@ interface Store {
   clearPendingChecks(): void;
   /** 清掉主页面的状态变化提示 */
   clearChanges(): void;
+  /** 当前负重（界面与提示词共用同一份计算，别各算一遍） */
+  encumbrance(): Encumbrance;
+  /** 取走待注入的濒死引导（取完即清，保证只说一次） */
+  consumeDyingNote(): string | null;
+  /** 内部用：设置 / 清掉濒死引导 */
+  setDyingNote(note: string | null): void;
   /** 开发者模式：打开后才显示测试沙盒入口（灌测试存档 / 脚本化模组） */
   devMode: boolean;
   /** 切换开发者模式 */
@@ -1665,7 +1704,7 @@ export interface SaveFile {
  * 改动存档结构时把它 +1，并在 `migrateSave` 里补一条迁移 ——
  * 否则玩家读旧档时会因为缺字段而报错，看起来就像"存档坏了"。
  */
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 /**
  * 世界书合并：取**并集**（按 id 优先、其次按正文去重），而不是整体替换。
@@ -1731,6 +1770,19 @@ export function migrateSave(raw: unknown): Partial<SaveFile> {
     // 濒死标记与结档信息是后加的
     if (typeof gs.dying !== 'boolean') gs = { ...gs, dying: false };
     if (gs.ending === undefined) gs = { ...gs, ending: null };
+    /*
+     * 4) 负重：v4 给每件物品补 `weight`。
+     * 老存档没有这个字段，缺了会被 `itemWeight()` 当成 1 兜底（结果一样），
+     * 但补上之后玩家在背包里能看到重量、也能手动改，不必等他捡到新东西才有。
+     */
+    if (gs.inventory.some((it) => typeof it.weight !== 'number')) {
+      gs = {
+        ...gs,
+        inventory: gs.inventory.map((it) =>
+          typeof it.weight === 'number' ? it : { ...it, weight: 1 }
+        ),
+      };
+    }
     data.gameState = gs;
   }
 
@@ -1791,6 +1843,7 @@ export const useStore = create<Store>((set, get) => ({
   mapImage: '',
   pendingChecks: [],
   lastChanges: null,
+  dyingNote: null,
   typography: loadTypography(),
   audio: loadAudioConfig(),
 
@@ -1893,7 +1946,8 @@ export const useStore = create<Store>((set, get) => ({
     if (!s.gameState.ending) return;
     const gameState: GameState = { ...s.gameState, ending: null, dying: false };
     saveJson('trpg.gameState', gameState);
-    set({ gameState });
+    // 濒死解除了，那条一次性引导也就没了意义
+    set({ gameState, dyingNote: null });
   },
 
   rewindBefore(msgId) {
@@ -1927,6 +1981,8 @@ export const useStore = create<Store>((set, get) => ({
       snapshots,
       pendingChecks: snap?.pendingChecks ?? [],
       lastChanges: null,
+      // 回溯后濒死状态由快照决定，一次性引导跟着快照走（旧状态没在濒死就别再说）
+      dyingNote: gameState.dying ? DYING_NOTE : null,
     });
   },
 
@@ -2269,6 +2325,25 @@ export const useStore = create<Store>((set, get) => ({
     set({ lastChanges: null });
   },
 
+  encumbrance() {
+    const rs = getRuleset(get().rulesetId);
+    return encumbranceOf(
+      get().gameState.inventory,
+      rs.carryCapacity ? rs.carryCapacity(get().character.characteristics) : null,
+      rs.mainDice === '1d100' ? 'percent' : 'modifier'
+    );
+  },
+
+  consumeDyingNote() {
+    const note = get().dyingNote;
+    if (note) set({ dyingNote: null });
+    return note;
+  },
+
+  setDyingNote(note) {
+    set({ dyingNote: note });
+  },
+
   setTypography(patch) {
     const next = { ...get().typography, ...patch };
     saveJson('trpg.typography', next);
@@ -2406,9 +2481,10 @@ export const useStore = create<Store>((set, get) => ({
       worldbook: keptWorldbook,
       messageImages: {},
       mapImage: '',
-      // 上一局遗留的待掷检定与状态提示也一并清掉
+      // 上一局遗留的待掷检定、状态提示与濒死引导也一并清掉
       pendingChecks: [],
       lastChanges: null,
+      dyingNote: null,
     });
   },
 
@@ -2434,10 +2510,20 @@ export const useStore = create<Store>((set, get) => ({
     // DnD 要把属性分值折算成加值（15 → +2）；技能本身已是加值则原样
     const base = rs.toModifier ? rs.toModifier(key, raw) : raw;
     /*
+     * 超重惩罚：**在掷骰之前**减进目标值。
+     * 身上扛太多东西，做什么都该更吃力——这是物理，不是难度选择。
+     * 规则包没给 `carryCapacity` 时不启用（自定义规则包大多如此），那就不罚。
+     */
+    const enc = encumbranceOf(
+      get().gameState.inventory,
+      rs.carryCapacity ? rs.carryCapacity(get().character.characteristics) : null,
+      rs.mainDice === '1d100' ? 'percent' : 'modifier'
+    );
+    /*
      * 描述加权：**在掷骰之前**加进目标值。
      * 放在这里（而不是事后改结果）才能保证判定、成功率与结果标签三者一致。
      */
-    const target = base + (bonus || 0);
+    const target = base + (bonus || 0) + enc.penalty;
     // COC 走百分骰；其它规则包退回主骰表达式（如 d20）
     const percentile = rs.mainDice === '1d100';
     if (percentile) {
@@ -2510,10 +2596,18 @@ export const useStore = create<Store>((set, get) => ({
         kind = 'insanity';
       } else if (typeof hp === 'number' && hp <= 0) {
         if (nextState.dying) kind = 'death';
-        else nextState = { ...nextState, dying: true };
+        else {
+          nextState = { ...nextState, dying: true };
+          /*
+           * 刚进入濒死：挂一条**一次性**的施救引导，下一轮发给守密人。
+           * 不给它菜单、也不替玩家定成败——只要求守密人在叙境内给出"还有一口气可以争"的路。
+           */
+          set({ dyingNote: DYING_NOTE });
+        }
       } else if (typeof hp === 'number' && hp > 0 && nextState.dying) {
         // 救回来了，解除濒死
         nextState = { ...nextState, dying: false };
+        set({ dyingNote: null });
       }
       if (kind) {
         // 正文留空：App 会拿它当信号，向守密人要一段结局叙事再填进来
@@ -2562,6 +2656,11 @@ export const useStore = create<Store>((set, get) => ({
      * 引擎内部记账不算反馈，这里把它翻成一句人话放进同一条"状态变化"提示里。
      */
     for (const r of report.rejected) {
+      // 濒死冻结：这是**好消息**，别用告警色吓人，但要让玩家看见"血没有再掉"
+      if (r.reason === DYING_FREEZE_REASON) {
+        lines.push({ text: '已经倒下了 —— 这一轮生命不再下降，还有一口气', tone: 'good' });
+        continue;
+      }
       if (r.delta?.target !== 'inventory') continue;
       const name = String(r.delta.value ?? '物品');
       lines.push({

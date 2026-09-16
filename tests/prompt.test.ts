@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildSystemPrompt,
+  DYING_NOTE,
   dedupeNpcLines,
   extractContract,
   isCheckLeak,
@@ -196,6 +197,42 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
     const prompt = buildPrompt();
     expect(prompt).toContain('宣告结局');
     expect(prompt).toContain('success | failure | grey');
+  });
+
+  it('物品要带重量（负重系统的输入全靠它）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('weight');
+    expect(prompt).toContain('负重');
+  });
+
+  it('人物档案要写进 npcNotes，且不许剧透动机与秘密', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('npcNotes.老霍华德.role');
+    expect(prompt).toContain('npcNotes.');
+    // 卡片是给玩家看的：底牌不能摆上来
+    expect(prompt).toContain('不要写进来');
+  });
+});
+
+describe('濒死一次性引导（DYING_NOTE）', () => {
+  /*
+   * 提示词删一行不会报错，但游戏立刻变回原样。
+   * 濒死那一轮守密人要么直接收尸、要么列一屏选项菜单，
+   * 这两条都是用户明确反感的，用断言钉住。
+   */
+  it('要求给出生路而不是收束', () => {
+    expect(DYING_NOTE).toContain('一线生机');
+    expect(DYING_NOTE).toContain('施救');
+  });
+
+  it('不许列菜单、不许替玩家定成败', () => {
+    expect(DYING_NOTE).toContain('不要列选项菜单');
+    expect(DYING_NOTE).toContain('不要替玩家定成败');
+  });
+
+  it('不许写跳出故事的话，也不许再扣血（引擎已冻结）', () => {
+    expect(DYING_NOTE).toContain('游戏结束');
+    expect(DYING_NOTE).toContain('不要再扣他的生命');
   });
 });
 

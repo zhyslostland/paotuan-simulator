@@ -23,7 +23,7 @@
  */
 
 /** 当前版本。改动玩家能感知的东西就往上走一位。 */
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';
 
 /**
  * 构建号（构建时由 vite 注入的那串时间戳）。
@@ -53,4 +53,46 @@ export function compareVersions(a: string, b: string): number {
   const [a1 = 0, a2 = 0, a3 = 0] = parse(a);
   const [b1 = 0, b2 = 0, b3 = 0] = parse(b);
   return a1 - b1 || a2 - b2 || a3 - b3;
+}
+
+/**
+ * 判断线上那份是不是比当前这份新 —— 更新检测的核心判据。
+ *
+ * ## 为什么两个都要看（协作方 P0-1 抓到的口径漏洞）
+ * - 只比**语义化版本**会漏：发布时忘了改 `APP_VERSION`，版本没变 → **永远不提示更新**，
+ *   "我改了你还是旧的"原样复发。
+ * - 只比**构建号**又分不出方向（不知道是线上新还是我新）。
+ *
+ * 所以：**先比版本定方向，版本相同再比构建号**。
+ * 构建号是 `Date.now().toString(36)` —— 同长度 base36 的字典序**就是时间序**，
+ * 因此能判断方向：回滚时线上更旧，不该打扰玩家。
+ *
+ * ## 规矩
+ * **发版要改 `APP_VERSION`**（那样更新日志才有新条目）；
+ * 但即使忘了，构建号兜底也会照样提示更新，不会静默漏掉。
+ *
+ * 放在这里而不是 `update.ts`：那边依赖 PWA 的虚拟模块，纯函数放这儿才能单测。
+ */
+export function isNewer(
+  online: { version?: string; id?: string },
+  currentVersion = APP_VERSION,
+  currentBuild = BUILD_ID
+): 'newer' | 'latest' | 'unknown' {
+  // 版本号变大 → 一定有新东西
+  if (online.version) {
+    const cmp = compareVersions(online.version, currentVersion);
+    if (cmp > 0) return 'newer';
+    // 线上版本更旧（回滚 / 玩家在更新前的构建上）→ 不打扰
+    if (cmp < 0) return 'latest';
+  }
+
+  /*
+   * 版本相同或线上没给版本号 → 落到构建号。
+   * 开发环境（BUILD_ID === 'dev'）没有真实构建号可比；
+   * 这时又没版本号，只能认"判断不了"——比误报成有新版本好。
+   */
+  if (online.id && currentBuild !== 'dev') {
+    return online.id > currentBuild ? 'newer' : 'latest';
+  }
+  return online.version ? 'latest' : 'unknown';
 }

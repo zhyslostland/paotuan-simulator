@@ -130,4 +130,31 @@ describe('版本号比较（更新检测用的判据）', () => {
     expect(compareVersions('v0.1.0', '0.1.0')).toBe(0);
     expect(compareVersions('0.0.9', '0.1.0')).toBeLessThan(0);
   });
+
+  it('【P0-1 回归】版本没变但构建号更新 → 仍要提示更新', async () => {
+    /*
+     * 这是协作方抓到的口径漏洞：如果只比语义化版本，
+     * 那么"发布时忘了改 APP_VERSION"的那一次就永远不会被提示，
+     * "我改了你还是旧的"会原样复发。构建号必须能兜底。
+     */
+    const { isNewer } = await import('../src/version.js');
+    expect(isNewer({ version: '0.1.0', id: 'zzzzzzzz' }, '0.1.0', 'aaaaaaaa')).toBe('newer');
+    // 版本相同、构建号也相同 → 就是同一份，不该提示
+    expect(isNewer({ version: '0.1.0', id: 'aaaaaaaa' }, '0.1.0', 'aaaaaaaa')).toBe('latest');
+  });
+
+  it('版本变大 / 变小 的方向要判对（回滚不该打扰玩家）', async () => {
+    const { isNewer } = await import('../src/version.js');
+    expect(isNewer({ version: '0.2.0', id: 'aaaaaaaa' }, '0.1.0', 'bbbbbbbb')).toBe('newer');
+    // 线上版本更旧（回滚）→ 即使构建号看起来更大也不提示
+    expect(isNewer({ version: '0.0.9', id: 'zzzzzzzz' }, '0.1.0', 'aaaaaaaa')).toBe('latest');
+  });
+
+  it('老部署只有构建号也能判断；开发环境判断不了就回 unknown', async () => {
+    const { isNewer } = await import('../src/version.js');
+    expect(isNewer({ id: 'zzzzzzzz' }, '0.1.0', 'aaaaaaaa')).toBe('newer');
+    expect(isNewer({ id: 'aaaaaaaa' }, '0.1.0', 'aaaaaaaa')).toBe('latest');
+    // dev 没有真实构建号，又没给 version → 不误报
+    expect(isNewer({ id: 'zzzzzzzz' }, '0.1.0', 'dev')).toBe('unknown');
+  });
 });

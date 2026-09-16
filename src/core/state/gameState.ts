@@ -6,7 +6,14 @@
  */
 
 import { roll, type Rng } from '../dice/index.js';
-import type { Ruleset } from '../rulesets/types.js';
+import { isLifeVital, type Ruleset } from '../rulesets/types.js';
+
+/**
+ * 濒死冻结时被拒的理由文案。
+ * 引擎与 UI 都要认它（store 靠它判断要不要弹"本轮生命已冻结"），
+ * 所以抽成常量，别两处各写一份字符串。
+ */
+export const DYING_FREEZE_REASON = '濒死：本轮生命已冻结，不再下降';
 
 /**
  * 背包里的一件东西
@@ -27,6 +34,11 @@ export interface InventoryItem {
   damage?: string;
   /** 这把武器用哪个技能检定（如"射击（手枪）""格斗（斗殴）"） */
   skill?: string;
+  /**
+   * 单件重量（负重单位，缺省 1）。旧存档没有这个字段，一律按 1 兜底。
+   * 总负重 = Σ（weight × qty），超过规则包给的上限就要吃惩罚。
+   */
+  weight?: number;
 }
 
 /**
@@ -102,6 +114,19 @@ export interface Thread {
 }
 
 /**
+ * 一个 NPC 的档案（旁挂在 `GameState.npcNotes` 上）。
+ * 三项都可选——知道多少写多少，档案本来就该是慢慢补全的。
+ */
+export interface NpcNote {
+  /** 身份/职业，如"码头工头" / "失踪船长的女儿" */
+  role?: string;
+  /** 玩家观察到的、或守密人认为该记下的细节 */
+  note?: string;
+  /** 第几回合首次照面（用于卡片上显示"第 N 回认识"） */
+  met?: number;
+}
+
+/**
  * 一场游戏的结局（结档）。
  *
  * 用户定调：**死亡 = 结档**，这段故事就此结束——不是弹一个"你死了"的窗，
@@ -157,6 +182,20 @@ export interface GameState {
   visited?: string[];
   /** 在场/存活的 NPC（死亡即移除，但事件日志会留痕） */
   npcsAlive: string[];
+  /**
+   * NPC 档案（**旁挂**，不动 `npcsAlive` 结构）。
+   *
+   * `npcsAlive` 仍是"谁在场"的唯一真源；这里只记**额外信息**，键 = 名字。
+   * 稀疏的——没档案的 NPC 照样能登场，卡片只是显示得少一点。
+   *
+   * 为什么用旁挂映射而不是把 `npcsAlive` 改成对象数组：
+   * 后者会牵动地图、检定面板、提示词，且**必须升 `SAVE_VERSION`**；
+   * 这个是可选新增字段，旧档读到是 `undefined`，卡片退化成"只有名字"，不损坏任何数据。
+   *
+   * 前缀制天然支持 `npcNotes.<名字>.role` 这种写法，所以守密人能在 `state_delta` 里
+   * 为**临时登场**的 NPC 补档案，不必改结构。
+   */
+  npcNotes?: Record<string, NpcNote>;
   /** 战斗轮状态 */
   combat: CombatState;
 }
@@ -204,6 +243,7 @@ const ALLOWED_ROOTS = new Set([
   'clues',
   'location',
   'npcsAlive',
+  'npcNotes',
   'combat',
   'threads',
 ]);
@@ -337,6 +377,31 @@ export function applyDeltas(
       } else {
         rejected.push({ delta, reason: `vitals 不支持操作 ${delta.op}` });
         continue;
+      }
+
+      /*
+       * 濒死冻结：主生命条已经见底时，这一轮**不再接受任何下降**。
+       *
+       * 为什么要引擎拦：数值本来就被 clamp 在 min，扣不动——但模型不知道，
+       * 它会一轮里连发两条 hp dec，叙事上就变成"你已经倒地不起了，又挨了一刀"。
+       * 更糟的是玩家在界面上看到一次"生命值变化"，却根本不知道发生了什么。
+       * 这里直接拒掉，让 store 有机会把"本轮生命已冻结"翻成人话告诉玩家，
+       * 并触发一次性的施救引导（见 DYING_NOTE）。
+       *
+       * 两个触发条件：
+       *   ① 进入本轮时已经是濒死（dying === true）——玩家正在争取那一线生机；
+       *   ② 本轮刚把血扣到 min（同一批 delta 里后面还有一下）——伤势见底就不再叠加。
+       * 回升一律放行：施救/自救本来就该让它涨回去。
+       */
+      if (isLifeVital(def, vitalKey) && after < before) {
+        const floor = def?.min ?? 0;
+        if (next.dying === true || before <= floor) {
+          rejected.push({
+            delta,
+            reason: DYING_FREEZE_REASON,
+          });
+          continue;
+        }
       }
 
       if (def) {
@@ -566,6 +631,7 @@ export function applyDeltas(
             if (item.damage) existing.damage = item.damage;
             if (item.skill) existing.skill = item.skill;
             if (item.note) existing.note = item.note;
+            if (typeof item.weight === 'number') existing.weight = item.weight;
           } else {
             (list as InventoryItem[]).push({
               id,
@@ -576,6 +642,8 @@ export function applyDeltas(
               kind: item.kind,
               damage: item.damage,
               skill: item.skill,
+              // 没写重量的一律 1；itemWeight() 读的时候还会再兜一次
+              weight: typeof item.weight === 'number' ? item.weight : 1,
             });
           }
         } else {

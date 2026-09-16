@@ -28,6 +28,11 @@ export interface ExportInput {
     stakes?: string;
     urgency?: string;
     scale?: string;
+    /**
+     * 守密人真相。**只有"完整留档"才会带出去**，且放在末尾的折叠块里。
+     * 默认导出一律不含它——导出物可能被转发，剧透一次就收不回来。
+     */
+    truth?: string;
   };
   gameState: GameState;
   chronicle: { turn: number; text: string; location?: string }[];
@@ -121,9 +126,38 @@ export function buildResultMarkdown(input: ExportInput): string {
 }
 
 /**
- * 整体流程分享：完整经过。编年史是 GM 每轮写的客观事实，最适合拿来讲故事。
+ * 末尾的「守密人真相」折叠块。
+ *
+ * 用 `<details>` 而不是直接铺开：这一份是**留档**，玩家自己多半也还没走到真相，
+ * 一打开就被糊一脸等于自毁体验；折叠起来，想看再点开。
+ * 平台不支持 details 时（少数 Markdown 阅读器）它会退化成普通文本，内容不丢。
  */
-export function buildJourneyMarkdown(input: ExportInput): string {
+function truthBlock(truth?: string): string[] {
+  const t = truth?.trim();
+  if (!t) return [];
+  return [
+    '',
+    '---',
+    '',
+    '<details>',
+    '<summary>守密人真相（剧透：展开前请确认这一局已经结束）</summary>',
+    '',
+    t,
+    '',
+    '</details>',
+  ];
+}
+
+/**
+ * 整体流程分享：完整经过。编年史是 GM 每轮写的客观事实，最适合拿来讲故事。
+ *
+ * `withTruth` 为真时才在末尾附真相（`buildArchiveMarkdown` 走这条），
+ * 默认分享版永远不带。
+ */
+export function buildJourneyMarkdown(
+  input: ExportInput,
+  opts: { withTruth?: boolean } = {}
+): string {
   const { gameState, character, module } = input;
   const ending = gameState.ending;
   // 技能按规则包的量纲写：COC 是百分比，DnD 是加值
@@ -224,7 +258,20 @@ export function buildJourneyMarkdown(input: ExportInput): string {
     `_由「跑团模拟器」导出${input.rulesetName ? ` · ${input.rulesetName}` : ''} · ${today(input.exportedAt)}_`
   );
 
+  // 真相放最末尾：折叠块，且只有完整留档才有
+  if (opts.withTruth) lines.push(...truthBlock(input.module.truth));
+
   return lines.join('\n');
+}
+
+/**
+ * 完整留档 = 整体流程 + 末尾的真相折叠块。
+ *
+ * 这一份是给**自己**存的（或发给已经跑完这一局的人），所以带真相；
+ * 对外分享请继续用 `buildJourneyMarkdown()`。
+ */
+export function buildArchiveMarkdown(input: ExportInput): string {
+  return buildJourneyMarkdown(input, { withTruth: true });
 }
 
 /** 触发浏览器下载一个 .md 文件 */

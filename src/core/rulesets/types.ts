@@ -36,6 +36,20 @@ export interface VitalDef {
   max: number;
   /** 新开一团时的初始值（满状态） */
   default: number;
+  /**
+   * 这是"主生命条"吗？濒死 / 死亡判定与「濒死轮冻结扣血」只作用于它。
+   * COC 与 DnD 都是 hp；自定义规则包若没标，按 key === 'hp' 兜底。
+   */
+  isLife?: boolean;
+}
+
+/**
+ * 判断某条数值是不是"主生命"。
+ * 规则包没标 `isLife`（老自定义包）时退回 `key === 'hp'`，绝不能退回"第一条"——
+ * 法则包里第一条不一定是血。
+ */
+export function isLifeVital(def: VitalDef | undefined, key: string): boolean {
+  return def ? def.isLife === true : key === 'hp';
 }
 
 /** 属性定义（COC 是 STR/CON/…，DnD 是 STR/DEX/CON/INT/WIS/CHA）——由规则包提供 */
@@ -94,6 +108,11 @@ export interface Ruleset {
    * DnD 需要它（属性 15 → +2；技能本身已是加值则原样返回）；COC 不需要。
    */
   toModifier?(name: string, rawValue: number): number;
+  /**
+   * 负重上限：由属性派生（COC 看力量+体格，DnD 看力量）。
+   * **不提供 = 这套规则不启用负重**，玩家带多少都不罚 —— 自定义规则包大多走这条。
+   */
+  carryCapacity?(characteristics: Record<string, number>): number;
   resolveCheck(roll: number, target: number, difficulty?: Difficulty): CheckResult;
   tierLabel(tier: CheckTier): string;
 }

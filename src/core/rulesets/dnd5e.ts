@@ -63,7 +63,9 @@ export function resolveDndCheck(
   };
 }
 
-const DND_VITALS: VitalDef[] = [{ key: 'hp', label: '生命值', min: 0, max: 99, default: 12 }];
+const DND_VITALS: VitalDef[] = [
+  { key: 'hp', label: '生命值', min: 0, max: 99, default: 12, isLife: true },
+];
 
 const DND_CHARACTERISTICS: CharacteristicDef[] = [
   { key: 'str', label: '力量', min: 3, max: 18, default: 10, desc: '肌肉与体能，用于近战、负重、强行破门' },
@@ -137,4 +139,11 @@ export const dnd5e: Ruleset = {
   },
   resolveCheck: resolveDndCheck,
   tierLabel: (t) => TIER_LABELS[t],
+  /*
+   * 负重上限：力量决定（与"运动"检定同源）。
+   * 量纲同上（一件小东西 1 点）：力量 10（常人）＝ 50 点，18 的壮汉 74 点。
+   */
+  carryCapacity(ch) {
+    return Math.max(10, Math.round(20 + g(ch, 'str') * 3));
+  },
 };

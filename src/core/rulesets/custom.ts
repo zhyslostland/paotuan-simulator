@@ -110,12 +110,14 @@ export function createCustomRuleset(cfg: CustomRulesetConfig): Ruleset {
     beginnerGuide: isOver
       ? `掷 ${cfg.mainDice}，点数 + 加值 ≥ 目标（DC）就算成功（常规 10 / 困难 15 / 极难 18）。`
       : `掷 ${cfg.mainDice}，点数 ≤ 目标值就算成功；困难＝目标值的一半、极难＝五分之一。掷出 1 是大成功。`,
-    vitalDefs: cfg.vitals.map((v) => ({
+    vitalDefs: cfg.vitals.map((v, i) => ({
       key: v.key,
       label: v.label,
       min: 0,
       max: 99,
       default: v.default,
+      // 自定义包没有显式的"主生命"字段：key 叫 hp 就是它，否则取第一条（多半就是血）
+      isLife: v.key === 'hp' || (i === 0 && !cfg.vitals.some((x) => x.key === 'hp')),
     })),
     characteristicDefs,
     skillCatalog: cfg.skills.map((s) => ({ name: s.name, base: s.base })),

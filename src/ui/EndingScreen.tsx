@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStore, type TurnSnapshot } from './store';
 import { getRuleset } from '../core/rulesets/index.js';
 import {
+  buildArchiveMarkdown,
   buildJourneyMarkdown,
   buildResultMarkdown,
   copyText,
@@ -110,11 +111,19 @@ export function EndingScreen({
   };
   const fileBase = safeFilename(`${module.title || '跑团'}-${character.name || ''}`);
 
-  const doExport = async (kind: 'result' | 'journey', action: 'copy' | 'download') => {
+  const doExport = async (
+    kind: 'result' | 'journey' | 'archive',
+    action: 'copy' | 'download'
+  ) => {
     const md =
-      kind === 'result' ? buildResultMarkdown(exportInput) : buildJourneyMarkdown(exportInput);
+      kind === 'result'
+        ? buildResultMarkdown(exportInput)
+        : kind === 'archive'
+          ? buildArchiveMarkdown(exportInput)
+          : buildJourneyMarkdown(exportInput);
     if (action === 'download') {
-      downloadMarkdown(`${fileBase}-${kind === 'result' ? '结算' : '全程'}.md`, md);
+      const suffix = kind === 'result' ? '结算' : kind === 'archive' ? '完整留档' : '全程';
+      downloadMarkdown(`${fileBase}-${suffix}.md`, md);
       setExportMsg('已导出为 .md 文件（在下载目录）');
       return;
     }
@@ -172,8 +181,9 @@ export function EndingScreen({
         <div className="mt-7 rounded-xl border border-ink-700 bg-ink-900/50 p-4">
           <h2 className="text-[12px] tracking-wider text-mist-400">导出这一局</h2>
           <p className="mt-1 text-[11px] leading-relaxed text-mist-500">
-            Markdown 文本，复制或存成文件都行。
-            <span className="text-mist-400">不含守密人的内部真相</span>，可以直接发给别人。
+            Markdown 文本，复制或存成文件都行。前两份
+            <span className="text-mist-400">不含守密人的内部真相</span>，可以直接发给别人；
+            「完整留档」才带真相，且放在末尾的折叠块里。
           </p>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             <div className="rounded-lg border border-ink-700 p-3">
@@ -210,6 +220,30 @@ export function EndingScreen({
                 </button>
                 <button
                   onClick={() => void doExport('journey', 'download')}
+                  className="rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
+                >
+                  存为文件
+                </button>
+              </div>
+            </div>
+            <div className="rounded-lg border border-gold-600/30 bg-gold-500/[0.04] p-3 sm:col-span-2">
+              <div className="flex items-baseline gap-2">
+                <span className="text-[12px] text-mist-300">完整留档</span>
+                <span className="text-[10px] text-gold-400/80">含守密人真相</span>
+              </div>
+              <div className="mt-0.5 text-[10px] leading-relaxed text-mist-500">
+                同上，末尾多一段折叠起来的真相。留给自己，或发给已经跑完这一局的人 ——
+                别发给还在跑的人。
+              </div>
+              <div className="mt-2.5 flex gap-1.5">
+                <button
+                  onClick={() => void doExport('archive', 'copy')}
+                  className="rounded-md border border-gold-600/60 px-2.5 py-1 text-[11px] text-gold-300 transition hover:border-gold-500 hover:text-gold-200"
+                >
+                  复制
+                </button>
+                <button
+                  onClick={() => void doExport('archive', 'download')}
                   className="rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
                 >
                   存为文件

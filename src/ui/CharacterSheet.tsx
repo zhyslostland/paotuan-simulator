@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   canonicalSkillName,
   deriveVitalsFor,
@@ -6,6 +6,7 @@ import {
   resolveCheckTarget,
   useStore,
 } from './store';
+import { encumbranceOf, itemWeight } from '../core/encumbrance.js';
 import { ImageLightbox } from './ImageLightbox';
 import {
   weighDescription,
@@ -133,8 +134,21 @@ export function CheckDialog({
     },
     rs.mainDice === '1d100' ? 'percent' : 'modifier'
   );
+  /*
+   * 超重惩罚也要算进预览值——引擎掷的时候会扣，界面不显示就是"说一套做一套"。
+   * 与 store.skillCheck 用的是同一个函数，不会两边算出不同的数。
+   */
+  const enc = useMemo(
+    () =>
+      encumbranceOf(
+        gameState.inventory,
+        rs.carryCapacity ? rs.carryCapacity(character.characteristics) : null,
+        isPercent ? 'percent' : 'modifier'
+      ),
+    [gameState.inventory, rs, character.characteristics, isPercent]
+  );
   /** 加权后的目标值（引擎仍按这个值来判定，不是界面上的花招） */
-  const weightedValue = value + weight.bonus;
+  const weightedValue = value + weight.bonus + enc.penalty;
   const npcTargets = gameState.npcsAlive;
   const mateTargets = gameState.companions
     .filter((c) => c.alive && c.present)
@@ -246,12 +260,16 @@ export function CheckDialog({
           />
           {/* 描述加权的结果必须让玩家看得见，否则他会以为是系统在偷偷改数值 */}
           <p className="mt-1.5 text-[11px] leading-relaxed">
-            {weight.bonus === 0 ? (
+            {weight.bonus + enc.penalty === 0 ? (
               <span className="text-mist-500">
                 目标值 {isPercent ? `${value}%` : `${value >= 0 ? '+' : ''}${value}`}（不变）
               </span>
             ) : (
-              <span className={weight.bonus > 0 ? 'text-moss-400' : 'text-blood-300'}>
+              <span
+                className={
+                  weight.bonus + enc.penalty > 0 ? 'text-moss-400' : 'text-blood-300'
+                }
+              >
                 目标值{' '}
                 <span className="line-through opacity-60">
                   {isPercent ? `${value}%` : `${value >= 0 ? '+' : ''}${value}`}
@@ -260,11 +278,22 @@ export function CheckDialog({
                 {isPercent
                   ? `${weightedValue}%`
                   : `${weightedValue >= 0 ? '+' : ''}${weightedValue}`}
-                （描述{weight.bonus > 0 ? '加分' : '扣分'} {weight.bonus > 0 ? '+' : ''}
-                {weight.bonus}）
+                {weight.bonus !== 0 && (
+                  <>
+                    （描述{weight.bonus > 0 ? '加分' : '扣分'} {weight.bonus > 0 ? '+' : ''}
+                    {weight.bonus}）
+                  </>
+                )}
               </span>
             )}
-            <span className="ml-1 text-mist-500/70">（{weight.reasons.join('；')}）</span>
+            <span className="ml-1 text-mist-500/70">
+              （
+              {[
+                ...weight.reasons,
+                ...(enc.penalty < 0 ? [`超重 ${enc.penalty}`] : []),
+              ].join('；')}
+              ）
+            </span>
           </p>
         </div>
 
@@ -478,6 +507,19 @@ export function CharacterSheet({
   const vitalsDerived = deriveVitalsFor(character, rulesetId);
   const maxOf = (key: string) => vitalsMax[key] ?? rs.vitalDefs.find((v) => v.key === key)?.max ?? 99;
   const extras = rs.deriveExtras?.(character.characteristics) ?? {};
+  /*
+   * 负重：规则包给了 `carryCapacity` 才算，没有就整块不显示（自定义规则包大多如此）。
+   * 用 useMemo 包住，否则每次渲染都换一个新对象，zustand 的选择器会一直认为"变了"。
+   */
+  const enc = useMemo(
+    () =>
+      encumbranceOf(
+        gameState.inventory,
+        rs.carryCapacity ? rs.carryCapacity(character.characteristics) : null,
+        rs.mainDice === '1d100' ? 'percent' : 'modifier'
+      ),
+    [gameState.inventory, rs, character.characteristics]
+  );
 
   return (
     <div className="space-y-6 p-4">
@@ -677,6 +719,48 @@ export function CharacterSheet({
             tone={v.key as 'hp' | 'san' | 'mp'}
           />
         ))}
+        {/*
+         * 负重：只在规则包给了上限时才出现。
+         * 超重会实打实压低检定目标值，所以必须让玩家看得见"我现在扛了多少"，
+         * 否则他只会觉得"最近怎么老失败"。
+         */}
+        {enc.capacity !== null && (
+          <div>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <span className="text-[11px] text-mist-400">负重</span>
+              <span
+                className={`text-[11px] tabular-nums ${
+                  enc.tier === 2
+                    ? 'text-blood-300'
+                    : enc.tier === 1
+                      ? 'text-gold-300'
+                      : 'text-mist-400'
+                }`}
+              >
+                {enc.label}
+              </span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-ink-700">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  enc.tier === 2
+                    ? 'bg-blood-400'
+                    : enc.tier === 1
+                      ? 'bg-gold-500'
+                      : 'bg-arcane-400/70'
+                }`}
+                style={{
+                  width: `${Math.min(100, (enc.load / enc.capacity) * 100)}%`,
+                }}
+              />
+            </div>
+            {enc.tier > 0 && (
+              <p className="mt-1 text-[10px] leading-relaxed text-gold-500/80">
+                扛太重了 —— 做什么都不利索，检定会吃亏。扔掉一些，或者找个地方放下。
+              </p>
+            )}
+          </div>
+        )}
       </section>
 
       {/* 我此刻在哪——放在概况里，玩家一眼看到"我在哪、我什么状态" */}
@@ -834,33 +918,49 @@ export function CharacterSheet({
         {gameState.inventory.length === 0 ? (
           <p className="text-[12px] text-mist-500/70">空空如也</p>
         ) : (
-          <ul className="space-y-1">
-            {gameState.inventory.map((item) => {
-              const isWeapon = item.kind === 'weapon' && Boolean(item.damage);
-              return (
-                <li key={item.id}>
-                  <button
-                    onClick={() => setOpenItem(item.id)}
-                    className="flex w-full items-center justify-between gap-2 rounded-md bg-ink-850 px-2.5 py-1.5 text-left transition hover:bg-ink-800"
-                  >
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="truncate text-[12px] text-mist-300">{item.name}</span>
-                      {isWeapon && (
-                        <span className="shrink-0 rounded bg-blood-400/15 px-1 py-0.5 text-[9px] text-blood-300">
-                          {item.damage}
-                        </span>
-                      )}
-                    </span>
-                    {item.qty > 1 && (
-                      <span className="shrink-0 text-[11px] tabular-nums text-mist-500">
-                        ×{item.qty}
+          <>
+            {enc.capacity !== null && (
+              <p
+                className={`mb-2 text-[11px] ${
+                  enc.tier === 2
+                    ? 'text-blood-300'
+                    : enc.tier === 1
+                      ? 'text-gold-300'
+                      : 'text-mist-500'
+                }`}
+              >
+                合计负重 {enc.label}
+              </p>
+            )}
+            <ul className="space-y-1">
+              {gameState.inventory.map((item) => {
+                const isWeapon = item.kind === 'weapon' && Boolean(item.damage);
+                return (
+                  <li key={item.id}>
+                    <button
+                      onClick={() => setOpenItem(item.id)}
+                      className="flex w-full items-center justify-between gap-2 rounded-md bg-ink-850 px-2.5 py-1.5 text-left transition hover:bg-ink-800"
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-[12px] text-mist-300">{item.name}</span>
+                        {isWeapon && (
+                          <span className="shrink-0 rounded bg-blood-400/15 px-1 py-0.5 text-[9px] text-blood-300">
+                            {item.damage}
+                          </span>
+                        )}
                       </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                      <span className="shrink-0 flex items-center gap-1.5 text-[11px] tabular-nums text-mist-500">
+                        {enc.capacity !== null && (
+                          <span>{itemWeight(item) * Math.max(1, item.qty)}</span>
+                        )}
+                        {item.qty > 1 && <span>×{item.qty}</span>}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
         )}
       </section>
       )}

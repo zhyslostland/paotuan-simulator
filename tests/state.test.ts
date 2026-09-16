@@ -3,6 +3,7 @@ import {
   applyDeltas,
   createInitialState,
   detectStatusEvents,
+  DYING_FREEZE_REASON,
   type GameState,
 } from '../src/core/state/gameState.js';
 import { coc7 } from '../src/core/rulesets/index.js';
@@ -610,5 +611,130 @@ describe('武器不会被"用掉"', () => {
       { target: 'inventory', op: 'dec', value: '子弹', amount: 1 },
     ]);
     expect(state.inventory.find((i) => i.name === '子弹')!.qty).toBe(5);
+  });
+});
+
+describe('NPC 档案（旁挂映射，不动 npcsAlive 结构）', () => {
+  /*
+   * 用户要"点击在地人物弹卡片"，但 npcsAlive 只有名字。
+   * 用旁挂的 npcNotes 记额外档案：npcsAlive 仍是"谁在场"的唯一真源，
+   * 地图/检定/提示词一行都不用改，且是可选字段 → 不升 SAVE_VERSION。
+   */
+  const withNpc = (): GameState => ({
+    ...base(),
+    npcsAlive: ['老霍华德', '米拉'],
+  });
+
+  it('可以为在场 NPC 补档案（前缀写法天然支持）', () => {
+    const { state, rejected } = applyDeltas(withNpc(), [
+      { target: 'npcNotes.老霍华德.role', op: 'set', value: '码头工头' },
+      { target: 'npcNotes.老霍华德.note', op: 'set', value: '右手指节有老茧，说话时不敢看人' },
+    ]);
+    expect(rejected).toHaveLength(0);
+    expect(state.npcNotes?.['老霍华德']?.role).toBe('码头工头');
+    expect(state.npcNotes?.['老霍华德']?.note).toContain('老茧');
+  });
+
+  it('临时登场的 NPC 也能补（不在 npcsAlive 里照样能记）', () => {
+    const { state } = applyDeltas(withNpc(), [
+      { target: 'npcNotes.路人甲.role', op: 'set', value: '醉汉' },
+    ]);
+    expect(state.npcNotes?.['路人甲']?.role).toBe('醉汉');
+    // 在场名单不受影响 —— 这是"旁挂"的意义
+    expect(state.npcsAlive).toEqual(['老霍华德', '米拉']);
+  });
+
+  it('没档案的 NPC 不受影响（稀疏映射，旧档读到 undefined 也不坏）', () => {
+    const { state } = applyDeltas(withNpc(), []);
+    expect(state.npcNotes).toBeUndefined();
+    expect(state.npcsAlive).toEqual(['老霍华德', '米拉']);
+  });
+
+  it('首次照面的回合数可以记下来', () => {
+    const { state } = applyDeltas(withNpc(), [
+      { target: 'npcNotes.米拉.met', op: 'set', value: 3 },
+    ]);
+    expect(state.npcNotes?.['米拉']?.met).toBe(3);
+  });
+});
+
+describe('濒死当轮冻结扣血', () => {
+  /*
+   * 用户要的是"濒死那一轮还有一口气"：血见底之后，这一轮**不允许再掉**。
+   * 数值本来就被 clamp 在 0，真正的价值在两处——
+   *   ① 拒绝掉这条 delta，玩家界面上就不会再冒出一次莫名其妙的"生命值变化"；
+   *   ② rejected 里带上固定理由，store 才能翻成人话并触发一次性施救引导。
+   */
+  const opt = { ruleset: coc7 };
+
+  it('血扣到 0 之后，同一轮里再来一下也不掉（见底即冻结）', () => {
+    const { state, rejected, applied } = applyDeltas(
+      base(),
+      [
+        { target: 'vitals.hp', op: 'dec', amount: 20 },
+        { target: 'vitals.hp', op: 'dec', amount: 3 },
+      ],
+      opt
+    );
+    expect(state.vitals.hp).toBe(0);
+    expect(applied).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe(DYING_FREEZE_REASON);
+  });
+
+  it('进入本轮时已经是濒死 → 一切下降都冻结', () => {
+    const dying: GameState = { ...base(), vitals: { hp: 0, san: 65, mp: 13 }, dying: true };
+    const { state, rejected } = applyDeltas(
+      dying,
+      [{ target: 'vitals.hp', op: 'dec', amount: 1 }],
+      opt
+    );
+    expect(state.vitals.hp).toBe(0);
+    expect(rejected).toHaveLength(1);
+  });
+
+  it('回升一律放行 —— 施救/自救要能把它拉回来', () => {
+    const dying: GameState = { ...base(), vitals: { hp: 0, san: 65, mp: 13 }, dying: true };
+    const { state, rejected } = applyDeltas(
+      dying,
+      [{ target: 'vitals.hp', op: 'inc', amount: 4 }],
+      opt
+    );
+    expect(rejected).toHaveLength(0);
+    expect(state.vitals.hp).toBe(4);
+  });
+
+  it('只有主生命条冻结，理智/魔法照常结算', () => {
+    const dying: GameState = { ...base(), vitals: { hp: 0, san: 40, mp: 10 }, dying: true };
+    const { state, rejected } = applyDeltas(
+      dying,
+      [
+        { target: 'vitals.san', op: 'dec', amount: 5 },
+        { target: 'vitals.mp', op: 'dec', amount: 2 },
+      ],
+      opt
+    );
+    expect(rejected).toHaveLength(0);
+    expect(state.vitals.san).toBe(35);
+    expect(state.vitals.mp).toBe(8);
+  });
+
+  it('没标濒死、血也没见底时，正常扣血不受影响', () => {
+    const { state, rejected } = applyDeltas(
+      base(),
+      [{ target: 'vitals.hp', op: 'dec', amount: 5 }],
+      opt
+    );
+    expect(rejected).toHaveLength(0);
+    expect(state.vitals.hp).toBe(7);
+  });
+
+  it('没给规则包时按 key=hp 兜底，同样冻结', () => {
+    const dying: GameState = { ...base(), vitals: { hp: 0, san: 65, mp: 13 }, dying: true };
+    const { rejected } = applyDeltas(dying, [
+      { target: 'vitals.hp', op: 'dec', amount: 2 },
+    ]);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe(DYING_FREEZE_REASON);
   });
 });

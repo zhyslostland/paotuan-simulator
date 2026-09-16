@@ -38,6 +38,7 @@ import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 import type { Ending } from '../core/state/gameState.js';
+import { encumbranceNote } from '../core/encumbrance.js';
 
 type Panel = 'chat' | 'character' | 'world';
 
@@ -326,9 +327,22 @@ export default function App() {
     // 回合开始：拍下状态快照，供「回溯 / 重掷」恢复
     const lastPlayer = [...snapshot].reverse().find((m) => m.role === 'player');
     if (lastPlayer) useStore.getState().snapshotTurn(lastPlayer.id);
+    /*
+     * 濒死引导：**一次性**，取走即清。
+     * 上一轮结束时引擎把玩家标成了濒死并冻结了生命，这一轮要守密人给出施救的路，
+     * 而不是直接收束。放在 engineNote 之后——它是本轮最要紧的一条。
+     */
+    const dyingNote = useStore.getState().consumeDyingNote();
+    /*
+     * 超重提示：只在真的超重时才说，且不报数字。
+     * 它是持续状态（不是一次性事件），所以每轮都跟着——守密人很容易忘掉"你还扛着一箱子东西"。
+     */
+    const loadNote = encumbranceNote(useStore.getState().encumbrance());
+    const notes = [engineNote, dyingNote, loadNote].filter(Boolean) as string[];
+    const finalNote = notes.length ? notes.join('\n\n') : undefined;
     // 世界书只注入命中关键词的条目，全量塞进去会撑爆上下文
     const context = snapshot.slice(-4).map((m) => m.content);
-    if (engineNote) context.push(engineNote);
+    if (finalNote) context.push(finalNote);
 
     const systemPrompt = buildSystemPrompt({
       rulesetName: rs.name,
@@ -347,7 +361,7 @@ export default function App() {
     });
 
     const turns = buildMessages(systemPrompt, snapshot);
-    if (engineNote) turns.push({ role: 'user', content: engineNote });
+    if (finalNote) turns.push({ role: 'user', content: finalNote });
 
     const gmId = addMessage({ role: 'gm', content: '' });
     setStreaming(true);
@@ -581,6 +595,8 @@ export default function App() {
         }
       }
     } catch (e) {
+      // 请求没成功就把一次性引导还回去，玩家重试时还能拿到（失败不该消耗掉它）
+      if (dyingNote) useStore.getState().setDyingNote(dyingNote);
       if ((e as Error).name === 'AbortError') {
         updateMessage(gmId, { content: visible(full) + '\n\n_（已中断）_' });
       } else {
@@ -1085,7 +1101,7 @@ export default function App() {
                 className={`text-[12px] leading-relaxed ${
                   l.tone === 'down'
                     ? 'text-blood-300'
-                    : l.tone === 'up'
+                    : l.tone === 'up' || l.tone === 'good'
                       ? 'text-moss-400'
                       : l.tone === 'warn'
                         ? 'text-gold-300'
