@@ -26,6 +26,25 @@ export { DIFFICULTY_LABEL };
 const LOW_SKILL_BASE = 5;
 
 /**
+ * 角色卡的三个页签。
+ *
+ * 用户 2026-09-16 拍板：**不新开一套游戏内面板**，而是把原来"一页到底"的角色卡
+ * 拆成三个页签——同一份数据、只换呈现方式。
+ * 这样不会出现两套 UI 各说各话，也不用把「无可用武器」这类判定维护两遍。
+ *
+ * 划分依据是"玩家在想什么"：
+ * - 概况：我是谁、我什么状态（数值 / 状态标签 / 当前在哪 / 谁跟着我）
+ * - 技能：我要掷什么
+ * - 背包：我手里有什么
+ */
+const SHEET_TABS = [
+  { id: 'profile', label: '概况' },
+  { id: 'skills', label: '技能' },
+  { id: 'bag', label: '背包' },
+] as const;
+type SheetTab = (typeof SHEET_TABS)[number]['id'];
+
+/**
  * 已知的"重状态"用告警色。其余中文 flag 照常显示，只是用中性色——
  * 这样一来，守密人新写的任何状态（流血、中毒、被通缉）都不会再"界面上一片安静"。
  */
@@ -429,6 +448,7 @@ export function CharacterSheet({
   const [showAllSkills, setShowAllSkills] = useState(false);
   const [showLowSkills, setShowLowSkills] = useState(false);
   const [openItem, setOpenItem] = useState<string | null>(null);
+  const [tab, setTab] = useState<SheetTab>('profile');
 
   const rs = getRuleset(rulesetId);
   // 角色卡上没写的技能（用标准名去重，避免"手枪"与"射击（手枪）"重复出现）
@@ -456,6 +476,28 @@ export function CharacterSheet({
 
   return (
     <div className="space-y-6 p-4">
+      {/* 页签：概况 / 技能 / 背包 —— 同一份角色卡，换呈现方式 */}
+      <div className="flex gap-1 rounded-lg border border-ink-700 bg-ink-900/60 p-1">
+        {SHEET_TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`flex-1 rounded-md px-3 py-1.5 text-[12px] transition ${
+              tab === t.id
+                ? 'bg-ink-800 font-medium text-gold-400'
+                : 'text-mist-500 hover:text-mist-200'
+            }`}
+          >
+            {t.label}
+            {t.id === 'bag' && gameState.inventory.length > 0 && (
+              <span className="ml-1 text-[10px] text-mist-500">{gameState.inventory.length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'profile' && (
+        <>
       <section>
         {character.portrait && (
           <ImageLightbox src={character.portrait} className="mb-3">
@@ -632,6 +674,17 @@ export function CharacterSheet({
         ))}
       </section>
 
+      {/* 我此刻在哪——放在概况里，玩家一眼看到"我在哪、我什么状态" */}
+      <section>
+        <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">当前地点</h3>
+        <p className="rounded-md bg-ink-850 px-2.5 py-2 text-[12px] text-mist-300">
+          {gameState.location || '未知'}
+        </p>
+      </section>
+        </>
+      )}
+
+      {tab === 'skills' && (
       <section>
         <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">
           技能 <span className="text-mist-500/60">（点击检定）</span>
@@ -766,7 +819,9 @@ export function CharacterSheet({
           未受训的技能按规则包的基础值掷，只是成功率低。
         </p>
       </section>
+      )}
 
+      {tab === 'bag' && (
       <section>
         <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">
           背包 <span className="text-mist-500/70">（点击查看详情）</span>
@@ -803,6 +858,7 @@ export function CharacterSheet({
           </ul>
         )}
       </section>
+      )}
 
       {openItem && (
         <ItemDialog
@@ -826,13 +882,6 @@ export function CharacterSheet({
           }}
         />
       )}
-
-      <section>
-        <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">当前地点</h3>
-        <p className="rounded-md bg-ink-850 px-2.5 py-2 text-[12px] text-mist-300">
-          {gameState.location || '未知'}
-        </p>
-      </section>
     </div>
   );
 }
