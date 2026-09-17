@@ -17,6 +17,7 @@
  * 两条路任一命中都会亮出「有新版本」横幅，用户可以立刻更新，也可以去设置里手动点「检查更新」。
  */
 import { updateSW } from './pwa.js';
+import { isOwnCache, isOwnRegistration } from './purgeScope.js';
 import {
   APP_VERSION,
   BUILD_ID as BUILD_ID_RAW,
@@ -52,8 +53,9 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
       headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
     });
     if (!res.ok) return 'unknown';
-    const data = (await res.json()) as { version?: string; id?: string };
+    const data = (await res.json()) as { version?: string; id?: string; at?: string };
     if (!data?.version && !data?.id) return 'unknown';
+    // `at` 一并交给 isNewer：有它就比时间戳，比构建号字符串更稳（见 version.ts）
     return isNewer(data);
   } catch {
     return 'unknown';
@@ -74,16 +76,28 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
  * 强制下一次导航真走网络拿到新 `index.html` 和新包；
  * SW 会在下次加载时由 `main.tsx → ./pwa` 自动重新注册，离线能力自动恢复，代价为零。
  */
-/** 拆掉旧 SW 与所有缓存。失败也吞掉——清不掉也要往下走。 */
+/**
+ * 清理作用域判据住在 `purgeScope.ts`（纯函数、可单测）——
+ * 本文件 import 了 PWA 的虚拟模块，单测一 import 就炸（见文件头）。
+ */
+export { isOwnCache, isOwnRegistration };
+
+/** 拆掉**本应用的**旧 SW 与缓存。失败也吞掉——清不掉也要往下走。 */
 async function purgeEverything(): Promise<void> {
   try {
     if ('serviceWorker' in navigator) {
       const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map((r) => r.unregister().catch(() => {})));
+      const ours = regs.filter((r) => {
+        const url = r.active?.scriptURL ?? r.installing?.scriptURL ?? r.waiting?.scriptURL ?? '';
+        return isOwnRegistration(url);
+      });
+      await Promise.all(ours.map((r) => r.unregister().catch(() => {})));
     }
     if (typeof caches !== 'undefined') {
       const keys = await caches.keys();
-      await Promise.all(keys.map((k) => caches.delete(k).catch(() => {})));
+      await Promise.all(
+        keys.filter(isOwnCache).map((k) => caches.delete(k).catch(() => {}))
+      );
     }
   } catch {
     /* 尽力而为 */
@@ -105,6 +119,29 @@ function navigateFresh(): void {
     location.replace(url.toString());
   } catch {
     location.reload();
+  }
+}
+
+/**
+ * 把地址栏上的 `_v=` 戳抹掉（协作方第 6 版 §3.14b）。
+ *
+ * `navigateFresh()` 必须带戳才能绕开 CDN，但那个戳**留在地址栏里很难看**，
+ * 玩家存书签 / 转发链接时会把一串时间戳一起带走。
+ * 页面已经加载完成，任务达成，所以在启动时把参数还原掉——
+ * `replaceState` 不会触发导航、不会重新加载，也不影响已经拿到的资源。
+ *
+ * 检测本身**不受影响**：`new URL('version.json', document.baseURI)` 会丢掉 query。
+ */
+export function cleanStampFromUrl(): void {
+  try {
+    const url = new URL(location.href);
+    if (!url.searchParams.has('_v') && !url.searchParams.has('t')) return;
+    url.searchParams.delete('_v');
+    url.searchParams.delete('t');
+    const q = url.searchParams.toString();
+    history.replaceState(null, '', url.pathname + (q ? `?${q}` : '') + url.hash);
+  } catch {
+    /* 地址栏而已，抹不掉不影响游戏 */
   }
 }
 

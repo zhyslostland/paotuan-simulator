@@ -1226,14 +1226,18 @@ function ModuleTab() {
   const removeMonster = (id: string) =>
     setModule({ monsters: (gameModule.monsters ?? []).filter((x) => x.id !== id) });
 
-  /** 按表里的数值把它放进战斗 —— 引擎初始化，模型只负责演 */
+  /**
+   * 按表里的数值把它放进战斗 —— 引擎初始化，模型只负责演。
+   *
+   * 走 `startCombatFrom`（→ `castFromBestiary`）：它会一并把
+   * `combat.active` / `combat.round` 打开、把血量 clamp、并在图鉴台账里记一笔
+   * `encountered`（玩家见到它了）。以前这里手写两个 delta，
+   * 图鉴就永远记不上账。
+   */
   const throwIntoCombat = (m: ModuleMonster) => () => {
-    if (!m.name.trim()) return;
-    const hp = Math.max(1, m.hp ?? 12);
-    useStore.getState().applyModelDeltas([
-      { target: 'combat.active', op: 'set', value: true },
-      { target: 'combat.foes', op: 'add', value: { name: m.name.trim(), hp, max: hp } },
-    ] as never);
+    const name = m.name.trim();
+    if (!name) return;
+    useStore.getState().startCombatFrom(gameModule.monsters ?? [], [name]);
   };
 
   const upsertItem = (it: ModuleItem) => {

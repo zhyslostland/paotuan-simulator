@@ -1,5 +1,11 @@
 import { create } from 'zustand';
-import { SCALE_LABEL } from '../orchestrator/generate.js';
+import {
+  SCALE_LABEL,
+  actExpandSystemPrompt,
+  actExpandUserPrompt,
+  generateJson,
+} from '../orchestrator/generate.js';
+import { actAt, isActExpanded, normalizeActIndex, parseActs } from '../core/acts.js';
 import type { ModuleScale } from '../orchestrator/generate.js';
 import {
   applyDeltas,
@@ -9,11 +15,42 @@ import {
   type AppliedDelta,
   type Companion,
   type Ending,
+  type Foe,
   type GameState,
   type InventoryItem,
   type StateDelta,
   type Thread,
+  type Wound,
 } from '../core/state/gameState.js';
+import { isLifeVital } from '../core/rulesets/types.js';
+import {
+  INSANITY_TURNS,
+  insanityNote,
+  insanityOf,
+  tickInsanity,
+} from '../core/insanity.js';
+import {
+  bleedDelta,
+  defaultWoundText,
+  healBasis,
+  healedByTime,
+  parseWound,
+  shouldBleed,
+  totalBleed,
+  woundFlagText,
+  woundFromDamage,
+  woundNote,
+  woundRelief,
+  type HealBasis,
+} from '../core/wounds.js';
+import {
+  allNamedEntries,
+  buildBestiary,
+  castFromBestiary,
+  findEntry,
+  type BestiaryCard,
+  type BestiaryEntry,
+} from '../core/bestiary.js';
 
 export type { Companion };
 import { DYING_NOTE } from '../orchestrator/prompt.js';
@@ -21,6 +58,9 @@ import { roll, type DieGroup } from '../core/dice/index.js';
 import { rollPercentile } from '../core/rulesets/coc7.js';
 import { getRuleset, listRulesets, loadCustomRulesets } from '../core/rulesets/index.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
+import { DEFAULT_GM_VOICE, gmVoiceOf, type GmVoice } from '../core/voices.js';
+import { emptyCareer, recordRun, type AchievementDef, type Career } from '../core/career.js';
+import { summarizeRun } from './runSummary.js';
 import { encumbranceOf, encumbranceNote, type Encumbrance } from '../core/encumbrance.js';
 
 export type { Encumbrance };
@@ -38,6 +78,7 @@ import {
   type AudioConfig,
 } from './audio.js';
 import { idbGet, idbSet } from './idb.js';
+import { pruneSnapshots } from './snapshotPrune.js';
 
 export type { AudioConfig };
 
@@ -1038,7 +1079,11 @@ function loadJson<T>(key: string, fallback: T): T {
   return fallback;
 }
 
-function saveJson(key: string, value: unknown): void {
+/**
+ * 真正的写入（同步、可能抛配额异常）。
+ * 只有 `saveJson` / `flushSaves` 该调它 —— 别在别处直接 `localStorage.setItem`。
+ */
+function writeNow(key: string, value: unknown): void {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {
@@ -1046,17 +1091,90 @@ function saveJson(key: string, value: unknown): void {
   }
 }
 
-/**
- * 消息在流式输出期间每几百毫秒就变一次，每次都全量序列化整个数组会把主线程卡住。
- * 这里做节流：流式期间最多每 800ms 落盘一次。
+/*
+ * ---------------------------------------------------------------------
+ * 落盘节流（协作方 §五 性能三连 ①）
+ * ---------------------------------------------------------------------
+ *
+ * 长局里 `trpg.messages` 会攒到几百条（还挂着 base64 图），
+ * 而消息在流式输出期间**每几百毫秒就变一次** —— 每次都全量 `JSON.stringify`
+ * 一个几 MB 的数组，主线程被它一顿顿卡住，打字和滚动都发涩。
+ *
+ * 做法：**同一个 key 在窗口内只落最后一次**（trailing）。
+ * 中间那些中间态本来就没人会读——下一次写入马上又把它盖掉。
+ *
+ * ## 三条必须守住的
+ * 1. **最后一次一定写**：窗口内只更新待写的值，定时器到点写**最新**那份，
+ *    绝不写某个中间态。
+ * 2. **页面要走之前必须 flush**：否则关标签页 / 手机切后台会丢掉最后 800ms 的内容。
+ *    绑 `pagehide` + `visibilitychange`（hidden 时）—— 手机上切应用走的是后者。
+ * 3. **结构性操作走 `saveJsonNow`**：清空、回溯、开新团、导入存档这类
+ *    "后面还会写别的 key"的动作，必须**立刻**落盘并取消同 key 的待写，
+ *    否则待写的旧值会在之后把新值盖回去（回溯后旧消息复活，就是这么来的）。
  */
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
+const SAVE_THROTTLE_MS = 800;
+const pendingSaves = new Map<string, unknown>();
+const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let persistGuardsBound = false;
+
+/** 把待写的全部立刻落盘（页面隐藏 / 卸载 / 结构性操作前调用） */
+export function flushSaves(): void {
+  for (const t of saveTimers.values()) clearTimeout(t);
+  saveTimers.clear();
+  const entries = [...pendingSaves.entries()];
+  pendingSaves.clear();
+  for (const [k, v] of entries) writeNow(k, v);
+}
+
+/** 绑一次"走之前 flush"的兜底。没 `window`（单测）就跳过。 */
+function bindPersistGuards(): void {
+  if (persistGuardsBound || typeof window === 'undefined') return;
+  persistGuardsBound = true;
+  const flush = () => flushSaves();
+  window.addEventListener('pagehide', flush);
+  window.addEventListener('beforeunload', flush);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush();
+  });
+}
+
+function saveJson(key: string, value: unknown): void {
+  bindPersistGuards();
+  // 已经有待写 → 只把值换成最新的，不动定时器（否则会被无限推迟）
+  if (saveTimers.has(key)) {
+    pendingSaves.set(key, value);
+    return;
+  }
+  pendingSaves.set(key, value);
+  saveTimers.set(
+    key,
+    setTimeout(() => {
+      saveTimers.delete(key);
+      const latest = pendingSaves.get(key);
+      pendingSaves.delete(key);
+      writeNow(key, latest);
+    }, SAVE_THROTTLE_MS)
+  );
+}
+
+/**
+ * 立刻落盘（并取消这个 key 的待写）。
+ * 清空 / 回溯 / 开新团 / 导入存档这类**会连带改别的 key**的操作必须走它。
+ */
+function saveJsonNow(key: string, value: unknown): void {
+  const t = saveTimers.get(key);
+  if (t) clearTimeout(t);
+  saveTimers.delete(key);
+  pendingSaves.delete(key);
+  writeNow(key, value);
+}
+
+/**
+ * 流式输出期间的消息落盘：走同一个节流通道
+ * （它与 `scheduleSaveMessages` 的关系见下——这里只负责"把当前值排进去"）。
+ */
 function scheduleSaveMessages(get: () => Store): void {
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    saveJson('trpg.messages', get().messages);
-  }, 800);
+  saveJson('trpg.messages', get().messages);
 }
 
 function loadMessages(): Message[] {
@@ -1291,6 +1409,63 @@ function loadTypography(): Typography {
   return DEFAULT_TYPOGRAPHY;
 }
 
+/**
+ * 守密人口吻（R8）。
+ *
+ * 为什么单独存一个 key 而不是塞进 `config`：它是**玩法口味**，不是 API 配置，
+ * 不该跟着"导出配置"一起走（导出配置是给换机器/换模型用的）。
+ * 读不出来一律退回默认 —— 默认口吻必须与"没做这个功能之前"的调子一致，
+ * 这样没选过的人不会被平白换一种声音。
+ */
+/**
+ * 生涯记录（R13/R30）。
+ *
+ * **单独一个 key**（`trpg.career`），不跟单局存档混在一起 ——
+ * 单局会被"开新团"清掉、被回溯重写，而"我一共跑过多少场、有哪些成就"
+ * 是跨所有局的，混进去就会一开新团就归零。
+ *
+ * 读坏了就退回空生涯：**宁可履历丢了，也不能让存档打不开**。
+ */
+function loadCareer(): Career {
+  try {
+    const raw = localStorage.getItem('trpg.career');
+    if (!raw) return emptyCareer();
+    const p = JSON.parse(raw) as Partial<Career>;
+    const base = emptyCareer();
+    return {
+      totals: { ...base.totals, ...(p.totals ?? {}), outcomes: { ...base.totals.outcomes, ...(p.totals?.outcomes ?? {}) } },
+      achievements: p.achievements ?? {},
+    };
+  } catch {
+    return emptyCareer();
+  }
+}
+
+/** 读一个布尔开关（缺省 / 读坏都退回 `fallback`，绝不因为一个坏值把启动弄挂） */
+function loadFlag(key: string, fallback: boolean): boolean {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return fallback;
+    const v = JSON.parse(raw);
+    return typeof v === 'boolean' ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function loadGmVoice(): GmVoice {
+  try {
+    const raw = localStorage.getItem('trpg.gmVoice');
+    if (raw) {
+      const id = JSON.parse(raw);
+      if (typeof id === 'string') return gmVoiceOf(id).id;
+    }
+  } catch {
+    /* 忽略 */
+  }
+  return DEFAULT_GM_VOICE;
+}
+
 function loadConfig(): ApiConfig {
   try {
     const raw = localStorage.getItem('trpg.config');
@@ -1418,6 +1593,22 @@ function describeChanges(
   for (const a of applied) {
     const t = a.delta.target;
 
+    /*
+     * ⚠️ **这里绝不做"少弹提示"的优化**（2026-09-17 主人当场纠正过一次）。
+     *
+     * 曾经加过一个 `announce` 开关：守密人声明"这件事我在正文里写过了"，
+     * 就不弹这条状态变化提示，理由是"同一件事说两遍出戏"。
+     * **那是错的，已经撤掉。** 主人的原话：
+     * 「获得新物品的提示很朴素一个弹窗啊」——
+     * 「状态可见」属于**框架**，不属于特效；它是玩家确认"系统真的把这笔账记上了"的唯一凭据。
+     * 少一条提示不会让画面变干净，只会让玩家**莫名其妙**：
+     * 东西到底进没进背包？血到底掉没掉？他只能自己猜。
+     *
+     * 判据（写死在这里，别再有人加回来）：
+     * **宁可重复，不可缺失。** 叙事里写过一遍，不妨碍这里再确认一遍；
+     *  反过来，叙事里含糊带过、提示又没了，就是纯粹的信息丢失。
+     */
+
     if (t.startsWith('vitals.')) {
       const key = t.slice('vitals.'.length);
       const b = typeof a.before === 'number' ? a.before : null;
@@ -1511,6 +1702,86 @@ function describeChanges(
 /** 同一轮里可能分几次调用 applyModelDeltas（状态 + 地点），在这个窗口内的提示合并 */
 const CHANGE_MERGE_MS = 4000;
 
+/**
+ * 引擎自己记的临时疯狂轮数（`flags.疯狂轮数`）。
+ *
+ * 为什么需要它：引擎写 `flags.临时疯狂` 时写的是**一句描述**
+ * （"理智骤降 6 点，陷入临时疯狂"），里面没有轮数；
+ * 真正的计数存在 `疯狂轮数` 这个键上（写入点在下面 `applyModelDeltas` 的推进处）。
+ * 只读 `临时疯狂` 会让 `insanity().turns` **永远等于默认的 3**（协作方第 7 版 §2.1）。
+ *
+ * 这里统一取一份，给 `insanity()` 与检定惩罚两处用 ——
+ * 口径与 `tickInsanity(flags, prevTurns)` 一致：**引擎记的轮数是真源**。
+ */
+function insanityTurnsHint(flags: Record<string, unknown> | undefined): number | undefined {
+  const n = Number(flags?.['疯狂轮数']);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * 模型即兴开打的敌人，血量用**敌对者表**兜底（协作方第 7 版 §4）。
+ *
+ * ## 为什么需要它
+ * `castFromBestiary` 只有作者手动点「投入战斗」时才走。实战里模型用
+ * `combat.foes add` 开打时，血量取它临场写的值（没写就缺省 10），
+ * 而图鉴里显示的 `hp` 来自模组表 —— **同一只东西，打的时候一个数、图鉴里另一个数**。
+ * 提示词已经要求"照表写、不得临场改"，但那靠模型自觉；这里补一道引擎兜底，
+ * 守住 R38"数值别飘"的初衷。
+ *
+ * ## 规矩
+ * **模型显式给了就以模型为准**，只补它没给的（hp 或 max 缺哪个补哪个）。
+ * 表里也没有的，一律原样放行，让 `applyDeltas` 按它自己的缺省处理。
+ *
+ * ## 为什么放在这里而不是 `gameState.ts`
+ * 模组表 `module.monsters` 在 UI 层，core 不该反向依赖 UI（这条边界是自己定的，别破）。
+ * 名字匹配复用 `core` 的 `findEntry`（宽松匹配：精确 → 互相包含），不另写一份。
+ */
+function fillFoeNumbers(
+  deltas: StateDelta[],
+  monsters: readonly ModuleMonster[] | undefined
+): StateDelta[] {
+  if (!monsters?.length) return deltas;
+  const table: BestiaryEntry[] = monsters.map((m) => ({
+    id: m.id,
+    name: m.name,
+    look: m.look,
+    hp: m.hp,
+    attack: m.attack,
+    behavior: m.behavior,
+    weakness: m.weakness,
+  }));
+
+  let touched = false;
+  const out = deltas.map((d) => {
+    if (!d || d.target !== 'combat.foes' || d.op !== 'add') return d;
+    const v = d.value;
+    if (!v || typeof v !== 'object') return d;
+    const foe = v as Foe & { max?: number };
+    const name = String(foe.name ?? '').trim();
+    if (!name) return d;
+    const hit = findEntry(table, name);
+    if (!hit) return d;
+
+    const num = (x: unknown): number | null => {
+      const n = Number(x);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const givenHp = num(foe.hp);
+    const givenMax = num(foe.max);
+    const tableHp = num(hit.hp);
+
+    // 模型两个都给了 → 原样放行
+    if (givenHp !== null && givenMax !== null) return d;
+    // 表里也没有 → 补不了，原样放行
+    if (givenHp === null && tableHp === null) return d;
+
+    touched = true;
+    const hp = givenHp ?? tableHp!;
+    return { ...d, value: { ...foe, hp, max: givenMax ?? hp } };
+  });
+  return touched ? out : deltas;
+}
+
 interface Store {
   messages: Message[];
   gameState: GameState;
@@ -1559,6 +1830,19 @@ interface Store {
   dyingNote: string | null;
   /** 正文排版设置 */
   typography: Typography;
+  /** 守密人口吻（R8）。只改"怎么说"，不改任何规则 */
+  gmVoice: GmVoice;
+  /**
+   * 带图战报的**总开关**：关键节点（回溯锚点）自动配一张图。
+   *
+   * **默认关**：它会真的花钱（每张图一次生图调用），默认开着等于替主人决定支出。
+   * 想开就在设置里打开，或随时对单条消息手动生成。
+   */
+  autoIllustrate: boolean;
+  /** 跨局的生涯记录与成就（R13/R30）。**独立于单局存档**，开新团不清 */
+  career: Career;
+  /** 刚刚这一次结档**新解锁**的成就（结档页高亮用）。不落盘，只是过路信息 */
+  lastUnlocked: AchievementDef[];
   /** 音频设置（氛围音 / 自配 BGM / 判定音效） */
   audio: AudioConfig;
 
@@ -1611,6 +1895,39 @@ interface Store {
   clearChanges(): void;
   /** 当前负重（界面与提示词共用同一份计算，别各算一遍） */
   encumbrance(): Encumbrance;
+  /**
+   * 伤口现状 + 止血依据（界面与提示词共用同一份计算）。
+   * 返回的 `note` 已经是可以直接拼进提示词的整段话（没伤口时是 null）。
+   */
+  woundStatus(): { wounds: Wound[]; basis: HealBasis; relief: 'stop' | 'relief' | 'none'; note: string | null };
+  /** 临时疯狂现状（有界可恢复的数值惩罚），`note` 可直接拼进提示词 */
+  insanity(): {
+    active: boolean;
+    turns: number;
+    penalty: number;
+    label: string;
+    note: string | null;
+  };
+  /**
+   * 图鉴现状（R38）。
+   *
+   * `cards` 已经把"没交过手就不给弱点"这件事做完（见 `bestiaryCard`），
+   * UI 直接画，**不要再自己判一次可见度**——判两处迟早漏一处。
+   */
+  bestiary(): {
+    unlocked: boolean;
+    cards: BestiaryCard[];
+    seen: number;
+    fought: number;
+    total: number;
+  };
+  /**
+   * 按敌对者表的数值把它们放进战斗（`castFromBestiary` 的落点）。
+   *
+   * 传空数组＝投放表里**全部**有名字的。返回真正投进去的名字，
+   * 调用方可以据此给一句"XX 已入场"的反馈。
+   */
+  startCombatFrom(entries: BestiaryEntry[], names?: string[]): string[];
   /** 取走待注入的濒死引导（取完即清，保证只说一次） */
   consumeDyingNote(): string | null;
   /** 内部用：设置 / 清掉濒死引导 */
@@ -1627,6 +1944,28 @@ interface Store {
   clearModuleDerived(): void;
   /** 更新正文排版设置 */
   setTypography(patch: Partial<Typography>): void;
+  /** 换守密人口吻（R8）。只影响"怎么讲"，不影响任何规则与数值 */
+  setGmVoice(id: GmVoice): void;
+  /** 带图战报总开关（关键节点自动生图）。默认关 —— 开了会真的花钱 */
+  setAutoIllustrate(on: boolean): void;
+  /**
+   * R13/R30：把**这一局**记进生涯（并结算成就）。
+   *
+   * 只该在**结档时调用一次** —— 它会 +1 局。返回这一局**新解锁**的成就
+   * （已经拿过的不再返回，用户要的"一次性防刷"）。
+   * 幂等性靠调用方保证：`App.tsx` 只在 `ending.at` 变化那一次调。
+   */
+  recordCurrentRun(): AchievementDef[];
+  /** R14：把当前幕号设成 `index`（0 起） */
+  setActIndex(index: number): void;
+  /**
+   * R14：展开第 `index` 幕的导演稿（不传就用当前幕号）。
+   *
+   * 会自动跳过"已经展开过"的那一幕（**不重复花钱**）。
+   * 返回是否拿到了稿子；没拿到（没配 Key / 模型没给 / 幕不存在）一律返回 false，
+   * **不抛异常、也不挡游戏** —— 展开失败只是少一份幕后材料，故事照跑。
+   */
+  expandAct(index?: number): Promise<boolean>;
   /** 更新音频设置（会同步启动/停止氛围音与 BGM） */
   setAudio(patch: Partial<AudioConfig>): void;
   addChronicle(text: string, location?: string): void;
@@ -1766,6 +2105,18 @@ export function migrateSave(raw: unknown): Partial<SaveFile> {
     if (!Array.isArray(gs.inventory)) gs = { ...gs, inventory: [] };
     if (!Array.isArray(gs.clues)) gs = { ...gs, clues: [] };
     if (!Array.isArray(gs.npcsAlive)) gs = { ...gs, npcsAlive: [] };
+    /*
+     * 伤口是 09-17 加的可选字段：旧档没有就是"没有伤口"，**不需要升 `SAVE_VERSION`**
+     * （可选新增字段不升，替换/重命名结构才升 —— 判据见台账第 4 节）。
+     * 这里只是把类型拢一下，避免下游到处写 `?? []`。
+     */
+    if (!Array.isArray(gs.wounds)) gs = { ...gs, wounds: [] };
+    /*
+     * 图鉴台账（R38）同样是可选新增字段：旧档没有就是"什么都没见过"。
+     * 与 `wounds` / `npcNotes` 同一判据 —— **不升 `SAVE_VERSION`**。
+     */
+    if (!Array.isArray(gs.encountered)) gs = { ...gs, encountered: [] };
+    if (!Array.isArray(gs.fought)) gs = { ...gs, fought: [] };
     if (!gs.flags || typeof gs.flags !== 'object') gs = { ...gs, flags: {} };
     // 濒死标记与结档信息是后加的
     if (typeof gs.dying !== 'boolean') gs = { ...gs, dying: false };
@@ -1845,6 +2196,10 @@ export const useStore = create<Store>((set, get) => ({
   lastChanges: null,
   dyingNote: null,
   typography: loadTypography(),
+  gmVoice: loadGmVoice(),
+  autoIllustrate: loadFlag('trpg.autoIllustrate', false),
+  career: loadCareer(),
+  lastUnlocked: [],
   audio: loadAudioConfig(),
 
   addMessage(m) {
@@ -1866,8 +2221,9 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   clearMessages() {
-    saveJson('trpg.messages', []);
-    saveJson('trpg.snapshots', {});
+    // 结构性操作：立刻落盘，避免待写的旧消息稍后把它盖回来
+    saveJsonNow('trpg.messages', []);
+    saveJsonNow('trpg.snapshots', {});
     set({ messages: [], snapshots: {} });
   },
 
@@ -1883,11 +2239,17 @@ export const useStore = create<Store>((set, get) => ({
         pendingChecks: [],
       },
     };
-    // 清掉已被删除消息的快照，并按回合数上限裁剪（丢最旧的）
+    /*
+     * 清掉已被删除消息的快照，再按回合数上限裁剪。
+     *
+     * **锚点豁免**（G1）：剪辑只从最旧的**非锚点**开刀。
+     * 原来是一律丢最旧的，长局里会把早期关键抉择一起裁掉 ——
+     * 那正是玩家最想回去的岔路口，回溯功能等于只对最近一截有效。
+     * 判据在 `pruneSnapshots()`（纯函数、可单测），这里只负责喂数据。
+     */
     const alive = new Set(s.messages.map((m) => m.id));
     const entries = Object.entries(next).filter(([k]) => alive.has(k));
-    while (entries.length > SNAPSHOT_LIMIT) entries.shift();
-    const pruned = Object.fromEntries(entries);
+    const pruned = Object.fromEntries(pruneSnapshots(entries, SNAPSHOT_LIMIT));
     saveJson('trpg.snapshots', pruned);
     set({ snapshots: pruned });
   },
@@ -1964,11 +2326,12 @@ export const useStore = create<Store>((set, get) => ({
     const gameState = snap?.gameState ?? s.gameState;
     const chronicle = snap?.chronicle ?? s.chronicle;
     const summary = snap?.summary ?? s.summary;
-    saveJson('trpg.messages', kept);
-    saveJson('trpg.gameState', gameState);
-    saveJson('trpg.chronicle', chronicle);
-    saveJson('trpg.summary', summary);
-    saveJson('trpg.snapshots', snapshots);
+    // 回溯是结构性操作：立刻落盘（待写的旧消息不能晚一步盖回来）
+    saveJsonNow('trpg.messages', kept);
+    saveJsonNow('trpg.gameState', gameState);
+    saveJsonNow('trpg.chronicle', chronicle);
+    saveJsonNow('trpg.summary', summary);
+    saveJsonNow('trpg.snapshots', snapshots);
     /*
      * 待掷队列要按快照恢复，不能一律清空。
      * 否则"GM 一次要求 2 个检定 → 掷掉 1 个 → 想退回去重来"时，另一个检定就永远找不回来了。
@@ -2334,6 +2697,97 @@ export const useStore = create<Store>((set, get) => ({
     );
   },
 
+  /**
+   * 临时疯狂现状（界面与提示词共用同一份计算）。
+   * `note` 已经是可以直接拼进提示词的整段话（没疯时是 null）。
+   */
+  insanity() {
+    const rs = getRuleset(get().rulesetId);
+    const mode = rs.mainDice === '1d100' ? 'percent' : 'modifier';
+    const flags = get().gameState.flags;
+    const ins = insanityOf(flags, mode, insanityTurnsHint(flags));
+    return { ...ins, note: insanityNote(ins) };
+  },
+
+  /**
+   * 伤口现状 + 止血依据。给两处用：
+   *   - `App.tsx` 拼本轮提示词（有伤口才注入 `woundNote`）；
+   *   - 角色卡/状态面板要知道"现在能不能止住"。
+   * 纯读，不改状态。
+   */
+  woundStatus() {
+    const { gameState, character } = get();
+    const wounds = gameState.wounds ?? [];
+    const basis: HealBasis = healBasis(gameState.inventory, character.skills);
+    const relief = woundRelief(basis);
+    return { wounds, basis, relief, note: woundNote(wounds, basis, relief) };
+  },
+
+  /**
+   * 图鉴（R38）。
+   *
+   * 三件事按顺序做完才算数：
+   *   ① **总开关**：这一局结档了没有（没结档一律不给看，见 `bestiaryUnlocked`）；
+   *   ② 表里每一条按台账算出可见档位；
+   *   ③ 由 `bestiaryCard()` **统一裁字段**（没见过就不给弱点）。
+   *
+   * 为什么把 ②③ 都放在 core 的纯函数里：判据要能单测。
+   * UI 只负责画卡片，不许自己再判一次"能不能看弱点"——
+   * 那种判据一旦有两份，迟早会有一处忘了改。
+   *
+   * ⚠️ **这个方法每次调用都返回新对象，禁止直接塞进 zustand 选择器**
+   * （`useStore((s) => s.bestiary())` 会无限重渲染 → 整页空白，
+   * 2026-09-17 线上真出过一次）。组件请改用 `buildBestiary` + `useMemo`，
+   * 或者选稳定切片（`s.module.monsters` 等）再自己算。
+   * 这里保留方法只是为了测试与非组件代码方便。
+   */
+  bestiary() {
+    const { module: mod, gameState } = get();
+    return buildBestiary(
+      (mod.monsters ?? []).map((m) => ({
+        id: m.id,
+        name: m.name,
+        look: m.look,
+        hp: m.hp,
+        attack: m.attack,
+        behavior: m.behavior,
+        weakness: m.weakness,
+      })),
+      gameState.encountered ?? [],
+      gameState.fought ?? [],
+      gameState.ending
+    );
+  },
+
+  /**
+   * 按敌对者表投放战斗。
+   *
+   * 与 `flags` 那条口径一致：**引擎负责把数值落成事实，模型只负责演**。
+   * 走 `applyModelDeltas` 而不是自己改 state —— 这样血量 clamp、名字必填、
+   * 图鉴台账（`encountered`）全都自动生效，不会多开一条绕过校验的路。
+   */
+  startCombatFrom(entries, names) {
+    const table: BestiaryEntry[] = (entries ?? []).map((m) => ({
+      id: m.id,
+      name: m.name,
+      look: m.look,
+      hp: m.hp,
+      attack: m.attack,
+      behavior: m.behavior,
+      weakness: m.weakness,
+    }));
+    // 不点名 = 表里全部有名字的一起上（"这一场该来几只"只有作者知道，不猜）
+    const picked = (names && names.length > 0 ? names : allNamedEntries(table)).slice();
+    const deltas = castFromBestiary(table, picked);
+    if (deltas.length === 0) return [];
+    get().applyModelDeltas([
+      { target: 'combat.active', op: 'set', value: true },
+      { target: 'combat.round', op: 'set', value: 1 },
+      ...deltas,
+    ] as never);
+    return deltas.map((d) => d.value.name);
+  },
+
   consumeDyingNote() {
     const note = get().dyingNote;
     if (note) set({ dyingNote: null });
@@ -2348,6 +2802,89 @@ export const useStore = create<Store>((set, get) => ({
     const next = { ...get().typography, ...patch };
     saveJson('trpg.typography', next);
     set({ typography: next });
+  },
+
+  setGmVoice(id) {
+    // 认不出来的一律退回默认，不让一个坏值把提示词写坏
+    const safe = gmVoiceOf(id).id;
+    saveJsonNow('trpg.gmVoice', safe);
+    set({ gmVoice: safe });
+  },
+
+  recordCurrentRun() {
+    const s = get();
+    const run = summarizeRun(s.messages, s.gameState, s.chronicle);
+    const { career, unlocked } = recordRun(s.career, run);
+    // 生涯是"记录"：立刻落盘，别让它跟别的待写混在一起
+    saveJsonNow('trpg.career', career);
+    set({ career, lastUnlocked: unlocked });
+    return unlocked;
+  },
+
+  setAutoIllustrate(on) {
+    saveJsonNow('trpg.autoIllustrate', Boolean(on));
+    set({ autoIllustrate: Boolean(on) });
+  },
+
+  setActIndex(index) {
+    const n = Math.max(0, Math.floor(Number(index) || 0));
+    if (normalizeActIndex(get().gameState.actIndex) === n) return;
+    const next = { ...get().gameState, actIndex: n };
+    // 幕号是**结构**：换幕之后马上要展开新的一幕，立刻落盘免得中间态被后面的写盖掉
+    saveJsonNow('trpg.gameState', next);
+    set({ gameState: next });
+  },
+
+  async expandAct(index) {
+    const s = get();
+    const acts = parseActs(s.module.acts);
+    const idx = index ?? normalizeActIndex(s.gameState.actIndex);
+    const cur = actAt(acts, idx);
+    // 没有幕结构 / 幕号越界 → 静默不做（短模组与手写模组走这条路）
+    if (!cur) return false;
+    // 已经展开过就别再花钱了
+    if (isActExpanded(s.gameState.actDetails?.[String(idx)])) return true;
+    if (!s.config.apiKey) return false;
+
+    const genre = getGenre(s.genreId, s.customGenres);
+    /*
+     * 喂给模型的"既成事实"：编年史是唯一的客观事实源（摘要只是索引）。
+     * 取最近 40 条足够这一段用，再多也只是烧 token。
+     */
+    const facts = [
+      ...s.chronicle.slice(-40).map((c) => `${c.turn}. ${c.text}`),
+      s.summary ? `（更早的事：${s.summary}）` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      const out = await generateJson<{ detail?: string }>(
+        actExpandSystemPrompt(
+          genre,
+          s.module.title,
+          s.module.acts,
+          idx + 1,
+          acts.length,
+          cur.title,
+          cur.summary
+        ),
+        actExpandUserPrompt(s.module.title, idx + 1, facts),
+        s.config
+      );
+      const detail = String(out?.detail ?? '').trim();
+      if (!detail) return false;
+      const next = {
+        ...get().gameState,
+        actDetails: { ...(get().gameState.actDetails ?? {}), [String(idx)]: detail },
+      };
+      saveJsonNow('trpg.gameState', next);
+      set({ gameState: next });
+      return true;
+    } catch {
+      // 展开失败不该影响这一局 —— 只是这一章少一份幕后材料
+      return false;
+    }
   },
 
   setAudio(patch) {
@@ -2453,11 +2990,12 @@ export const useStore = create<Store>((set, get) => ({
         return here ? [here] : [];
       })(),
     });
-    saveJson('trpg.messages', messages);
-    saveJson('trpg.gameState', gameState);
-    saveJson('trpg.chronicle', []);
-    saveJson('trpg.summary', '');
-    saveJson('trpg.snapshots', {});
+    // 开新团：立刻落盘
+    saveJsonNow('trpg.messages', messages);
+    saveJsonNow('trpg.gameState', gameState);
+    saveJsonNow('trpg.chronicle', []);
+    saveJsonNow('trpg.summary', '');
+    saveJsonNow('trpg.snapshots', {});
     /*
      * **"清 fromModule 类数据"不属于开新团**（协作方 B3 + N2）。
      *
@@ -2509,6 +3047,7 @@ export const useStore = create<Store>((set, get) => ({
     const raw = resolveCheckTarget(key, get().character, rs) ?? 0;
     // DnD 要把属性分值折算成加值（15 → +2）；技能本身已是加值则原样
     const base = rs.toModifier ? rs.toModifier(key, raw) : raw;
+    const mode = rs.mainDice === '1d100' ? 'percent' : 'modifier';
     /*
      * 超重惩罚：**在掷骰之前**减进目标值。
      * 身上扛太多东西，做什么都该更吃力——这是物理，不是难度选择。
@@ -2517,13 +3056,18 @@ export const useStore = create<Store>((set, get) => ({
     const enc = encumbranceOf(
       get().gameState.inventory,
       rs.carryCapacity ? rs.carryCapacity(get().character.characteristics) : null,
-      rs.mainDice === '1d100' ? 'percent' : 'modifier'
+      mode
     );
+    /*
+     * 临时疯狂惩罚：同样在掷骰前减进目标值（用户 09-16 拍板"状态要有数值后果"）。
+     * 有界、可恢复，解除即消除 —— 判据全在 `core/insanity.ts`，这里只取数。
+     */
+    const ins = insanityOf(get().gameState.flags, mode, insanityTurnsHint(get().gameState.flags));
     /*
      * 描述加权：**在掷骰之前**加进目标值。
      * 放在这里（而不是事后改结果）才能保证判定、成功率与结果标签三者一致。
      */
-    const target = base + (bonus || 0) + enc.penalty;
+    const target = base + (bonus || 0) + enc.penalty + ins.penalty;
     // COC 走百分骰；其它规则包退回主骰表达式（如 d20）
     const percentile = rs.mainDice === '1d100';
     if (percentile) {
@@ -2558,23 +3102,230 @@ export const useStore = create<Store>((set, get) => ({
 
   applyModelDeltas(deltas) {
     const { gameState, rulesetId, character } = get();
-    const report = applyDeltas(gameState, deltas, {
+    /*
+     * 敌人数值兜底：模型用 `combat.foes add` 即兴开打时，
+     * 缺的 hp / max 用模组敌对者表补上 —— 否则"打的时候一个数、图鉴里另一个数"
+     * （判据在 `fillFoeNumbers`，只补没给的，模型写了就以模型为准）。
+     */
+    const report = applyDeltas(gameState, fillFoeNumbers(deltas, get().module.monsters), {
       ruleset: getRuleset(rulesetId),
       vitalsMax: deriveVitalsMax(character, rulesetId),
     });
     // 模型偶尔会把模组里的 {{称呼}} 占位符漏进状态（地点/线索/物品名）。
     // 状态是要显示给玩家的，进库前统一替换成真实值。
     report.state = sanitizeStateTokens(report.state, character);
+
+    /*
+     * ---------------------------------------------------------------------
+     * 伤口：先"记账"，再"结算"
+     * ---------------------------------------------------------------------
+     * 顺序不能反。本轮模型造成的伤害要先变成伤口，本轮才谈得上失血——
+     * 反过来的话，新伤口要等下一轮才生效，玩家会觉得"我明明刚被砍了却没掉血"。
+     *
+     * 这一步只动 `wounds`，不改 vitals —— 血的增减统一走下面的 applyDeltas，
+     * 这样"濒死冻结"那道闸门对它一样有效（倒地的人不该被伤口继续放血）。
+     */
+    const rsForWounds = getRuleset(rulesetId);
+    const lifeDef = rsForWounds.vitalDefs.find((v) => isLifeVital(v, v.key));
+    const lifeKey = lifeDef?.key ?? 'hp';
+    const lifeMin = lifeDef?.min ?? 0;
+    const hpNow = report.state.vitals[lifeKey];
+
+    /*
+     * ① 守密人**显式申报**的伤口（`flags.受伤` = "左臂被划开的口子"）。
+     *
+     * 注意这里读的是 `受伤` 而不是 `伤口` —— 引擎自己写的显示用 flag 叫 `伤口`
+     * （值形如"伤口·每轮 -1"）。两者**必须是不同的键**，否则引擎下一轮会把自己的
+     * 显示文案当成一次新申报读回来，伤口一轮接一轮自我复制。
+     * 一个键只承担一个职责：`受伤` 是输入（守密人写），`伤口` 是输出（引擎写）。
+     */
+    const declared = report.state.flags?.['受伤'];
+    const declaredList =
+      typeof declared === 'string'
+        ? [declared]
+        : Array.isArray(declared)
+          ? declared.map((x) => String(x))
+          : [];
+    let wounds: Wound[] = [...(report.state.wounds ?? [])];
+    let bornThisTurn = false;
+    for (const text of declaredList) {
+      const w = parseWound(fillPlayerTokens(text, character), wounds);
+      if (w) {
+        wounds.push(w);
+        bornThisTurn = true;
+      }
+    }
+    /*
+     * ② 引擎**自己推**的伤口：本轮主生命条一次掉了 2 点以上。
+     * 已经流着血的（wounds 非空）不再叠加——一轮连挨两下不该变成两处流血，
+     * 那只会让本来就很薄的 10 滴血更快见底。
+     */
+    if (wounds.length === 0 && !report.state.dying && !report.state.ending) {
+      for (const a of report.applied) {
+        if (a.delta.target !== `vitals.${lifeKey}`) continue;
+        if (typeof a.before !== 'number' || typeof a.after !== 'number') continue;
+        const tier = woundFromDamage(a.before - a.after);
+        if (!tier) continue;
+        const text = a.delta.reason?.trim() || defaultWoundText(tier);
+        wounds.push({
+          id: `auto-${text.slice(0, 12)}`,
+          text,
+          tier,
+          turns: 0,
+        });
+        bornThisTurn = true;
+        break;
+      }
+    }
+
+    /*
+     * ③ 失血结算：**每轮一次**，额度固定（见 wounds.ts「为什么额度这么小」）。
+     * 濒死 / 已结档 / 血已见底一律不流 —— 与濒死冻结同一条口径。
+     *
+     * **刚造成的伤口当轮不流血**：这一轮它已经用"掉那几点血"付过账了，
+     * 再补一次失血就是同一件事扣两遍，玩家会觉得系统在趁火打劫。
+     * 从**下一轮**起才开始按轮结算（这正是"持续伤害"该有的样子）。
+     *
+     * 为什么用不着再掷骰：额度是常数，掷骰只会让"流血"变成一场随机数游戏，
+     * 而玩家能做的处置（止血）本来就该是决定性的，不该赌。
+     */
+    let bleedNote: string | null = null;
+    if (
+      !bornThisTurn &&
+      shouldBleed({
+        wounds,
+        hp: hpNow,
+        hpMin: lifeMin,
+        dying: report.state.dying,
+        ending: Boolean(report.state.ending),
+      })
+    ) {
+      const amount = totalBleed(wounds);
+      const bleedReport = applyDeltas(
+        { ...report.state, wounds },
+        [bleedDelta(amount)],
+        { ruleset: rsForWounds, vitalsMax: deriveVitalsMax(character, rulesetId) }
+      );
+      report.state = bleedReport.state;
+      report.applied.push(...bleedReport.applied);
+      report.rejected.push(...bleedReport.rejected);
+      if (bleedReport.applied.length > 0) {
+        bleedNote = `伤口失血 ${amount} 点`;
+      }
+      wounds = wounds.map((w) => ({ ...w, turns: w.turns + 1 }));
+
+      /*
+       * 结痂：光靠时间自己收口的，这一轮之后就不再算了
+       * （判据在 `healedByTime`，轻的快、重的不会自己好）。
+       *
+       * 为什么不让人为处理才有意义：一处擦伤若永远流着，
+       * "既无医疗物品又不会急救"的角色就会稳定地流到死 —— 那正是用户报过的
+       * "我总共就 10 滴血，也太刺激了"。自愈让轻伤有终点，重伤仍需人处理。
+       *
+       * 清掉之后 `woundFlagText` 会变 null，下面那段会自动把 `flags.伤口` 删掉，
+       * 状态栏不会再挂着"还在流"。
+       */
+      const scabbed = wounds.filter(healedByTime);
+      if (scabbed.length > 0) {
+        wounds = wounds.filter((w) => !healedByTime(w));
+        const scabText = `伤口自己结痂、止住了（${scabbed.map((w) => w.text).join('、')}）`;
+        bleedNote = bleedNote ? `${bleedNote}；${scabText}` : scabText;
+      }
+    }
+
+    /*
+     * ④ 止血：依据够不够（见 `healBasis` / `woundRelief`）。
+     *
+     * 触发条件是**守密人写了处理动作**，而不是"引擎觉得够了就自动止住"——
+     * 止不止得住是一件发生在故事里的事，引擎只负责在它发生之后把账结掉。
+     * 判据是 `flags.伤口处理`（守密人申报），处理完就清掉它。
+     */
+    const treating = Boolean(report.state.flags?.['伤口处理']);
+    if (wounds.length > 0 && treating) {
+      const basis = healBasis(report.state.inventory, character.skills);
+      const relief = woundRelief(basis);
+      if (relief === 'stop') {
+        wounds = [];
+        bleedNote = '伤口已止住';
+      } else if (relief === 'relief') {
+        // 只剩轻伤：临时处理压住了大半，降一档而不是清零
+        wounds = wounds.map((w) => ({
+          ...w,
+          tier: w.tier === 'severe' ? 'wound' : 'scratch',
+        }));
+      }
+    }
+
+    if (wounds.length > 0) {
+      report.state = { ...report.state, wounds };
+    } else if (report.state.wounds?.length) {
+      report.state = { ...report.state, wounds: [] };
+    }
+
     // 理智骤降 / 永久疯狂 / 濒死 / 死亡：引擎检测，写进 flags 让 GM 演出、UI 显示
     const events = detectStatusEvents(report.applied, report.state);
-    if (events.length > 0) {
+    let insanityLine: string | null = null;
+    {
       const flags = { ...report.state.flags };
+      const beforeIns = { ...flags };
+
+      /*
+       * 临时疯狂：**先推进窗口，再接受本轮新触发的**。
+       *
+       * 顺序要紧。若先写新值再推进，刚发疯的这一轮就会被立刻减掉一轮；
+       * 而"本轮理智骤降 ≥5"和"上一轮的疯狂还在计时"是两件事，
+       * 前者是天数 1 的开始，后者才该 −1。
+       *
+       * 为什么用 `prevTurns` 而不是每次都从 flag 读：守密人常把 flag 写成
+       * 一句描述（"他抓着头发喃喃自语"），那句子里没有轮数。每次都从 flag 读
+       * 会永远读到默认值、永远解除不掉。所以引擎把自己记的轮数（存在 `疯狂轮数`）
+       * 当作真源，守密人的描述只当开窗的触发。
+       */
+      const tick = tickInsanity(flags, insanityTurnsHint(flags));
+      if (tick.next === false) {
+        delete flags['临时疯狂'];
+        delete flags['疯狂轮数'];
+      } else {
+        flags['疯狂轮数'] = tick.next;
+      }
+
       for (const e of events) {
-        if (e.kind === 'temp_insanity') flags['临时疯狂'] = e.text;
-        else if (e.kind === 'permanent_insanity') flags['永久疯狂'] = true;
+        if (e.kind === 'temp_insanity') {
+          flags['临时疯狂'] = e.text;
+          flags['疯狂轮数'] = INSANITY_TURNS;
+          insanityLine = e.text;
+        } else if (e.kind === 'permanent_insanity') flags['永久疯狂'] = true;
         else if (e.kind === 'dying') flags['濒死'] = true;
         else if (e.kind === 'death') flags['濒临死亡'] = true;
       }
+
+      /*
+       * 守密人把 `flags.临时疯狂` 设成 `false` = **提前解除**（用户要的"解除即消除"）。
+       * 注意判据必须放在上面那轮推进**之后**：推进只删键、不写 `false`，
+       * 所以这里读到 `false` 只可能是守密人自己写的。
+       */
+      if (beforeIns['临时疯狂'] === false) {
+        delete flags['临时疯狂'];
+        delete flags['疯狂轮数'];
+      }
+
+      /*
+       * 伤口进 flags：状态栏是**动态渲染全部中文 flags** 的，
+       * 所以只要把这句话写进去，玩家就能看见"伤口·每轮 -1"，
+       * 不用再动任何 UI —— 这正是"状态变化必须可见"那条硬约定要的效果。
+       *
+       * 三个键的分工要分清（混用会出事，见 ①里的说明）：
+       *   - `受伤`：**输入**通道，守密人申报新伤口用；
+       *   - `伤口处理`：**输入**通道，守密人申报"我处理了"用，一次性，处理完就删；
+       *   - `伤口`：**输出**通道，引擎写的显示文案，永远不读回来。
+       * 伤口清空时把输出 flag 一并删掉，否则会出现"伤好了但状态栏还写着流血"。
+       */
+      const woundText = woundFlagText(wounds);
+      if (woundText) flags['伤口'] = woundText;
+      else delete flags['伤口'];
+      delete flags['伤口处理'];
+      // `受伤` 是守密人本轮写的输入，消费掉——留着下一轮会被当成一次新申报
+      delete flags['受伤'];
       report.state = { ...report.state, flags };
     }
     /*
@@ -2670,6 +3421,24 @@ export const useStore = create<Store>((set, get) => ({
         tone: 'warn',
       });
     }
+    /*
+     * 伤口在这一轮发生了什么，要说清楚。
+     *
+     * 数值条的变化本身已经有一条（"生命 5 → 4"），但玩家看不出**为什么**又掉了——
+     * 那是伤口在放血。用户报的原话就是"我包扎了，怎么还隔段时间掉血"，
+     * 补充这一句正好回答那个疑问。止住了也要报，那是好消息。
+     */
+    if (bleedNote) {
+      lines.push({ text: bleedNote, tone: bleedNote.includes('止住') ? 'good' : 'down' });
+    }
+    /*
+     * 疯没疯、缓过来没有，也要说一声。
+     * 它直接改检定目标值，玩家如果只在状态栏上看到一个标签、
+     * 却不知道"为什么这一掷平白无故难了 20"，那这条机制就是隐形的。
+     */
+    if (insanityLine) {
+      lines.push({ text: `${insanityLine}（检定会受影响，过一阵会缓过来）`, tone: 'warn' });
+    }
     const now = Date.now();
     const prev = get().lastChanges;
     const sameTurn = Boolean(prev) && now - prev!.ts < CHANGE_MERGE_MS;
@@ -2727,9 +3496,10 @@ export const useStore = create<Store>((set, get) => ({
       snapshots: data.snapshots ?? s.snapshots,
     }));
     if (data.character) localStorage.setItem('trpg.character', JSON.stringify(data.character));
-    if (data.module) saveJson('trpg.module', data.module);
-    if (data.gameState) saveJson('trpg.gameState', data.gameState);
-    if (data.messages) saveJson('trpg.messages', data.messages);
+    // 导入存档：整份替换，立刻落盘
+    if (data.module) saveJsonNow('trpg.module', data.module);
+    if (data.gameState) saveJsonNow('trpg.gameState', data.gameState);
+    if (data.messages) saveJsonNow('trpg.messages', data.messages);
     if (data.chronicle)
       localStorage.setItem('trpg.chronicle', JSON.stringify(data.chronicle));
     if (data.summary) localStorage.setItem('trpg.summary', JSON.stringify(data.summary));

@@ -19,12 +19,15 @@ import { APP_VERSION } from './src/version.js';
  * （no-store、带时间戳，绕过所有缓存），对不上就提示更新——比只靠 SW 稳。
  */
 const BUILD_ID = `${Date.now().toString(36)}`;
+/** 构建时间（ISO）。与 version.json 的 `at` 同源，供 `isNewer` 比较新鲜度用。 */
+const BUILD_AT = new Date().toISOString();
 
 export default defineConfig({
   // 相对路径：同一份 dist/ 可在任意静态托管（GitHub Pages 项目页/用户页、Netlify、Vercel、Cloudflare Pages、拖拽托管）直接跑，无需按平台改 base
   base: './',
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __BUILD_AT__: JSON.stringify(BUILD_AT),
   },
   plugins: [
     react(),
@@ -47,7 +50,7 @@ export default defineConfig({
           source: JSON.stringify({
             version: APP_VERSION,
             id: BUILD_ID,
-            at: new Date().toISOString(),
+            at: BUILD_AT,
           }),
         });
       },

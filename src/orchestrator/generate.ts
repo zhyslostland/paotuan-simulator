@@ -5,6 +5,7 @@
 import { chat, type ModelConfig } from '../providers/model.js';
 import type { Ruleset } from '../core/rulesets/types.js';
 import type { Genre } from '../core/genres.js';
+import { ACT_EXPAND_SPEC } from '../core/acts.js';
 
 /**
  * 模组篇幅。类型定义放在这里（而不是 ui/store），
@@ -372,6 +373,51 @@ const SCALE_GUIDE: Record<ModuleScale, string> = {
  * 注意 start_location / goal / stakes / urgency 都是"给玩家看的"，
  * 只能写玩家开局就能知道的信息——剧透会毁掉整局。
  */
+/* ============================================================
+ * R14 幕展开：把"当前这一幕"展开成导演稿
+ * ============================================================ */
+
+/** 生成"这一幕导演稿"的系统提示词（要求正文见 `core/acts.ts` 的 `ACT_EXPAND_SPEC`） */
+export function actExpandSystemPrompt(
+  genre: Genre,
+  moduleTitle: string,
+  skeleton: string,
+  actNo: number,
+  actTotal: number,
+  actTitle: string,
+  actSummary: string
+): string {
+  return [
+    '你是这场跑团的守密人，正在为一场**已经开跑的长篇**做幕后功课。',
+    `# 题材：${genre.name}`,
+    `## 叙事风格（只是基调，别在这里写正文）\n${genre.tone}`,
+    `# 模组：${moduleTitle || '（未命名）'}`,
+    `## 完整幕结构（共 ${actTotal} 幕）\n${skeleton}`,
+    ACT_EXPAND_SPEC,
+    `# 你要展开的是：第 ${actNo} 幕 · ${actTitle}`,
+    actSummary ? `（骨架里对这一幕的交代：${actSummary}）` : '',
+    '**只输出 JSON，不要任何解释文字。**格式：',
+    '{ "detail": "这一幕的导演稿，200-400 字，按上面的 1-5 点分条写" }',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/** 幕展开的用户提示词：把"已经发生过什么"喂进去（**不许改写**） */
+export function actExpandUserPrompt(
+  moduleTitle: string,
+  actNo: number,
+  recentFacts: string
+): string {
+  return [
+    `请为《${moduleTitle || '这一局'}》的第 ${actNo} 幕写导演稿。`,
+    recentFacts
+      ? `# 已经发生过的事（**这些是既成事实，只能遵守、不能改写**）\n${recentFacts}`
+      : '# 已经发生过的事\n（刚开局，还没有多少既成事实。）',
+    '记住：只写这一幕往后的走向，别重写已经发生的事，也别替玩家做决定。',
+  ].join('\n\n');
+}
+
 export function moduleSystemPrompt(genre: Genre, rs: Ruleset, scale: ModuleScale = 'short'): string {
   return `你是 TRPG 模组（剧本）创作助手，服务于《${rs.name}》。当前题材是 **${genre.name}**。
 你要产出的**不是一份完整剧本，而是一份"故事骨架"** —— AI 守密人会据此即兴生成具体场景与对白。

@@ -606,6 +606,38 @@ describe('武器不会被"用掉"', () => {
     }
   });
 
+  it('【回归 · 协作方 §2.2】裸字"送"不再误放行：护送/传送/运送 都不算失去武器', () => {
+    /*
+     * 上一版为了兜住 `送给老霍华德防身` 写了**单字** `送`，
+     * 于是"护送""传送""运送""呈送"全被误判成"失去武器"——
+     * 尤其是"护送"，玩家明明是在**做一件事**，引擎却把枪删了。
+     * 现在改成有目标的 `送给|送人` + `赠予|赠与`。
+     */
+    for (const reason of ['护送老霍华德回家', '传送到船上', '运送货物过去', '呈送文件给船长']) {
+      const { state, rejected } = applyDeltas(withGun(), [
+        { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason },
+      ]);
+      expect(rejected).toHaveLength(1);
+      expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(true);
+    }
+    // 而"真的送出去"仍然放行
+    for (const reason of ['送给老霍华德防身', '送人了', '赠予同伴', '赠与同伴']) {
+      const { state } = applyDeltas(withGun(), [
+        { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason },
+      ]);
+      expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(false);
+    }
+  });
+
+  it('【补充】"丢进/丢掉"这类也在失去清单里（穷举正反例时发现漏了）', () => {
+    for (const reason of ['丢进海里', '丢掉了']) {
+      const { state } = applyDeltas(withGun(), [
+        { target: 'inventory', op: 'remove', value: '柯尔特左轮', reason },
+      ]);
+      expect(state.inventory.some((i) => i.name === '柯尔特左轮')).toBe(false);
+    }
+  });
+
   it('弹药仍然可以正常消耗（别把消耗品一起管死）', () => {
     const { state } = applyDeltas(withGun(), [
       { target: 'inventory', op: 'dec', value: '子弹', amount: 1 },

@@ -56,6 +56,7 @@ const SEVERE_FLAG_TONE: Record<string, 'blood' | 'arcane'> = {
   濒死: 'blood',
   死亡: 'blood',
   流血: 'blood',
+  伤口: 'blood',
   重伤: 'blood',
   中毒: 'blood',
   临时疯狂: 'arcane',

@@ -176,6 +176,21 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
     expect(prompt).toContain('name 是必填的');
   });
 
+  it('剧透控制 G5：一次定好，全项目复用', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('剧透控制');
+    // 定调那句（带加粗，断言核心片段即可）
+    expect(prompt).toContain('你不是作者，你是那个不肯多说的守密人');
+    // 分层表：地点 / 身份 / 怪物名 / 弱点 / 真相，五档都在
+    expect(prompt).toContain('他去过，或故事里明确提到过');
+    expect(prompt).toContain('当场照面');
+    expect(prompt).toContain('**交过手之后**');
+    // 弱点是活路，交手过才给 —— 图鉴那套判据的提示词侧
+    expect(prompt).toContain('弱点不白给');
+    // 不许借旁白替玩家总结结论
+    expect(prompt).toContain('别在正文里替玩家总结');
+  });
+
   it('空间连贯：移动必须走 location（"一会在房间外，一会在房间内"）', () => {
     const prompt = buildPrompt();
     expect(prompt).toContain('空间与位置');
@@ -191,6 +206,44 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
   it('负面状态必须进 flags（"流血状态界面不显示"）', () => {
     const prompt = buildPrompt();
     expect(prompt).toContain('持续的负面状态一律写进 flags');
+  });
+
+  it('伤口由引擎接管：模型不许自己扣血（"包扎了还隔段时间掉血"）', () => {
+    const prompt = buildPrompt();
+    // 引擎按轮结算，模型只演出 —— 否则同一次流血会被扣两遍
+    expect(prompt).toContain('伤口（含流血）现在由引擎接管');
+    expect(prompt).toContain('你不要自己扣血');
+    expect(prompt).toContain('那是引擎的活，你再发一次就变成扣两遍');
+  });
+
+  it('旧伤/环境所致的伤走 flags.受伤 显式申报，且只申报一次', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('flags.受伤');
+    expect(prompt).toContain('只申报一次');
+    // 输出通道（flags.伤口）不能被守密人读回来，否则伤口会自我复制
+    expect(prompt).toContain('是**引擎自己写的显示文案**');
+  });
+
+  it('止血三依据写进了提示词，且"两样都没有"时不要求掷骰', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('止血要有依据');
+    expect(prompt).toContain('真正止住');
+    expect(prompt).toContain('临时处理');
+    expect(prompt).toContain('不要要求他掷骰');
+  });
+
+  it('处理到位走 flags.伤口处理，避免"说止住了还在渗"', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('flags.伤口处理');
+    expect(prompt).toContain('别一边说');
+  });
+
+  it('临时疯狂有数值后果，但模型不许自己扣（R37）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('这条状态**有数值后果**');
+    expect(prompt).toContain('有界、不叠加');
+    // 提前解除的口子要写清楚，否则守密人只能干等
+    expect(prompt).toContain('"target": "flags.临时疯狂"');
   });
 
   it('能声明结局收束（"上了救生艇却没触发任何结局"）', () => {
@@ -211,6 +264,89 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
     expect(prompt).toContain('npcNotes.');
     // 卡片是给玩家看的：底牌不能摆上来
     expect(prompt).toContain('不要写进来');
+  });
+});
+
+describe('敌对者表要告诉守密人"别提前讲"（R38 + G5）', () => {
+  const buildWithMonsters = () =>
+    buildSystemPrompt({
+      rulesetName: 'COC 7th',
+      genre: {
+        id: 'coc',
+        name: '经典克苏鲁',
+        blurb: '',
+        setting: '',
+        tone: '',
+        imageStyle: '',
+        castHint: '',
+      },
+      module: {
+        title: 't',
+        premise: '',
+        opening: '',
+        truth: '',
+        npcs: [],
+        locations: '',
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+        monsters: [
+          {
+            id: 'm1',
+            name: '雾中的巨影',
+            look: '湿漉漉的一团',
+            hp: 20,
+            attack: '爪击 1d8',
+            behavior: '受伤后退进雾里',
+            weakness: '怕火',
+          },
+        ],
+      },
+      character: {
+        name: '甲',
+        description: '',
+        personality: '',
+        mes_example: '',
+        characteristics: { str: 50 },
+        skills: { 侦查: 50 },
+      },
+      playerAddress: '甲先生',
+      gameState: {
+        vitals: { hp: 10, san: 60, mp: 10 },
+        companions: [],
+        inventory: [],
+        flags: {},
+        clues: [],
+        threads: [],
+        location: '走廊',
+        npcsAlive: [],
+        combat: { active: false, round: 0, foes: [] },
+      },
+      worldbook: [],
+      chronicle: [],
+    });
+
+  it('表里的数值照旧交给守密人（它得按这个演）', () => {
+    const p = buildWithMonsters();
+    expect(p).toContain('雾中的巨影');
+    expect(p).toContain('生命 20');
+    expect(p).toContain('怕火');
+  });
+
+  it('但明确告诉它"这一节只有你知道"、玩家那边按遭遇逐条解锁', () => {
+    const p = buildWithMonsters();
+    expect(p).toContain('这一节只有你知道');
+    expect(p).toContain('图鉴');
+    // 名字要跟表里的叫法一致，图鉴才认得出来是同一只
+    expect(p).toContain('尽量用上面这个叫法');
+  });
+
+  it('模型不许自己写 encountered / fought（那是引擎按真实遭遇记的）', () => {
+    const p = buildWithMonsters();
+    const allowed = p.match(/state_delta 允许的 target 前缀[^\n]*/)?.[0] ?? '';
+    expect(allowed).not.toContain('encountered');
+    expect(allowed).not.toContain('fought');
   });
 });
 

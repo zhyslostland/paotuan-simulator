@@ -1,11 +1,15 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useStore, type TurnSnapshot } from './store';
 import { getRuleset } from '../core/rulesets/index.js';
+import { passRate, unlockedAchievements, OUTCOME_LABEL, type AchievementDef } from '../core/career.js';
+import { summarizeRun } from './runSummary.js';
 import {
   buildArchiveMarkdown,
+  buildIllustratedReportHtml,
   buildJourneyMarkdown,
   buildResultMarkdown,
   copyText,
+  downloadHtml,
   downloadMarkdown,
   safeFilename,
   type ExportInput,
@@ -58,6 +62,118 @@ export function AnchorList({
   );
 }
 
+/** 一格统计 */
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-lg border border-ink-700 bg-ink-900/60 px-3 py-2">
+      <div className="text-[10px] tracking-wider text-mist-500">{label}</div>
+      <div className="mt-0.5 text-[15px] tabular-nums text-mist-100">{value}</div>
+      {hint && <div className="mt-0.5 text-[10px] text-mist-500/80">{hint}</div>}
+    </div>
+  );
+}
+
+/**
+ * 这一局的账 + 跨局生涯 + 成就（R13/R30）。
+ *
+ * 全部读**引擎已有的账**（编年史 / 检定卡 / 线索 / 交手记录），不新增埋点 ——
+ * 所以它跟玩家实际玩过的永远对得上。
+ *
+ * 成就刻意**只记不奖**：本项目还没有成长系统，发一个用不掉的"成长点"
+ * 等于凭空造一个假机制。等真有成长曲线了，在这里挂消耗。
+ */
+function RunAndCareer() {
+  const messages = useStore((s) => s.messages);
+  const gameState = useStore((s) => s.gameState);
+  const chronicle = useStore((s) => s.chronicle);
+  const career = useStore((s) => s.career);
+  const lastUnlocked = useStore((s) => s.lastUnlocked);
+
+  const run = useMemo(
+    () => summarizeRun(messages, gameState, chronicle),
+    [messages, gameState, chronicle]
+  );
+  const all = useMemo(() => unlockedAchievements(career), [career]);
+  const t = career.totals;
+  const rate = passRate(run);
+  const careerRate = passRate(t);
+  const newIds = new Set(lastUnlocked.map((a) => a.id));
+
+  return (
+    <>
+      {/* 本局统计 */}
+      <div className="mt-7 rounded-xl border border-ink-700 bg-ink-900/50 p-4">
+        <h2 className="text-[12px] tracking-wider text-mist-400">这一局的账</h2>
+        <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="回数" value={`${run.turns}`} hint="守密人记下的每一回" />
+          <Stat
+            label="检定"
+            value={`${run.checks}`}
+            hint={rate === null ? undefined : `过了 ${run.passed} 次 · ${rate}%`}
+          />
+          <Stat label="留下的线索" value={`${run.clues}`} />
+          <Stat label="交过手的" value={`${run.foes}`} hint="种" />
+        </div>
+        <p className="mt-2 text-[11px] text-mist-500">
+          结局：<span className="text-mist-300">{OUTCOME_LABEL[run.outcome]}</span>
+        </p>
+
+        {/* 冲这一局来的成就 */}
+        {lastUnlocked.length > 0 && (
+          <div className="mt-3 rounded-lg border border-gold-600/50 bg-gold-500/10 px-3 py-2">
+            <div className="text-[11px] tracking-wider text-gold-300">这一局新解锁</div>
+            <ul className="mt-1 space-y-0.5">
+              {lastUnlocked.map((a: AchievementDef) => (
+                <li key={a.id} className="text-[12px] text-gold-200">
+                  · {a.name} <span className="text-gold-500/80">— {a.desc}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* 生涯（跨所有局，开新团不清） */}
+      <div className="mt-4 rounded-xl border border-ink-700 bg-ink-900/50 p-4">
+        <h2 className="text-[12px] tracking-wider text-mist-400">你的生涯</h2>
+        <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Stat label="跑过的局" value={`${t.runs}`} />
+          <Stat label="累计回数" value={`${t.turns}`} />
+          <Stat
+            label="累计检定"
+            value={`${t.checks}`}
+            hint={careerRate === null ? undefined : `过了 ${careerRate}%`}
+          />
+          <Stat label="成就" value={`${all.length} / ${all.length + 0}`} hint="达成即记，不重复" />
+        </div>
+        <p className="mt-2 text-[11px] leading-relaxed text-mist-500">
+          结局记录：达成 {t.outcomes.success} · 灰色 {t.outcomes.grey} · 失守 {t.outcomes.failure} ·
+          殒命 {t.outcomes.death} · 理智尽头 {t.outcomes.insanity}
+        </p>
+
+        {all.length > 0 && (
+          <details className="mt-2.5">
+            <summary className="cursor-pointer text-[11px] text-mist-400 hover:text-mist-200">
+              已解锁的成就（{all.length}）
+            </summary>
+            <ul className="mt-1.5 space-y-0.5">
+              {all.map(({ def, at }) => (
+                <li key={def.id} className="text-[11px] text-mist-500">
+                  <span className={newIds.has(def.id) ? 'text-gold-300' : 'text-mist-300'}>
+                    {def.name}
+                  </span>
+                  <span className="ml-1 text-mist-600">{at.slice(0, 10)}</span>
+                  <span className="ml-1">— {def.desc}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    </>
+  );
+}
+
 /**
  * 结档界面。
  *
@@ -82,6 +198,7 @@ export function EndingScreen({
   const module = useStore((s) => s.module);
   const rulesetId = useStore((s) => s.rulesetId);
   const ending = gameState.ending;
+  const messageImages = useStore((s) => s.messageImages);
   const [exportMsg, setExportMsg] = useState('');
   if (!ending) return null;
 
@@ -96,7 +213,20 @@ export function EndingScreen({
    * 两份都**不含模组的 truth** —— 导出物可能被转发，默认不剧透。
    */
   const rs = getRuleset(rulesetId);
+  /*
+   * 带图战报的画面：**配了图的那些守密人回合**，按发生顺序。
+   * 图是自动（关键节点）或手动挂在那条消息上的，这里只管把它们按顺序串起来。
+   */
+  const scenes = messages
+    .filter((m) => m.role === 'gm' && (messageImages[m.id] || m.sceneImage))
+    .map((m, i) => ({
+      label: `第 ${i + 1} 个画面`,
+      // 兜底：万一正文里还留着契约块，别把它印进战报
+      text: String(m.content ?? '').replace(/```json[\s\S]*$/i, '').trim(),
+      image: messageImages[m.id] ?? m.sceneImage,
+    }));
   const exportInput: ExportInput = {
+    scenes,
     character,
     module,
     gameState,
@@ -161,6 +291,9 @@ export function EndingScreen({
             </p>
           ))}
         </div>
+
+        {/* R13/R30：这一局的账 + 生涯 + 成就 */}
+        <RunAndCareer />
 
         <div className="mt-8 flex flex-wrap gap-2">
           <button
@@ -251,6 +384,34 @@ export function EndingScreen({
               </div>
             </div>
           </div>
+          {/*
+           * 带图战报（G）：把这些画面串成一个**自包含**的 HTML。
+           * 单独一块、不用上面那个 Markdown 网格 —— 它是另一种东西（有图、能直接发给人看）。
+           */}
+          <div className="mt-3 rounded-lg border border-ink-700 p-3">
+            <div className="text-[12px] text-mist-300">带图战报（HTML）</div>
+            <div className="mt-0.5 text-[10px] leading-relaxed text-mist-500">
+              {scenes.length > 0
+                ? `把这一局留下的 ${scenes.length} 个画面连同当时的叙事串成一份网页，图片已内嵌，单个文件就能发给别人。`
+                : '这一局还没有配图。在设置里打开「带图战报」，或对某一条消息点「配图」，之后再来导出。'}
+            </div>
+            <div className="mt-2.5 flex gap-1.5">
+              <button
+                disabled={scenes.length === 0}
+                onClick={() => {
+                  downloadHtml(
+                    `${fileBase}-带图战报.html`,
+                    buildIllustratedReportHtml(exportInput)
+                  );
+                  setExportMsg('已导出带图战报（.html，在下载目录）');
+                }}
+                className="rounded-md border border-gold-600/60 px-2.5 py-1 text-[11px] text-gold-300 transition hover:border-gold-500 hover:text-gold-200 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                存为文件
+              </button>
+            </div>
+          </div>
+
           {exportMsg && <p className="mt-2.5 text-[11px] text-moss-400">{exportMsg}</p>}
         </div>
 
@@ -265,7 +426,7 @@ export function EndingScreen({
             <AnchorList anchors={anchors} onRewind={onRewind} />
           ) : (
             <p className="text-[12px] text-mist-500/70">
-              这一局还没有被标记为关键的抉择点（掷骰、进入战斗、转移地点、拿到新线索都会自动标记）。
+              这一局还没有被标记为关键的抉择点（检定没过、进入战斗、首次到某地、拿到新线索或新支线时会自动标记）。
             </p>
           )}
         </div>

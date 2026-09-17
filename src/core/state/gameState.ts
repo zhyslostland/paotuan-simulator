@@ -7,6 +7,11 @@
 
 import { roll, type Rng } from '../dice/index.js';
 import { isLifeVital, type Ruleset } from '../rulesets/types.js';
+import { type Wound } from '../wounds.js';
+import { type BestiaryEntry } from '../bestiary.js';
+
+export type { Wound };
+export type { BestiaryEntry };
 
 /**
  * 濒死冻结时被拒的理由文案。
@@ -196,6 +201,47 @@ export interface GameState {
    * 为**临时登场**的 NPC 补档案，不必改结构。
    */
   npcNotes?: Record<string, NpcNote>;
+  /**
+   * 伤口（引擎侧持续伤害的来源）。
+   *
+   * 可选新增字段 —— 旧档读到是 `undefined`（按"没有伤口"处理），**不需要升 `SAVE_VERSION`**。
+   * 由两路产生：① 引擎在本轮主生命条掉到阈值以上时自动记一处；
+   * ② 守密人通过 `flags.伤口` 显式申报（"左臂被划开"）。
+   * 引擎每轮按 `totalBleed()` 扣一次血，处理到位后**由这里清掉**，flag 跟着消失。
+   */
+  wounds?: Wound[];
+  /**
+   * 图鉴解锁台账（R38）：玩家**遇见过**的敌对者名字。
+   *
+   * 可选新增字段 —— 旧档读到 `undefined` 按"什么都没见过"处理，
+   * 与 `npcNotes` / `wounds` 同一判据，**不升 `SAVE_VERSION`**。
+   *
+   * 为什么是"名字数组"而不是 id：玩家在故事里认的是一只东西的**叫法**
+   * （"舱里的东西""雾中的巨影"），id 是准备页才有的东西，两者对不上。
+   * 表里的条目靠宽松匹配（见 `bestiary.findEntry`）找回来。
+   */
+  encountered?: string[];
+  /**
+   * 真正**交过手**的敌对者名字。
+   *
+   * 与 `encountered` 分开是 G5 的一部分：只是远远看见，不该知道它怕什么。
+   * 交手过（挨过打 / 打出过血 / 它死在这一局里）才算把弱点挣到手。
+   */
+  fought?: string[];
+  /**
+   * 当前跑到**第几幕**（0 起）。R14 进章按需展开用。
+   *
+   * 可选：旧档没有就按 0（第一幕）算 —— **可选新增不升 `SAVE_VERSION`**（既定判据）。
+   * 短模组 / 手写模组没有幕结构时，这个字段有值也没关系，引擎静默不用它。
+   */
+  actIndex?: number;
+  /**
+   * 各幕的**导演稿**（已展开的那一份），键是幕下标（字符串）。
+   *
+   * 与 `actIndex` 同理是可选字段。**这是 GM 内部资料，绝不能给玩家看**
+   * （里面写着这一幕谁会先动手、要露哪些线索）—— UI 必须遮罩，与「真相」同一档。
+   */
+  actDetails?: Record<string, string>;
   /** 战斗轮状态 */
   combat: CombatState;
 }
@@ -212,6 +258,14 @@ export interface StateDelta {
   value?: unknown;
   /** 变更理由，写进事件日志，便于回溯 */
   reason?: string;
+  /*
+   * ⚠️ 这里曾经有过一个 `announce?: boolean`（意为"我在正文里写过了，别弹提示"），
+   * **2026-09-17 已删除**。理由见 `store.ts` 的 `describeChanges()`：
+   * 状态变化提示是**框架的可见性**，不是特效。
+   * 少一条提示不会让画面变干净，只会让玩家不知道东西到底进没进背包。
+   *
+   * 判据：**宁可重复，不可缺失。** 别再加回来了。
+   */
 }
 
 export interface AppliedDelta {
@@ -246,16 +300,36 @@ const ALLOWED_ROOTS = new Set([
   'npcNotes',
   'combat',
   'threads',
+  'wounds',
+  /*
+   * 注意这里**没有** `encountered` / `fought`。
+   *
+   * 这两张图鉴台账（R38）是**引擎独占**的：`combat.foes` 分支里直接改 `next`，
+   * 不经过白名单。放进白名单就等于给模型开了一扇门——它会顺手把"听说过的东西"
+   * 塞进来，图鉴就变成它自己的记忆本，而不是玩家真见过的清单（G5）。
+   * 模型写出这两个根＝落到下面的 `不允许修改的路径根` 拒绝分支。
+   * 判据：凡"只由引擎写"的表，一律不进 ALLOWED_ROOTS。
+   */
 ]);
 
 /**
  * 武器「明确失去」的理由白名单（见 inventory remove 分支）。
  * 命中 = 放行删除；未命中（含空 reason）= 拒绝。
+ *
  * 注意这里刻意**不含**使用语义的词：`开火时炸膛` 因为含"炸膛"而放行，
  * 而单写 `开火`/`射出` 之类不会放行——那才是模型绕道删枪的写法。
+ *
+ * ## 为什么不能写裸的单字 `送`（协作方第 6 版 §2.2）
+ * 上一版为了兜住 `送给老霍华德防身` 写了单字 `送`，结果会误命中
+ * **`护送`/`传送`/`运送`/`呈送`** —— 这四个都不表示"失去武器"，
+ * 尤其"护送"是玩家在**做**一件事，却让引擎放行删枪。
+ * 改成有目标的 `送给|送人`，再补 `赠予|赠与`。
+ *
+ * `交给` **保留**：东西从**玩家背包**移走（队友背包不在这个 `inventory` 模型里），
+ * 确实算失去；`交给同伴保管` 也等于玩家手里没有了。
  */
 const LOSS_RE =
-  /缴械|被夺|夺走|抢夺|抢走|没收|上缴|送|赠送|交给|交给|留给|留作|递给|转交|丢失|遗失|丢了|掉落|掉进|掉入|掉下|沉入|损坏|摔坏|炸膛|炸毁|报废|毁坏|损毁|烧毁|焚毁|断裂|折断|出售|卖掉|交易|典当|丢弃|扔掉|扔进|扔下|抛掉|丢下|投弃|抵押|捐赠|上交/;
+  /缴械|被夺|夺走|抢夺|抢走|没收|上缴|送给|送人|赠送|赠予|赠与|交给|留给|留作|递给|转交|丢失|遗失|丢了|掉落|掉进|掉入|掉下|沉入|损坏|摔坏|炸膛|炸毁|报废|毁坏|损毁|烧毁|焚毁|断裂|折断|出售|卖掉|交易|典当|丢弃|丢掉|丢进|扔掉|扔进|扔下|抛掉|丢下|投弃|抵押|捐赠|上交/;
 
 export function createInitialState(overrides: Partial<GameState> = {}): GameState {
     return {
@@ -271,6 +345,9 @@ export function createInitialState(overrides: Partial<GameState> = {}): GameStat
       location: '',
       visited: [],
       npcsAlive: [],
+      wounds: [],
+      encountered: [],
+      fought: [],
       combat: { active: false, round: 0, foes: [] },
       ...overrides,
     };
@@ -732,6 +809,31 @@ export function applyDeltas(
 
       // 敌人列表 combat.foes：add（{name,hp,max}）/ remove（名字）/ dec（value=名字,amount=伤害）
       if (field === 'foes') {
+        /*
+         * 图鉴台账的**唯一写入点**。
+         *
+         * 放在这里而不是 store/UI：`combat.foes` 是"敌人存在过"的唯一真源，
+         * 谁让它进了列表，谁就该记这一笔。三条路（模型 add、引擎 castFromBestiary、
+         * 测试沙盒）都汇到这一个分支，不会漏。
+         *
+         * `encountered` = 它出现在战斗里（玩家见到了）；
+         * `fought` = 它挨过打或死了（玩家真的跟它交过手，弱点才解锁）。
+         */
+        const markSeen = (name: string) => {
+          const n = String(name ?? '').trim();
+          if (!n) return;
+          if (!Array.isArray(next.encountered)) next.encountered = [];
+          if (!next.encountered.includes(n)) next.encountered.push(n);
+        };
+        const markFought = (name: string) => {
+          const n = String(name ?? '').trim();
+          if (!n) return;
+          if (!Array.isArray(next.fought)) next.fought = [];
+          if (!next.fought.includes(n)) next.fought.push(n);
+          // 交手过必然也见过 —— 别让两张表互相矛盾
+          markSeen(n);
+        };
+
         if (delta.op === 'add') {
           const f = delta.value as Partial<Foe>;
           if (!f?.name) {
@@ -749,6 +851,7 @@ export function applyDeltas(
               max: typeof f.max === 'number' ? f.max : (typeof f.hp === 'number' ? f.hp : 10),
             });
           }
+          markSeen(f.name);
           applied.push({ delta, before: null, after: deepClone(next.combat.foes) });
           continue;
         }
@@ -762,6 +865,8 @@ export function applyDeltas(
             rejected.push({ delta, reason: `战斗中不存在敌人「${name}」` });
             continue;
           }
+          // 从战斗里被移除通常是"它死了"——死在这一局里，弱点当然算挣到了
+          markFought(name);
           next.combat.foes.splice(idx, 1);
           applied.push({ delta, before: null, after: deepClone(next.combat.foes) });
           continue;
@@ -789,6 +894,12 @@ export function applyDeltas(
             delta.op === 'dec'
               ? Math.max(0, foe.hp - amount)
               : Math.min(foe.max, foe.hp + amount);
+          /*
+           * "打过"只认**造成伤害**这一种。
+           * 被治疗（inc）不算交手——那只是有人在给它续命。
+           * 玩家朝它开了一枪（哪怕没打中，扣血的是它）= 真的试过深浅了。
+           */
+          if (delta.op === 'dec' && foe.hp < before) markFought(name);
           applied.push({ delta, before, after: foe.hp });
           continue;
         }
@@ -868,3 +979,13 @@ export function detectStatusEvents(applied: AppliedDelta[], state: GameState): S
   }
   return events;
 }
+
+/*
+ * 注：伤口的**检测**逻辑没有放在这里，而是在 `src/ui/store.ts` 的
+ * `applyModelDeltas` 里就地做。原因是它需要的东西这里没有也不能有：
+ * 角色卡的技能（判"会不会急救"）、背包（判"有没有医疗物品"）、
+ * 以及"出生那一轮不重复失血"这种跟调用时序相关的状态。
+ * 纯数学部分（档位、流失量、止血判据）都在 `core/wounds.ts`，那里是可单测的真源；
+ * 这里只 re-export 类型，让 `GameState.wounds` 有出处。
+ */
+export type { WoundTier } from '../wounds.js';

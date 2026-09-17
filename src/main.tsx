@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client';
 import App from './ui/App';
 import './ui/theme.css';
 import './pwa';
-import { initUpdateSelfHeal } from './update.js';
+import { ErrorBoundary } from './ui/ErrorBoundary';
+import { initUpdateSelfHeal, cleanStampFromUrl } from './update.js';
 
 /*
  * ============================================================
@@ -26,9 +27,22 @@ if (fromLegacyPath) {
   // SW 换了主人时带戳重来一次（配合 autoUpdate：卡在旧包的玩家打开即被带到新版）
   initUpdateSelfHeal();
 
+  /*
+   * 抹掉地址栏上的 `_v=` / `t=` 戳：那是绕缓存用的，任务已完成，
+   * 留着会让玩家存的书签、转发的链接带一串时间戳（见 update.ts 的说明）。
+   */
+  cleanStampFromUrl();
+
+  /*
+   * 套一层错误边界：界面里任何一处渲染抛错，都显示成一句人话 + 重载按钮，
+   * **不再变成整页空白**（2026-09-17 图鉴那次无限重渲染就害得 PC 全白、
+   * 手机卡在自动更新里，玩家连"是什么错了"都看不到）。
+   */
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </StrictMode>
   );
 }

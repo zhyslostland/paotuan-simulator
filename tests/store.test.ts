@@ -906,6 +906,424 @@ describe('生命归零 → 结档信号（App 的"结档唯一出口"依赖这�
   });
 });
 
+describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 滴血太刺激"', () => {
+  const base = (hp = 8, extra: Record<string, unknown> = {}) =>
+    createInitialState({
+      vitals: { hp, san: 60, mp: 10 },
+      vitalsMax: { hp: 10, san: 99, mp: 10 },
+      inventory: [],
+      ...extra,
+    });
+
+  it('主生命条一次掉 2 点以上 → 记一处伤口，并进状态栏 flags', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被咬中小臂' },
+    ] as never);
+    const gs = store.getState().gameState;
+    expect(gs.wounds).toHaveLength(1);
+    expect(gs.wounds![0]!.tier).toBe('wound');
+    expect(gs.wounds![0]!.text).toContain('被咬中小臂');
+    // 状态栏是动态渲染中文 flags 的 —— 伤口必须出现在里面，否则玩家看不见
+    expect(String(gs.flags['伤口'])).toContain('每轮 -1');
+  });
+
+  it('掉 1 点不算伤口（小磕碰不该变成持续掉血）', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 1, reason: '擦了一下' },
+    ] as never);
+    expect(store.getState().gameState.wounds).toHaveLength(0);
+    expect(store.getState().gameState.flags['伤口']).toBeUndefined();
+  });
+
+  it('一次掉 4 点以上 → 重伤档（每轮 -2）', () => {
+    store.setState({ gameState: base(10) });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 5, reason: '斧头劈进肩膀' },
+    ] as never);
+    expect(store.getState().gameState.wounds![0]!.tier).toBe('severe');
+    expect(String(store.getState().gameState.flags['伤口'])).toContain('每轮 -2');
+  });
+
+  it('有伤口后**每一轮**自动失血，且额度固定不变', () => {
+    store.setState({ gameState: base(8) });
+    // 第一轮：造成伤口 —— 当轮**不再**补失血（那几点已经付过账了）
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    expect(store.getState().gameState.vitals.hp).toBe(5);
+    // 第二轮：什么都不做，也该因伤口掉 1 点
+    store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.vitals.hp).toBe(4);
+    // 第三轮：还是 1 点（不加速）
+    store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.vitals.hp).toBe(3);
+  });
+
+  it('失血会写进"状态变化"提示（玩家看得见"为什么又掉血了"）', () => {
+    store.setState({ gameState: base(8) });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    store.setState({ lastChanges: null });
+    store.getState().applyModelDeltas([] as never);
+    const lines = store.getState().lastChanges?.lines ?? [];
+    // 数值条的变化本来就有一条；这里确认"伤口失血"这句也进去了
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.some((l) => l.text.includes('生命') || l.text.includes('伤口'))).toBe(true);
+  });
+
+  it('已经濒死就不再因伤口失血（倒地的人不该被继续放血）', () => {
+    store.setState({ gameState: base(1) });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    const after = store.getState().gameState;
+    expect(after.dying).toBe(true);
+    // 就算硬塞一处伤口，也不该再往下扣
+    store.setState({
+      gameState: { ...after, wounds: [{ id: 'x', text: '伤口', tier: 'wound', turns: 0 }] },
+    });
+    const before = store.getState().gameState.vitals.hp;
+    store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.vitals.hp).toBe(before);
+  });
+
+  it('守密人显式申报 flags.受伤 也会被记下来（旧伤 / 环境所致）', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([
+      { target: 'flags.受伤', op: 'set', value: '左腿的旧伤裂开了' },
+    ] as never);
+    const gs = store.getState().gameState;
+    expect(gs.wounds).toHaveLength(1);
+    expect(gs.wounds![0]!.text).toContain('旧伤裂开');
+    // 输入通道消费掉：下一轮不会又被当成一次新申报
+    expect(gs.flags['受伤']).toBeUndefined();
+  });
+
+  it('引擎自己写的 flags.伤口 不会被读回来（否则伤口一轮接一轮自我复制）', () => {
+    store.setState({ gameState: base(10) });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    expect(store.getState().gameState.wounds).toHaveLength(1);
+    // 连跑三轮空 delta：伤口数必须一直是 1
+    for (let i = 0; i < 3; i++) store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.wounds).toHaveLength(1);
+  });
+
+  it('两样都没有 → 包扎也止不住（用户报的原场景）', () => {
+    store.setState({ gameState: base(), character: { ...store.getState().character, skills: {} } });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    store.getState().applyModelDeltas([
+      { target: 'flags.伤口处理', op: 'set', value: true },
+    ] as never);
+    expect(store.getState().gameState.wounds!.length).toBeGreaterThan(0);
+    expect(store.getState().gameState.flags['伤口']).toBeTruthy();
+  });
+
+  it('有医疗物品 + 有急救技能 → 处理到位就真正止住，flag 一并消失', () => {
+    store.setState({
+      gameState: base(8, { inventory: [{ id: '绷带', name: '绷带', qty: 2 }] }),
+      character: { ...store.getState().character, skills: { 急救: 60 } },
+    });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    expect(store.getState().gameState.wounds).toHaveLength(1);
+    store.getState().applyModelDeltas([
+      { target: 'flags.伤口处理', op: 'set', value: true },
+    ] as never);
+    const gs = store.getState().gameState;
+    expect(gs.wounds).toHaveLength(0);
+    // 状态栏不能出现"伤好了但还写着流血"
+    expect(gs.flags['伤口']).toBeUndefined();
+  });
+
+  it('只有一半依据 → 临时处理降一档，不能一次清零', () => {
+    store.setState({
+      gameState: base(10, { inventory: [{ id: '绷带', name: '绷带', qty: 2 }] }),
+      character: { ...store.getState().character, skills: {} },
+    });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 5, reason: '斧头劈进肩膀' },
+    ] as never);
+    expect(store.getState().gameState.wounds![0]!.tier).toBe('severe');
+    store.getState().applyModelDeltas([
+      { target: 'flags.伤口处理', op: 'set', value: true },
+    ] as never);
+    const gs = store.getState().gameState;
+    expect(gs.wounds!.length).toBe(1);
+    expect(gs.wounds![0]!.tier).not.toBe('severe');
+  });
+
+  it('多轮下来伤口会累计轮数（供界面显示"流了多久"）', () => {
+    store.setState({ gameState: base(9) });
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    // 出生那一轮不算流逝（它没流）
+    expect(store.getState().gameState.wounds![0]!.turns).toBe(0);
+    store.getState().applyModelDeltas([] as never);
+    store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.wounds![0]!.turns).toBe(2);
+  });
+
+  it('woundStatus() 的提示与引擎判据同源（不各算一遍）', () => {
+    store.setState({ gameState: base(8, { inventory: [{ id: '绷带', name: '绷带', qty: 1 }] }) });
+    expect(store.getState().woundStatus().note).toBeNull();
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
+    ] as never);
+    const st = store.getState().woundStatus();
+    expect(st.wounds).toHaveLength(1);
+    expect(st.relief).toBe('relief'); // 有物品、无技能
+    expect(st.note).toContain('每轮固定 1 点');
+  });
+});
+
+describe('临时疯狂：有界可恢复的数值惩罚（R37，用户 09-16 拍板）', () => {
+  const base = () =>
+    createInitialState({
+      vitals: { hp: 10, san: 60, mp: 10 },
+      vitalsMax: { hp: 10, san: 99, mp: 10 },
+    });
+
+  it('理智骤降 ≥5 → 进临时疯狂，并且**检定目标值真的被减了**', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    expect(store.getState().gameState.flags['临时疯狂']).toBeTruthy();
+    const ins = store.getState().insanity();
+    expect(ins.active).toBe(true);
+    expect(ins.penalty).toBe(-20); // 当前规则包是 COC（d100）
+  });
+
+  it('惩罚**有界**：连续发疯罚额不变', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    const first = store.getState().insanity().penalty;
+    store.setState({
+      gameState: {
+        ...store.getState().gameState,
+        vitals: { ...store.getState().gameState.vitals, san: 50 },
+      },
+    });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    expect(store.getState().insanity().penalty).toBe(first);
+  });
+
+  it('**可恢复**：走满窗口后自动解除，惩罚归零、标签消失', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    expect(store.getState().insanity().turns).toBeGreaterThan(0);
+    // 空 delta 连续推进（模拟过轮）
+    for (let i = 0; i < 5; i++) store.getState().applyModelDeltas([] as never);
+    const ins = store.getState().insanity();
+    expect(ins.active).toBe(false);
+    expect(ins.penalty).toBe(0);
+    expect(store.getState().gameState.flags['临时疯狂']).toBeUndefined();
+    // 引擎内部记的轮数也要清掉，否则读档后会"复活"
+    expect(store.getState().gameState.flags['疯狂轮数']).toBeUndefined();
+  });
+
+  it('守密人写 `flags.临时疯狂 = false` → 提前解除，**解除即消除**', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    expect(store.getState().insanity().active).toBe(true);
+    store.getState().applyModelDeltas([{ target: 'flags.临时疯狂', op: 'set', value: false }] as never);
+    const ins = store.getState().insanity();
+    expect(ins.active).toBe(false);
+    expect(ins.penalty).toBe(0);
+  });
+
+  it('临时疯狂真的进了"状态变化"提示（玩家看得见"为什么骰子难了"）', () => {
+    store.setState({ gameState: base(), lastChanges: null });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    const lines = store.getState().lastChanges?.lines ?? [];
+    expect(lines.some((l) => l.text.includes('临时疯狂'))).toBe(true);
+  });
+
+  it('永久疯狂（理智归零）不吃临时惩罚 —— 那一局已经结束了', () => {
+    store.setState({ gameState: base() });
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'set', value: 0 }] as never);
+    expect(store.getState().gameState.ending?.kind).toBe('insanity');
+  });
+
+  it('insanity() 的提示与惩罚同源（不各算一遍）', () => {
+    store.setState({ gameState: base() });
+    expect(store.getState().insanity().note).toBeNull();
+    store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
+    const ins = store.getState().insanity();
+    expect(ins.note).toContain('暂时的');
+    expect(ins.note).not.toMatch(/-\d+/);
+  });
+});
+
+describe('怪物图鉴与战斗投放（R38）', () => {
+  const TABLE = [
+    {
+      id: 'm1',
+      name: '雾中的巨影',
+      look: '湿漉漉的一团',
+      hp: 20,
+      attack: '爪击 1d8',
+      behavior: '受伤后退进雾里',
+      weakness: '怕火',
+    },
+    {
+      id: 'm2',
+      name: '舱里的东西',
+      look: '看不出形状',
+      hp: 12,
+      attack: '撞击 1d6',
+      behavior: '只在暗处动',
+      weakness: '强光',
+    },
+  ];
+
+  const base = () =>
+    createInitialState({
+      vitals: { hp: 10, san: 60, mp: 10 },
+      vitalsMax: { hp: 10, san: 99, mp: 10 },
+    });
+
+  /** 装上敌对者表（模组字段），并回到干净状态 */
+  const withTable = () => {
+    store.setState({
+      gameState: base(),
+      module: { ...store.getState().module, monsters: TABLE },
+    });
+  };
+
+  it('startCombatFrom 把表的数值落成 combat.foes（清单里的 castFromBestiary 真实存在了）', () => {
+    withTable();
+    const names = store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    expect(names).toEqual(['雾中的巨影']);
+    const gs = store.getState().gameState;
+    expect(gs.combat.active).toBe(true);
+    expect(gs.combat.round).toBe(1);
+    expect(gs.combat.foes).toHaveLength(1);
+    // 血量是**表里的数字**，不是模型临场写的
+    expect(gs.combat.foes[0]!.hp).toBe(20);
+    expect(gs.combat.foes[0]!.max).toBe(20);
+  });
+
+  it('不点名就投放表里全部', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE);
+    expect(store.getState().gameState.combat.foes).toHaveLength(2);
+  });
+
+  it('敌人一进 combat.foes 就记进 encountered（图鉴的"见过"）', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    expect(store.getState().gameState.encountered).toContain('雾中的巨影');
+    // 只是见过，还没交手 —— fought 不该有它
+    expect(store.getState().gameState.fought ?? []).not.toContain('雾中的巨影');
+  });
+
+  it('只见过时：图鉴给外观与攻击，**不给弱点**（G5：弱点是活路）', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    const b = store.getState().bestiary();
+    const card = b.cards.find((c) => c.name === '雾中的巨影')!;
+    expect(card.level).toBe('seen');
+    expect(card.look).toBeTruthy();
+    expect(card.weakness).toBeUndefined();
+  });
+
+  it('打中它（dec 掉血）→ 记进 fought，弱点才解锁', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'dec', value: '雾中的巨影', amount: 3 },
+    ] as never);
+    expect(store.getState().gameState.fought).toContain('雾中的巨影');
+    const card = store.getState().bestiary().cards.find((c) => c.name === '雾中的巨影')!;
+    expect(card.level).toBe('fought');
+    expect(card.weakness).toBe('怕火');
+  });
+
+  it('只是给它回血（inc）不算交手 —— 弱点不该白给', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'inc', value: '雾中的巨影', amount: 3 },
+    ] as never);
+    expect(store.getState().gameState.fought ?? []).not.toContain('雾中的巨影');
+  });
+
+  it('敌人从战斗里移除（多半是死了）也算交手过', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'remove', value: '雾中的巨影' },
+    ] as never);
+    expect(store.getState().gameState.fought).toContain('雾中的巨影');
+  });
+
+  it('图鉴**锁着**直到这一局结档（防开局剧透）', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    expect(store.getState().bestiary().unlocked).toBe(false);
+    // 引擎先写空正文的 ending 当信号，这时还不该解锁
+    store.getState().forceEnding('death');
+    expect(store.getState().bestiary().unlocked).toBe(false);
+    // 结局正文写好了 → 解锁
+    store.getState().setEnding('death', '意识一层层退下去。');
+    expect(store.getState().bestiary().unlocked).toBe(true);
+  });
+
+  it('结档后图鉴把"见过/交过手/未遭遇"三档一起摆出来', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'dec', value: '雾中的巨影', amount: 3 },
+    ] as never);
+    store.getState().forceEnding('death');
+    store.getState().setEnding('death', '结束了。');
+    const b = store.getState().bestiary();
+    expect(b.total).toBe(2);
+    expect(b.seen).toBe(1);
+    expect(b.fought).toBe(1);
+    // 交过手的排最前，没遭遇的沉底
+    expect(b.cards[0]!.name).toBe('雾中的巨影');
+    expect(b.cards[1]!.level).toBe('none');
+  });
+
+  it('模型想手写 encountered / fought 一律被拒（这两张表只归引擎）', () => {
+    withTable();
+    // 两种操作都得拒：add 也不行——模型会用它把"听说过的东西"塞进来
+    store.getState().applyModelDeltas([
+      { target: 'encountered', op: 'add', value: '它听说过的东西' },
+      { target: 'fought', op: 'add', value: '它自称打过的' },
+      { target: 'encountered', op: 'remove', value: '雾中的巨影' },
+    ] as never);
+    const gs = store.getState().gameState;
+    expect(gs.encountered ?? []).not.toContain('它听说过的东西');
+    expect(gs.fought ?? []).not.toContain('它自称打过的');
+    expect(gs.encountered ?? []).toEqual([]);
+    // 不要求玩家界面上有提示：引擎静默拒绝即可（这类越权写法不该变成界面噪音）
+  });
+
+  it('引擎自己写这两张表照样生效（白名单只管模型）', () => {
+    withTable();
+    store.getState().startCombatFrom(TABLE, ['雾中的巨影']);
+    expect(store.getState().gameState.encountered).toContain('雾中的巨影');
+  });
+
+  it('模组没设敌对者表 → 图鉴不占位（total 0）', () => {
+    store.setState({
+      gameState: base(),
+      module: { ...store.getState().module, monsters: [] },
+    });
+    expect(store.getState().bestiary().total).toBe(0);
+  });
+});
+
 describe('引擎强制结档（协作方 C/D：求死不走模型）', () => {
   it('forceEnding 直接落结档，且正文留空等结局', () => {
     store.setState({ gameState: createInitialState({ vitals: { hp: 12, san: 60, mp: 10 } }) });
@@ -1055,6 +1473,23 @@ describe('存档迁移（旧档必须能读）', () => {
 
   it('旧档没有 companionCandidates 时补空数组（不丢、也不炸）', () => {
     expect(migrateSave({ gameState: { vitals: {} } }).companionCandidates).toEqual([]);
+  });
+
+  it('旧档补出伤口与图鉴台账（两张表都是可选新增字段，不升 SAVE_VERSION）', () => {
+    const data = migrateSave({ gameState: { vitals: { hp: 5 } } });
+    expect(data.gameState!.wounds).toEqual([]);
+    expect(data.gameState!.encountered).toEqual([]);
+    expect(data.gameState!.fought).toEqual([]);
+    // 判据：可选新增字段不升版本 —— 这三张表都不该把版本推高
+    expect(data.version).toBe(SAVE_VERSION);
+  });
+
+  it('已有的图鉴台账不会被迁移清掉（只补不删）', () => {
+    const data = migrateSave({
+      gameState: { vitals: { hp: 5 }, encountered: ['雾中的巨影'], fought: ['雾中的巨影'] },
+    });
+    expect(data.gameState!.encountered).toEqual(['雾中的巨影']);
+    expect(data.gameState!.fought).toEqual(['雾中的巨影']);
   });
 });
 
@@ -1226,5 +1661,141 @@ describe('关键抉择（回溯锚点）', () => {
   it('没有快照的回合不会被标上锚点', () => {
     store.getState().markSnapshotKey('不存在的消息 id', '掷骰：潜行');
     expect(store.getState().snapshots['不存在的消息 id']).toBeUndefined();
+  });
+});
+
+/*
+ * ============================================================
+ * 协作方第 7 版的两处补丁（2.1 轮数 / 2.2 结痂）+ 第四节敌人数值兜底
+ * 全部走 store 的真实通道验证，不是只测纯函数。
+ * ============================================================
+ */
+describe('临时疯狂轮数：界面报的数要跟着引擎走（§2.1）', () => {
+  it('引擎推进一轮后，insanity().turns 跟着减（不是永远 3）', () => {
+    const gs = createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } });
+    store.setState({ gameState: { ...gs, flags: { 临时疯狂: '理智骤降 6 点，陷入临时疯狂', 疯狂轮数: 3 } } });
+    expect(store.getState().insanity().turns).toBe(3);
+    expect(store.getState().insanity().label).toContain('还剩 3 轮');
+
+    // 走一轮结算 → 引擎把 疯狂轮数 减到 2
+    store.getState().applyModelDeltas([] as never);
+    const t2 = store.getState().gameState.flags?.['疯狂轮数'];
+    expect(t2).toBe(2);
+    expect(store.getState().insanity().turns).toBe(2);
+  });
+});
+
+describe('结痂：轻伤自己收口，不再流到死（§2.2）', () => {
+  const withWound = (tier: string) => {
+    const gs = createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } });
+    store.setState({
+      gameState: { ...gs, wounds: [{ id: 'w1', text: '手臂上的口子', tier, turns: 0 } as never] },
+    });
+  };
+
+  it('擦伤第 3 轮自己结痂，伤口清空', () => {
+    withWound('scratch');
+    for (let i = 0; i < 3; i++) store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.wounds ?? []).toHaveLength(0);
+  });
+
+  it('重伤第 6 轮仍在（要有人处理才止得住）', () => {
+    withWound('severe');
+    for (let i = 0; i < 6; i++) store.getState().applyModelDeltas([] as never);
+    expect(store.getState().gameState.wounds ?? []).toHaveLength(1);
+  });
+});
+
+describe('敌人数值兜底：模型即兴开打也吃敌对者表（§4）', () => {
+  const TABLE = [{ id: 'm1', name: '雾中的巨影', hp: 20 }];
+
+  it('模型没给血量 → 用表里的 20', () => {
+    store.setState({
+      gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+      module: { ...store.getState().module, monsters: TABLE },
+    });
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '雾中的巨影' } },
+    ] as never);
+    const foe = store.getState().gameState.combat.foes[0]!;
+    expect(foe.hp).toBe(20);
+    expect(foe.max).toBe(20);
+  });
+
+  it('模型给了血量 → 以模型为准，不被表顶掉', () => {
+    store.setState({
+      gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+      module: { ...store.getState().module, monsters: TABLE },
+    });
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '雾中的巨影', hp: 7, max: 7 } },
+    ] as never);
+    expect(store.getState().gameState.combat.foes[0]!.hp).toBe(7);
+  });
+
+  it('表里没有的东西 → 原样放行（不凭空造数值）', () => {
+    store.setState({
+      gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+      module: { ...store.getState().module, monsters: TABLE },
+    });
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '临时冒出来的东西' } },
+    ] as never);
+    const foe = store.getState().gameState.combat.foes[0]!;
+    expect(foe.name).toBe('临时冒出来的东西');
+    expect(foe.hp).not.toBe(20);
+  });
+});
+
+/*
+ * ============================================================
+ * 状态变化提示**必须一直有**（2026-09-17 主人当场纠正的回归）
+ *
+ * 曾经加过一个  开关：守密人声明"这件事我在正文里写过了"，
+ * 引擎就不弹这条提示，理由是"同一件事说两遍出戏"。
+ * 主人的原话是 ——「获得新物品的提示很朴素一个弹窗啊」。
+ *
+ * **"状态可见"属于框架，不属于特效。** 少一条提示不会让画面变干净，
+ * 只会让玩家不知道东西到底进没进背包、血到底掉没掉。
+ * 这组断言就是钉住它：**宁可重复，不可缺失。**
+ * ============================================================
+ */
+describe('状态变化提示永远都在（不许再被"优化"掉）', () => {
+  const clean = () =>
+    store.setState({
+      gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+      lastChanges: null,
+    });
+  const texts = () => (store.getState().lastChanges?.lines ?? []).map((l) => l.text);
+
+  it('捡到东西 → 一定有提示（哪怕守密人在正文里写过）', () => {
+    clean();
+    store.getState().applyModelDeltas([
+      { target: 'inventory', op: 'add', value: { id: '钥匙', name: '黄铜钥匙', qty: 1 } },
+    ] as never);
+    expect(texts().some((t) => t.includes('黄铜钥匙'))).toBe(true);
+  });
+
+  it('掉血 → 一定有数值提示', () => {
+    clean();
+    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 2 }] as never);
+    expect(texts().some((t) => t.includes('生命'))).toBe(true);
+  });
+
+  it('新线索 → 一定有提示', () => {
+    clean();
+    store.getState().applyModelDeltas([
+      { target: 'clues', op: 'add', value: '门缝里塞着的半张照片' },
+    ] as never);
+    expect(texts().some((t) => t.includes('门缝里塞着的半张照片'))).toBe(true);
+  });
+
+  it('delta 上即使带了未知字段（比如老契约的 announce），提示也照样出', () => {
+    clean();
+    store.getState().applyModelDeltas([
+      { target: 'inventory', op: 'add', value: { id: 'k', name: '铜钥匙', qty: 1 }, announce: true },
+    ] as never);
+    // 未知字段一律忽略 —— 它**不是**"别提示"的开关
+    expect(texts().some((t) => t.includes('铜钥匙'))).toBe(true);
   });
 });

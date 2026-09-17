@@ -42,6 +42,13 @@ export interface ExportInput {
   rulesetName?: string;
   /** 规则包的主骰（'1d100' 走百分比、'1d20' 走加值），决定技能怎么显示 */
   mainDice?: string;
+  /**
+   * 带图战报用：**配了图的关键节点**，按发生顺序。
+   *
+   * 只有这一项会进 HTML 战报（Markdown 那三份不带图 —— 把 base64 塞进 .md 会让文件爆掉）。
+   * `image` 是生成时拿到的 data URI，直接内嵌进 HTML，导出的文件是**自包含**的。
+   */
+  scenes?: { label?: string; text: string; image?: string }[];
   /** 属性中文名（如 { str: '力量' }），用于把属性写成中文 */
   characteristicLabels?: Record<string, string>;
   exportedAt?: string;
@@ -274,6 +281,19 @@ export function buildArchiveMarkdown(input: ExportInput): string {
   return buildJourneyMarkdown(input, { withTruth: true });
 }
 
+/** 触发浏览器下载一个 .html 文件（带图战报用；图已内嵌，文件自包含） */
+export function downloadHtml(filename: string, content: string): void {
+  const blob = new Blob([content], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** 触发浏览器下载一个 .md 文件 */
 export function downloadMarkdown(filename: string, content: string): void {
   const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
@@ -301,4 +321,102 @@ export async function copyText(text: string): Promise<boolean> {
 /** 文件名里不能出现的字符统一换成下划线 */
 export function safeFilename(name: string): string {
   return (name || '跑团').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+}
+
+/* ============================================================
+ * 带图战报（G）
+ * ============================================================ */
+
+/** HTML 转义。战报里全是玩家和模型写的自由文本，**必须转义**后再拼 */
+function esc(s: string): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * 生成**自包含**的带图战报（单个 .html 文件，图直接内嵌）。
+ *
+ * ## 为什么是 HTML 而不是 Markdown
+ * 图片是 base64 data URI，塞进 Markdown 会让 .md 变成十几 MB 的怪物，
+ * 而且多数 Markdown 阅读器渲染不出来。HTML 一个文件自带图、自带版式、能直接发给人看、也能打印。
+ *
+ * ## 两条照旧的红线
+ * - **不含 `module.truth`**：战报是会被转发的，默认不剧透（完整留档那条路才带真相）。
+ * - **只放配了图的节点**：这不是"完整流程导出"（那个有 Markdown 版），
+ *   战报的定位是"这一局最值得回看的几个画面"。
+ */
+export function buildIllustratedReportHtml(input: ExportInput): string {
+  const { character, module, gameState } = input;
+  const scenes = input.scenes ?? [];
+  const ending = gameState.ending;
+  const title = esc(module.title || '跑团战报');
+  const who = esc(character.name || '无名者');
+  const endTitle = ending
+    ? esc(
+        (
+          {
+            death: '终幕 · 殒命',
+            insanity: '终幕 · 理智尽头',
+            success: '终幕 · 达成',
+            failure: '终幕 · 失守',
+            grey: '终幕 · 灰色',
+            other: '终幕',
+          } as Record<string, string>
+        )[ending.kind] ?? '终幕'
+      )
+    : '';
+
+  const sceneHtml = scenes.length
+    ? scenes
+        .map(
+          (s, i) => `
+  <figure class="scene">
+    <figcaption>${esc(s.label || `第 ${i + 1} 幕画面`)}</figcaption>
+    ${s.image ? `<img src="${s.image}" alt="">` : ''}
+    <p>${esc(s.text).replace(/\n+/g, '</p><p>')}</p>
+  </figure>`
+        )
+        .join('')
+    : '<p class="none">这一局没有留下配图。在设置里打开「带图战报」，或对某一条消息手动生成即可。</p>';
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title} · 战报</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f26;--muted:#6b7684;--line:#e3e7ec;--gold:#9a7b28}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.85 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:760px;margin:0 auto;padding:36px 20px 72px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:26px}
+  .scene{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:14px;margin:0 0 20px}
+  .scene figcaption{font-size:12px;color:var(--gold);letter-spacing:.04em;margin-bottom:8px}
+  .scene img{width:100%;border-radius:8px;display:block;margin-bottom:10px}
+  .scene p{margin:0 0 10px}
+  .none{color:var(--muted);font-size:13px}
+  .foot{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);
+    color:var(--muted);font-size:12px}
+  @media print{body{background:#fff}.wrap{max-width:none;padding:0}
+    .scene{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>${title}</h1>
+  <div class="sub">${who} 的这一局${endTitle ? ` · ${endTitle}` : ''}</div>
+  ${sceneHtml}
+  <div class="foot">
+    共 ${scenes.length} 个画面 · 由跑团模拟器导出 · 本文件自包含，图片已内嵌，可直接保存或转发。
+  </div>
+</div>
+</body>
+</html>`;
 }

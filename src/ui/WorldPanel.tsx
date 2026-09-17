@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, mapNodesOf, type MapNode } from './store';
+import { actAt, normalizeActIndex, parseActs, type ActItem } from '../core/acts.js';
 import { ImageField } from './ImageField';
 import { NpcCardModal, npcProfileOf, type NpcProfile } from './NpcCard';
+import { BestiaryPanel } from './Bestiary';
 import { AnchorList } from './EndingScreen';
 import { mapImagePrompt, sceneImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
@@ -100,6 +102,75 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function Empty({ text }: { text: string }) {
   return <p className="text-[12px] text-mist-500/70">{text}</p>;
+}
+
+/**
+ * 「这一幕」（R14）。
+ *
+ * 两件事分开对待，这是刻意的：
+ *   - **幕名与骨架**是玩家可以看的（"你正在第三幕 · 暗房"，这是节奏感，不是剧透）；
+ *   - **导演稿**是 GM 内部资料（写着这一幕谁会先动手、哪些线索该露头）——**默认遮罩**，
+ *     点一下才显示，且按钮上写明"含剧透"。
+ * 与 `ModuleTab` 的真相遮罩同一条口径：**别让玩家顺手看到谜底**。
+ */
+function ActSection({
+  acts,
+  index,
+  detail,
+  busy,
+  onExpand,
+}: {
+  acts: ActItem[];
+  index: number;
+  detail?: string;
+  busy: boolean;
+  onExpand: () => void;
+}) {
+  const [revealed, setRevealed] = useState(false);
+  const cur = actAt(acts, index);
+  if (!cur) return null;
+  return (
+    <Section title={`这一幕（第 ${index + 1} / ${acts.length} 幕）`}>
+      <div className="rounded-md border-l-2 border-arcane-400/60 bg-ink-850 px-2.5 py-1.5">
+        <span className="block text-[12px] text-mist-200">{cur.title}</span>
+        {cur.summary && (
+          <span className="mt-0.5 block text-[11px] leading-relaxed text-mist-500">
+            {cur.summary}
+          </span>
+        )}
+      </div>
+
+      {detail ? (
+        revealed ? (
+          <div className="mt-1.5 rounded-md border border-ink-700 bg-ink-900/70 px-2.5 py-2">
+            <span className="mb-1 block text-[10px] tracking-wider text-blood-300/90">
+              导演稿 · 给守密人看的，含剧透
+            </span>
+            <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-mist-400">
+              {detail}
+            </p>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setRevealed(true)}
+            className="mt-1.5 rounded-md border border-ink-600 px-2 py-1 text-[11px] text-mist-500 transition hover:border-blood-300/50 hover:text-mist-300"
+          >
+            显示导演稿（含剧透）
+          </button>
+        )
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onExpand}
+          className="mt-1.5 rounded-md border border-ink-600 px-2 py-1 text-[11px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100 disabled:opacity-40"
+        >
+          {busy ? '正在展开…' : '展开这一幕（生成幕后走向）'}
+        </button>
+      )}
+    </Section>
+  );
 }
 
 /**
@@ -639,61 +710,123 @@ export function WorldPanel({
   const customGenres = useStore((s) => s.customGenres);
   // 点击在地人物弹出的档案卡
   const [npcCard, setNpcCard] = useState<NpcProfile | null>(null);
+  /*
+   * ---------------------------------------------------------------------
+   * 下面这几份派生数据全部用 `useMemo` 包住（协作方 §五 性能三连 ③）
+   *
+   * 为什么必须包：世界面板每次渲染都要它们，而其中两件在长局里是**重活** ——
+   *   - `knownText` 要把**整份编年史 + 全部线索 + 摘要**拼成一个大字符串；
+   *   - `revealed` 再在那个大字符串上逐节点做子串匹配；
+   *   - `anchors` 每次都要扫一遍**全部消息**。
+   * 一局玩到几百条消息时，这一串会随每帧重算，滚动和打字都发涩。
+   *
+   * 依赖都是 store 里的**稳定引用**（`gameState` / `chronicle` / `messages` …），
+   * 没变就不会重算 —— 这跟"选择器不许返回新对象"是同一条规矩的两个面。
+   * ---------------------------------------------------------------------
+   */
+
   // 剧情标记是给玩家看的，只显示中文键名；模型漏填的英文 key 直接藏起来
-  const flags = Object.entries(gameState.flags).filter(([k]) => /[\u4e00-\u9fa5]/.test(k));
+  const flags = useMemo(
+    () => Object.entries(gameState.flags).filter(([k]) => /[\u4e00-\u9fa5]/.test(k)),
+    [gameState.flags]
+  );
   const location = gameState.location?.trim();
 
-  // 地图节点：优先用模组给的"可达关系图"，没有就从「关键地点」兜底生成
-  const baseNodes = mapNodesOf(module);
-  /*
+  /* R14：幕结构。解析是纯函数，包在 useMemo 里（`parseActs` 每次返回新数组，不进选择器） */
+  const acts = useMemo(() => parseActs(module.acts), [module]);
+  const actIndex = normalizeActIndex(gameState.actIndex);
+  const actDetail = gameState.actDetails?.[String(actIndex)];
+  const [actBusy, setActBusy] = useState(false);
+  const expandCurrentAct = async () => {
+    setActBusy(true);
+    try {
+      await useStore.getState().expandAct(actIndex);
+    } finally {
+      setActBusy(false);
+    }
+  };
+
+  /* 地图节点：优先用模组给的"可达关系图"，没有就从「关键地点」兜底生成
+   *
    * 地点**软同步**（协作方 E）：
    * 守密人经常把玩家带到地图上没写的地方（"河边""那间废弃的澡堂"）。
    * 那种时候不能阻断叙事，也不该让玩家在地图上找不到自己——
    * 把去过但不在图上的地点作为**孤立节点**补进来，并注明"图上原本没有"。
    */
-  const namesOnMap = baseNodes.map((n) => n.name);
-  const extraNodes: MapNode[] = [];
-  for (const v of gameState.visited ?? []) {
-    const t = v.trim();
-    if (!t) continue;
-    if (namesOnMap.some((n) => n === t || n.includes(t) || t.includes(n))) continue;
-    if (extraNodes.some((n) => n.name === t)) continue;
-    extraNodes.push({ name: t, links: [], note: '图上原本没有这个地点' });
-  }
-  const mapNodes: MapNode[] = [...baseNodes, ...extraNodes];
+  const mapNodes = useMemo(() => {
+    const baseNodes = mapNodesOf(module);
+    const namesOnMap = baseNodes.map((n) => n.name);
+    const extraNodes: MapNode[] = [];
+    for (const v of gameState.visited ?? []) {
+      const t = v.trim();
+      if (!t) continue;
+      if (namesOnMap.some((n) => n === t || n.includes(t) || t.includes(n))) continue;
+      if (extraNodes.some((n) => n.name === t)) continue;
+      extraNodes.push({ name: t, links: [], note: '图上原本没有这个地点' });
+    }
+    return [...baseNodes, ...extraNodes] as MapNode[];
+  }, [module, gameState.visited]);
+
   /*
    * 地图迷雾：只画玩家"知道"的地方，避免开局把整张图摊开剧透。
    * 但**没有可达关系时不启用迷雾**——那样玩家会被锁死在原地（不知道任何别的地方，
    * 也就无处可去），反而更糟。这时按老行为全显示。
    */
-  const hasLinks = mapNodes.some((nd) => (nd.links ?? []).length > 0);
-  const knownText = [...chronicle.map((c) => c.text), ...gameState.clues, summary].join('\n');
-  const revealed = hasLinks
-    ? revealedNodeNames(mapNodes, gameState.visited ?? [], location ?? '', knownText)
-    : new Set(mapNodes.map((nd) => nd.name));
+  const hasLinks = useMemo(
+    () => mapNodes.some((nd) => (nd.links ?? []).length > 0),
+    [mapNodes]
+  );
+  const knownText = useMemo(
+    () => [...chronicle.map((c) => c.text), ...gameState.clues, summary].join('\n'),
+    [chronicle, gameState.clues, summary]
+  );
+  const revealed = useMemo(
+    () =>
+      hasLinks
+        ? revealedNodeNames(mapNodes, gameState.visited ?? [], location ?? '', knownText)
+        : new Set(mapNodes.map((nd) => nd.name)),
+    [hasLinks, mapNodes, gameState.visited, location, knownText]
+  );
 
   /*
    * 「去过」与「只是听说过」要能一眼分开（协作方建议，采纳）：
    * 去过的画实心，只是听说的画虚线空心——信息不丢，探索感也不被稀释。
    * visited 里存的可能是完整地点名（"霍尔特的侦探事务所"），节点名是简称，这里模糊匹配。
    */
-  // 关键抉择（回溯锚点）：倒序，最近的岔路口排最前
-  const anchors = messages
-    .filter((m) => m.role === 'player' && snapshots[m.id]?.key)
-    .map((m) => ({ id: m.id, label: snapshots[m.id]!.label, snap: snapshots[m.id]! }))
-    .reverse();
+  // 关键抉择（回溯锚点）：倒序，最近的岔路口排最前（要扫全部消息，所以包住）
+  const anchors = useMemo(
+    () =>
+      messages
+        .filter((m) => m.role === 'player' && snapshots[m.id]?.key)
+        .map((m) => ({ id: m.id, label: snapshots[m.id]!.label, snap: snapshots[m.id]! }))
+        .reverse(),
+    [messages, snapshots]
+  );
 
-  const visitedNames = new Set<string>();
-  for (const v of gameState.visited ?? []) {
-    const t = v.trim();
-    if (!t) continue;
-    const m = mapNodes.find((x) => x.name === t || x.name.includes(t) || t.includes(x.name));
-    if (m) visitedNames.add(m.name);
-  }
+  const visitedNames = useMemo(() => {
+    const set = new Set<string>();
+    for (const v of gameState.visited ?? []) {
+      const t = v.trim();
+      if (!t) continue;
+      const m = mapNodes.find((x) => x.name === t || x.name.includes(t) || t.includes(x.name));
+      if (m) set.add(m.name);
+    }
+    return set;
+  }, [gameState.visited, mapNodes]);
 
   return (
     <div className="space-y-6 p-4">
       <GoalSection goal={module.goal} stakes={module.stakes} urgency={module.urgency} />
+
+      {acts.length > 0 && (
+        <ActSection
+          acts={acts}
+          index={actIndex}
+          detail={actDetail}
+          busy={actBusy}
+          onExpand={expandCurrentAct}
+        />
+      )}
 
       {(gameState.threads ?? []).length > 0 && (
         <Section title="进行中的线">
@@ -733,7 +866,7 @@ export function WorldPanel({
         {anchors.length > 0 ? (
           <AnchorList anchors={anchors} onRewind={(id) => onRewind?.(id)} />
         ) : (
-          <Empty text="还没有关键抉择——掷骰、进入战斗、转移地点、拿到新线索都会自动记一个。" />
+          <Empty text="还没有关键抉择——检定没过、进入战斗、首次到某地、拿到新线索或新支线时，会自动记一个。" />
         )}
       </Section>
 
@@ -836,6 +969,9 @@ export function WorldPanel({
           </ul>
         )}
       </Section>
+
+      {/* 图鉴（R38）。模组没设敌对者表时 BestiaryPanel 自己 return null，不会占位 */}
+      <BestiaryPanel />
 
       <Section title="检定记录">
         {(() => {

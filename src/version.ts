@@ -23,7 +23,7 @@
  */
 
 /** 当前版本。改动玩家能感知的东西就往上走一位。 */
-export const APP_VERSION = '0.2.3';
+export const APP_VERSION = '0.5.0';
 
 /**
  * 构建号（构建时由 vite 注入的那串时间戳）。
@@ -32,6 +32,13 @@ export const APP_VERSION = '0.2.3';
  */
 export const BUILD_ID: string =
   typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev';
+
+/**
+ * 这次构建的时间（ISO 串，构建时注入）。
+ * 与 `version.json` 里的 `at` 同源，用于**不依赖字符串长度假设**地比较新鲜度（见 `isNewer`）。
+ */
+export const BUILD_AT: string =
+  typeof __BUILD_AT__ === 'string' ? __BUILD_AT__ : '';
 
 /** 完整版本串，如 `v0.1.0`；开发环境下会带上构建号后缀便于自查 */
 export function versionLabel(): string {
@@ -63,20 +70,26 @@ export function compareVersions(a: string, b: string): number {
  *   "我改了你还是旧的"原样复发。
  * - 只比**构建号**又分不出方向（不知道是线上新还是我新）。
  *
- * 所以：**先比版本定方向，版本相同再比构建号**。
- * 构建号是 `Date.now().toString(36)` —— 同长度 base36 的字典序**就是时间序**，
- * 因此能判断方向：回滚时线上更旧，不该打扰玩家。
+ * 所以：**先比版本定方向，版本相同再看新鲜度**。
+ *
+ * ## 新鲜度怎么比：优先时间戳，退回构建号（协作方第 6 版 §2.4）
+ * 构建号是 `Date.now().toString(36)`，靠"同长度 base36 的字典序 = 时间序"来比 ——
+ * 这个假设**哪年长度进位就失效**（8 位 → 9 位时字符串比较会得到错误结论）。
+ * `version.json` 已经带了 `at`（ISO 时间），所以改成：
+ * **① 线上有 `at` → 直接比时间戳；② 没有 `at`（老部署）→ 退回字符串比较 `id`，保持兼容。**
+ * 这同时让"忘了改版本号"的场景更稳。
  *
  * ## 规矩
  * **发版要改 `APP_VERSION`**（那样更新日志才有新条目）；
- * 但即使忘了，构建号兜底也会照样提示更新，不会静默漏掉。
+ * 但即使忘了，构建号/时间戳兜底也会照样提示更新，不会静默漏掉。
  *
  * 放在这里而不是 `update.ts`：那边依赖 PWA 的虚拟模块，纯函数放这儿才能单测。
  */
 export function isNewer(
-  online: { version?: string; id?: string },
+  online: { version?: string; id?: string; at?: string },
   currentVersion = APP_VERSION,
-  currentBuild = BUILD_ID
+  currentBuild = BUILD_ID,
+  currentAt = BUILD_AT
 ): 'newer' | 'latest' | 'unknown' {
   // 版本号变大 → 一定有新东西
   if (online.version) {
@@ -86,13 +99,32 @@ export function isNewer(
     if (cmp < 0) return 'latest';
   }
 
+  // ---- 版本相同（或线上没给版本号）：比新鲜度 ----
+
   /*
-   * 版本相同或线上没给版本号 → 落到构建号。
+   * ① 有明确的时间戳就比时间戳 —— 不依赖任何字符串长度假设。
+   * 线上时间新于本地构建时间 → 有新东西。
+   */
+  const onlineMs = parseTime(online.at);
+  const currentMs = parseTime(currentAt);
+  if (onlineMs !== null && currentMs !== null) {
+    return onlineMs > currentMs ? 'newer' : 'latest';
+  }
+
+  /*
+   * ② 退回构建号字符串比较（老部署没有 `at`）。
    * 开发环境（BUILD_ID === 'dev'）没有真实构建号可比；
-   * 这时又没版本号，只能认"判断不了"——比误报成有新版本好。
+   * 这时又没时间戳，只能认"判断不了"——比误报成有新版本好。
    */
   if (online.id && currentBuild !== 'dev') {
     return online.id > currentBuild ? 'newer' : 'latest';
   }
   return online.version ? 'latest' : 'unknown';
+}
+
+/** 解析 ISO 时间串；解析不出来返回 null（不抛异常——探测链路上不许炸） */
+function parseTime(v: string | undefined): number | null {
+  if (!v) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
 }

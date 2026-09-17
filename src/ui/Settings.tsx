@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useStore, TYPOGRAPHY_PRESETS, checkTargetText, type ThemeName } from './store';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TestSandbox } from './TestSandbox';
@@ -25,6 +25,7 @@ import {
 } from './audio.js';
 import { listRulesets, registerCustomRuleset, getRuleset, type CustomRulesetConfig } from '../core/rulesets/index.js';
 import { listGenres, type Genre } from '../core/genres.js';
+import { listGmVoices } from '../core/voices.js';
 import { generateJson, presetSystemPrompt } from '../orchestrator/generate.js';
 import { ModelError } from '../providers/model.js';
 import {
@@ -214,24 +215,81 @@ function readSlots(): SlotMeta[] {
 
 const CUSTOM_KEY = 'trpg.customRulesets';
 
-/** 设置页的分组目录（对应下面各节的锚点 id） */
+/**
+ * 设置页的分组目录（对应下面各节的锚点 id）。
+ *
+ * **顺序必须与下面 DOM 里的先后一致** —— 目录点一下就跳，顺序对不上会让人以为点错了。
+ * `keys` 是搜索用的关键词：玩家想找的东西常常不叫我们起的那个名字
+ * （比如"存档"其实在「数据与存档」、"API Key"在「模型与接口」），
+ * 光按标题匹配会搜不到，所以把同义词都列上。
+ */
 const SECTIONS = [
-  { id: 'sec-api', label: '模型与接口' },
-  { id: 'sec-rules', label: '规则与题材' },
-  { id: 'sec-look', label: '外观与排版' },
-  { id: 'sec-audio', label: '音频' },
-  { id: 'sec-data', label: '数据与存档' },
-  { id: 'sec-install', label: '安装到设备' },
-  { id: 'sec-dev', label: '开发者' },
+  { id: 'sec-rules', label: '规则与题材', keys: '规则 题材 跑团 coc dnd 自定义 口吻 说书人 旁白 搭档 命运' },
+  { id: 'sec-look', label: '外观与排版', keys: '外观 主题 配色 排版 字号 行距 缩进' },
+  { id: 'sec-audio', label: '音频', keys: '音频 音量 音效 bgm 氛围音 静音' },
+  { id: 'sec-api', label: '模型与接口', keys: '模型 api key 接口 服务商 硅基流动 deepseek 地址 温度 密钥 连接测试' },
+  { id: 'sec-data', label: '数据与存档', keys: '存档 导入 导出 备份 槽位 重置 清空 数据' },
+  { id: 'sec-install', label: '安装到设备', keys: '安装 pwa 桌面 主屏 离线 重载 更新' },
+  { id: 'sec-illustrate', label: '自动配图', keys: '带图战报 配图 生图 插画 图片 自动 战报' },
+  { id: 'sec-dev', label: '开发者', keys: '开发者 沙盒 测试 调试 dev' },
+  { id: 'sec-keys', label: '快捷键', keys: '快捷键 键盘 按键 enter esc' },
 ];
 
-/** 设置里的一节标题：带锚点 id，供顶部快速跳转 */
-function GroupTitle({ id, title, hint }: { id: string; title: string; hint?: string }) {
+/**
+ * 设置里的一节：**可折叠** + **可被搜索命中**（G6）。
+ *
+ * ## 为什么要折叠
+ * 设置项越加越多，一页摊开要滚很久，改一项得先找半天。
+ * 折叠之后每个标题都还在，扫一眼就能定位；要改的那节点开即可。
+ *
+ * ## 搜索怎么工作
+ * 搜索词同时匹配**标题、说明与关键词**（关键词在 `SECTIONS` 里）。
+ * 一旦在搜，就**只显示命中的节、并且强制展开** —— 否则搜到了却还是收着的，等于没搜。
+ * 关键词这一手是必须的：玩家找"存档"，而那节的标题叫「数据与存档」还好；
+ * 找"密钥"时标题叫「模型与接口」，不列关键词就搜不出来。
+ *
+ * 折叠状态**不持久化**：它是一次性的浏览状态，记进存档只会让人下次打开时莫名其妙。
+ */
+function Section({
+  id,
+  title,
+  hint,
+  query,
+  children,
+}: {
+  id: string;
+  title: string;
+  hint?: string;
+  query: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+  const keys = SECTIONS.find((s) => s.id === id)?.keys ?? '';
+  const q = query.trim().toLowerCase();
+  const hit = !q || `${title} ${hint ?? ''} ${keys}`.toLowerCase().includes(q);
+  // 搜索时不显示没命中的节；但**没有搜索词时一律显示**（默认全开，不做"藏起来"这种默认动作）
+  if (!hit) return null;
+  const expanded = open || Boolean(q);
   return (
-    <div id={id} className="scroll-mt-16 border-b border-ink-700 pb-1.5">
-      <h3 className="text-[13px] font-medium tracking-wide text-gold-400">{title}</h3>
-      {hint && <p className="mt-0.5 text-[11px] leading-relaxed text-mist-500">{hint}</p>}
-    </div>
+    <section id={id} className="scroll-mt-16">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-1.5 border-b border-ink-700 pb-1.5 text-left"
+      >
+        <span
+          className={`shrink-0 text-[9px] text-mist-500 transition-transform ${
+            expanded ? 'rotate-90' : ''
+          }`}
+        >
+          ▶
+        </span>
+        <span className="text-[13px] font-medium tracking-wide text-gold-400">{title}</span>
+      </button>
+      {hint && <p className="mt-0.5 pl-3.5 text-[11px] leading-relaxed text-mist-500">{hint}</p>}
+      {expanded && <div className="mt-3 space-y-4">{children}</div>}
+    </section>
   );
 }
 
@@ -651,6 +709,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
   const setGenre = useStore((s) => s.setGenre);
+  const gmVoice = useStore((s) => s.gmVoice);
+  const setGmVoice = useStore((s) => s.setGmVoice);
+  const autoIllustrate = useStore((s) => s.autoIllustrate);
+  const setAutoIllustrate = useStore((s) => s.setAutoIllustrate);
 
   const [testing, setTesting] = useState<'idle' | 'ok' | 'fail'>('idle');
   const [testMsg, setTestMsg] = useState('');
@@ -659,6 +721,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [slots, setSlots] = useState<SlotMeta[]>(readSlots());
   const [slotName, setSlotName] = useState('');
   const [customVersion, setCustomVersion] = useState(0);
+  /** 设置项搜索词（G6）。空 = 全部显示且按各节自己的折叠状态 */
+  const [query, setQuery] = useState('');
   const [installable, setInstallable] = useState(false);
   const [standalone, setStandalone] = useState(false);
 
@@ -938,8 +1002,28 @@ export function Settings({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* 快速跳转：设置项变多了，先给一张"目录" */}
-        <div className="sticky top-0 z-10 -mx-5 mb-4 flex flex-wrap gap-1.5 border-b border-ink-700 bg-ink-900/95 px-5 pb-2.5 pt-1 backdrop-blur">
+        {/* 搜索 + 快速跳转：设置项变多了，先给一张"目录"（G6） */}
+        <div className="sticky top-0 z-10 -mx-5 mb-4 border-b border-ink-700 bg-ink-900/95 px-5 pb-2.5 pt-1 backdrop-blur">
+          <label className="mb-2 flex items-center gap-2 rounded-lg border border-ink-600 bg-ink-850/70 px-2.5 py-1.5">
+            <span className="shrink-0 text-[11px] text-mist-500">🔍</span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="找设置项（如：密钥 / 存档 / 口吻）"
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-mist-200 outline-none placeholder:text-mist-600"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                className="shrink-0 text-[11px] text-mist-500 hover:text-mist-200"
+              >
+                清空
+              </button>
+            )}
+          </label>
+          {!query.trim() && (
+          <div className="flex flex-wrap gap-1.5">
           {SECTIONS.map((s) => (
             <button
               key={s.id}
@@ -949,6 +1033,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
               {s.label}
             </button>
           ))}
+          </div>
+          )}
         </div>
 
         {!config.apiKey && (
@@ -962,11 +1048,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="space-y-5">
-          <GroupTitle
+          <Section
             id="sec-rules"
             title="规则与题材"
             hint="题材决定这一局的写法、画风与队友倾向；规则决定怎么算。两者各自独立，可任意搭配。"
-          />
+            query={query}
+          >
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
@@ -986,6 +1073,34 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 >
                   <span className="block text-[12px] text-mist-100">{g.name}</span>
                   <span className="block text-[10px] leading-snug text-mist-500">{g.blurb}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/*
+           * 守密人口吻（R8）。
+           * 与题材是**两回事**：题材决定"这一局是什么味道"，口吻决定"用谁的声音讲"。
+           * 只改说法，不改规则 —— 谁掷骰、数值怎么算、真相什么时候给，一律不变。
+           */}
+          <div>
+            <span className="mb-2 block text-[12px] text-mist-400">
+              守密人的口吻{' '}
+              <span className="text-mist-500/70">（只改"怎么说"，不改任何规则与数值）</span>
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {listGmVoices().map((v) => (
+                <button
+                  key={v.id}
+                  onClick={() => setGmVoice(v.id)}
+                  className={`rounded-lg border p-2 text-left transition ${
+                    gmVoice === v.id
+                      ? 'border-gold-600/70 bg-gold-500/10'
+                      : 'border-ink-600 hover:border-gold-600/40'
+                  }`}
+                >
+                  <span className="block text-[12px] text-mist-100">{v.label}</span>
+                  <span className="block text-[10px] leading-snug text-mist-500">{v.hint}</span>
                 </button>
               ))}
             </div>
@@ -1047,12 +1162,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <CustomRulesetEditor onSaved={() => setCustomVersion((v) => v + 1)} />
             </div>
           </details>
+          </Section>
 
-          <GroupTitle
+          <Section
             id="sec-look"
             title="外观与排版"
             hint="主题换配色，排版只影响故事正文的显示方式。"
-          />
+            query={query}
+          >
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">外观主题</span>
@@ -1139,12 +1256,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
               段落首行缩进两字
             </label>
           </div>
+          </Section>
 
-          <GroupTitle
+          <Section
             id="sec-audio"
             title="音频"
             hint="氛围音由代码生成，不用下载文件；判定音效可以换成你自己的梗曲。"
-          />
+            query={query}
+          >
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
@@ -1277,12 +1396,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </div>
             )}
           </div>
+          </Section>
 
-          <GroupTitle
+          <Section
             id="sec-api"
             title="模型与接口"
             hint="填好服务商、API Key 与模型名就能开团。生图是可选功能，留空就关闭。"
-          />
+            query={query}
+          >
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">服务商预设</span>
@@ -1423,12 +1544,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </span>
             )}
           </div>
+          </Section>
 
-          <GroupTitle
+          <Section
             id="sec-data"
             title="数据与存档"
             hint="进度存在本机浏览器里。手机长期不访问可能被系统清理，建议定期导出备份。"
-          />
+            query={query}
+          >
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">存档与记录</span>
@@ -1514,12 +1637,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
               )}
             </div>
           </div>
+          </Section>
 
-          <GroupTitle
+          <Section
             id="sec-install"
             title="安装到设备"
             hint="装到手机主屏后没有地址栏、能离线打开，也不容易被系统清掉本地存档。"
-          />
+            query={query}
+          >
 
           <div>
             {standalone ? (
@@ -1602,12 +1727,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
               卡在旧版本？强制重载（清缓存重来，存档不受影响）
             </button>
           </div>
+          </Section>
 
-          <GroupTitle
+          <Section
             id="sec-dev"
             title="开发者"
             hint="测试沙盒：一键把环境摆好，省得每次测功能都要从头建角色、想模组。"
-          />
+            query={query}
+          >
 
           <div className="space-y-2">
             <label className="flex items-center gap-2 rounded-lg border border-ink-700 bg-ink-850/60 px-3 py-2">
@@ -1633,8 +1760,43 @@ export function Settings({ onClose }: { onClose: () => void }) {
               把背包塞满、把数值调到濒死或归零、直接触发结档。测完点「回到出厂状态」即可清掉。
             </p>
           </div>
+          </Section>
 
-          <GroupTitle id="sec-keys" title="快捷键" />
+          {/*
+           * 带图战报的总开关（G）。
+           * 默认**关** —— 每张图都是一次真实的生图调用，默认开着等于替主人决定支出。
+           */}
+          <Section
+            id="sec-illustrate"
+            title="自动配图（带图战报）"
+            hint="关键节点（回溯锚点）到了自动配一张图，结档时能导出一份带图的战报。"
+            query={query}
+          >
+            <label className="flex items-start gap-2.5">
+              <input
+                type="checkbox"
+                checked={autoIllustrate}
+                onChange={(e) => setAutoIllustrate(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-gold-500"
+              />
+              <span className="text-[12px] leading-relaxed text-mist-300">
+                关键节点自动配图
+                <span className="mt-0.5 block text-[11px] text-mist-500">
+                  <strong className="text-mist-200">默认关闭</strong>
+                  ：每张图都会真的调用一次生图接口（要花钱）。打开之后，
+                  每次记下「关键抉择」时会顺手给那一轮配一张。
+                  不想全局打开也没关系 —— 任何一条守密人的消息上都有单独的「配图」按钮。
+                  {!config.imageModel?.trim() && (
+                    <span className="mt-1 block text-blood-300/90">
+                      还没填「生图模型」，现在打开也不会生图（先去上面「模型与接口」填）。
+                    </span>
+                  )}
+                </span>
+              </span>
+            </label>
+          </Section>
+
+          <Section id="sec-keys" title="快捷键" query={query}>
 
           <ul className="space-y-1 text-[11px] text-mist-400">
             {[
@@ -1659,6 +1821,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <code className="mx-1 rounded bg-ink-700 px-1">OLLAMA_ORIGINS=*</code>
             再重启。若报跨域错误，可以改用本地代理或 OneAPI 之类的中转。
           </p>
+          </Section>
         </div>
 
         {toast && (

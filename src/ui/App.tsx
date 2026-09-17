@@ -29,10 +29,17 @@ import {
   updateSW,
 } from '../pwa.js';
 import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.js';
-import { FOLD_SYSTEM, endingSystemPrompt } from '../orchestrator/generate.js';
+import {
+  FOLD_SYSTEM,
+  actionImagePrompt,
+  endingSystemPrompt,
+} from '../orchestrator/generate.js';
+import { generateImage } from '../providers/model.js';
 import { EndingScreen } from './EndingScreen';
 import { TestSandbox } from './TestSandbox';
 import { applyUpdate, checkForUpdate, watchForUpdates } from '../update.js';
+import { anchorReasons } from './anchorReasons.js';
+import { parseActs, normalizeActIndex } from '../core/acts.js';
 import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
 import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
@@ -366,7 +373,19 @@ export default function App() {
      * 它是持续状态（不是一次性事件），所以每轮都跟着——守密人很容易忘掉"你还扛着一箱子东西"。
      */
     const loadNote = encumbranceNote(useStore.getState().encumbrance());
-    const notes = [engineNote, dyingNote, loadNote].filter(Boolean) as string[];
+    /*
+     * 伤口提示：与超重同理，**每轮都跟着**——伤口是持续状态，
+     * 而守密人特别容易"这一轮忘了它"，于是要么完全不提、要么下一轮又突然想起，
+     * 变成"止住了又渗血"。这里每轮把现状与处置依据说清楚。
+     */
+    const woundNote = useStore.getState().woundStatus().note;
+    /*
+     * 临时疯狂提示：同样是持续状态，每轮都跟着。
+     * 它现在有数值后果（检定吃惩罚），守密人必须知道、并在叙事里演出他的失控，
+     * 否则玩家只会看到"目标值怎么莫名低了"。
+     */
+    const madNote = useStore.getState().insanity().note;
+    const notes = [engineNote, dyingNote, loadNote, woundNote, madNote].filter(Boolean) as string[];
     const finalNote = notes.length ? notes.join('\n\n') : undefined;
     // 世界书只注入命中关键词的条目，全量塞进去会撑爆上下文
     const context = snapshot.slice(-4).map((m) => m.content);
@@ -375,6 +394,8 @@ export default function App() {
     const systemPrompt = buildSystemPrompt({
       rulesetName: rs.name,
       genre: getGenre(useStore.getState().genreId, useStore.getState().customGenres),
+      // 守密人口吻（R8）：只改"怎么说"，不改任何规则；没选过就是默认那一个
+      gmVoice: useStore.getState().gmVoice,
       module: gameModule,
       character,
       playerAddress: addressOf(character),
@@ -494,35 +515,19 @@ export default function App() {
       /*
        * 关键决策点（回溯锚点）。
        * 结档时玩家要能从"值得重来的那几个岔路口"里挑一个退回去，
-       * 而不是在上百条消息里翻。标记规则刻意保守：只标真正改变走向的回合。
+       * 而不是在上百条消息里翻。
        *
-       * **事件与位移要分开对待**（协作方 3.2）：
-       * - **位移**（location）：只在**首次到访该地点**时记。长局里来回跑腿几十次，
-       *   每次都记会让结档页变成一串"移步：走廊"，把真正的岔路口淹没掉。
-       * - **事件**（掷骰 / 战斗 / 新线索 / 新支线 / 受伤 / 理智受创）：**保持全记**，
-       *   这些才是玩家真想回退的地方。
+       * **判据在 `anchorReasons.ts`（纯函数、可单测）** —— 这里只负责喂数据。
+       * 2026-09-17 主人拍板走**精简版**：掷骰只在**没过**时记（成功不记），
+       * 受伤 / 理智受创**不再记**（那是结算，不是选择），
+       * 位移只记**首次到访**、战斗 / 新线索 / 新支线照记。
        */
       if (lastPlayer) {
-        const reasons: string[] = [];
-        if (lastPlayer.check) reasons.push(`掷骰：${lastPlayer.check.skill}`);
-        for (const d of contract?.state_delta ?? []) {
-          if (d.target === 'combat.active') reasons.push(d.value ? '进入战斗' : '战斗结束');
-          else if (d.target === 'location') {
-            // 首次到访才算锚点：走去过的地方不记，避免锚点被通勤淹没
-            const dest = String(d.value ?? '');
-            const known = useStore.getState().gameState.visited ?? [];
-            if (dest && !known.includes(dest)) reasons.push(`移步：${dest}`);
-          } else if (d.target === 'clues' && d.op === 'add') reasons.push('新线索');
-          else if (d.target === 'threads' && d.op === 'add') reasons.push('新支线');
-          else if (d.target === 'vitals.hp' && d.op === 'dec') {
-            // 数值型只认"掉了不少"；骰子表达式（"1d6"这种真挨了一下）一律算
-            if (typeof d.amount === 'string' || (typeof d.amount === 'number' && d.amount >= 3))
-              reasons.push('受伤');
-          } else if (d.target === 'vitals.san' && d.op === 'dec') {
-            if (typeof d.amount === 'string' || (typeof d.amount === 'number' && d.amount >= 3))
-              reasons.push('理智受创');
-          }
-        }
+        const reasons = anchorReasons({
+          check: lastPlayer.check,
+          deltas: contract?.state_delta ?? [],
+          visited: useStore.getState().gameState.visited ?? [],
+        });
         if (reasons.length > 0) {
           /*
            * label 要能"一眼认出是哪一个岔路口"：只有"新线索"三个字，
@@ -545,9 +550,55 @@ export default function App() {
             .map((s) => s.label ?? '');
           if (labels[labels.length - 1] !== label) {
             useStore.getState().markSnapshotKey(lastPlayer.id, label);
+            /*
+             * 带图战报（G）：关键节点到了，如果总开关开着，就给这一轮的叙事配一张图。
+             *
+             * 三条刻意的：
+             * - **默认关**（`autoIllustrate` 缺省 false）：每张图都是真金白银的调用，
+             *   默认开着等于替主人决定支出。
+             * - **不 await**：图是留给"回看这一局"的，不该让玩家为了它多等一秒。
+             * - **失败静默**：没配生图模型 / 接口报错都只是少一张图，绝不弹错打断回合。
+             */
+            if (useStore.getState().autoIllustrate) {
+              const cfg = useStore.getState().config;
+              if (cfg.imageModel?.trim()) {
+                void (async () => {
+                  try {
+                    const url = await generateImage(
+                      actionImagePrompt(
+                        finalBody,
+                        { gender: character.gender, description: character.description },
+                        getGenre(useStore.getState().genreId, useStore.getState().customGenres)
+                      ),
+                      { ...cfg, model: cfg.imageModel!.trim(), size: cfg.imageSize || '1024x1024' }
+                    );
+                    if (url) useStore.getState().setMessageSceneImage(gmId, url);
+                  } catch {
+                    /* 少一张图而已，不打扰玩家 */
+                  }
+                })();
+              }
+            }
           }
         }
       }
+      /*
+       * R14：守密人声明"这一幕收束了" → 推进到下一幕，并展开下一幕的导演稿。
+       *
+       * 三条刻意的：
+       * - **只在真有下一幕时推进**（最后一幕声明了也不越界，免得幕号跑到范围外）。
+       * - **展开是异步的、不等它**：这一轮的叙事已经给了玩家，不能为了幕后材料让他多等。
+       * - **失败无所谓**：展开不了只是这一章少一份导演稿，故事照跑（世界面板上还能手动补）。
+       */
+      if (contract?.act_done === true) {
+        const acts = parseActs(useStore.getState().module.acts);
+        const curIdx = normalizeActIndex(useStore.getState().gameState.actIndex);
+        if (acts.length > 0 && curIdx + 1 < acts.length) {
+          useStore.getState().setActIndex(curIdx + 1);
+          void useStore.getState().expandAct(curIdx + 1);
+        }
+      }
+
       // 剧情里出现了候选队友的名字 → 标记为"已登场"（未登场不可入队）
       useStore.getState().markCandidatesMet(finalBody);
 
@@ -695,6 +746,19 @@ export default function App() {
   const endingText = useStore((s) => s.gameState.ending?.text ?? '');
   const endingKind = useStore((s) => s.gameState.ending?.kind ?? 'other');
   const endingAskedRef = useRef('');
+  /*
+   * R13/R30：结档时把这一局记进**生涯**（跨局累计 + 成就）。
+   *
+   * 用 `ending.at` 去重 —— 一次结档只记一次，回溯后重新结档又是新的 `at`，会正常再记一局。
+   * 放在这个 effect（而不是结局正文回来之后）是因为统计读的是引擎已有的账：
+   * 编年史、检定卡、线索、交手记录在结档那一刻就已经定稿了。
+   */
+  const runRecordedRef = useRef('');
+  useEffect(() => {
+    if (!endingAt || runRecordedRef.current === endingAt) return;
+    runRecordedRef.current = endingAt;
+    useStore.getState().recordCurrentRun();
+  }, [endingAt]);
   useEffect(() => {
     if (!endingAt || endingText) return;
     if (endingAskedRef.current === endingAt) return;
@@ -816,6 +880,12 @@ export default function App() {
 
   const doStartNew = () => {
     useStore.getState().startNewGame();
+    /*
+     * R14：开新团就把**第一幕**的导演稿展开（长篇尤其需要）。
+     * 同样不等它 —— 玩家该立刻看到开场白；稿子到了自然会在下一轮的提示词里生效。
+     * 没有幕结构时 `expandAct` 自己会静默返回，不会白花一次调用。
+     */
+    void useStore.getState().expandAct(0);
     setPendingStart(false);
     setShowPrep(false);
     setShowSettings(false);
