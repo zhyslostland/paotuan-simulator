@@ -1,8 +1,16 @@
 import { useMemo, useState } from 'react';
 import { useStore, type TurnSnapshot } from './store';
+import { defaultWorldName, findWorld } from '../core/campaign.js';
 import { getRuleset } from '../core/rulesets/index.js';
-import { passRate, unlockedAchievements, OUTCOME_LABEL, type AchievementDef } from '../core/career.js';
-import { summarizeRun } from './runSummary.js';
+import {
+  passRate,
+  unlockedAchievements,
+  ACHIEVEMENTS,
+  OUTCOME_LABEL,
+  type AchievementDef,
+} from '../core/career.js';
+import { isSelfContainedImage, REMOTE_LINK_HOURS } from '../core/imageData.js';
+import { checksOf, summarizeRun } from './runSummary.js';
 import {
   buildArchiveMarkdown,
   buildIllustratedReportHtml,
@@ -11,6 +19,7 @@ import {
   copyText,
   downloadHtml,
   downloadMarkdown,
+  roundPlayerLines,
   safeFilename,
   type ExportInput,
 } from './exportGame.js';
@@ -99,6 +108,19 @@ function RunAndCareer() {
   const careerRate = passRate(t);
   const newIds = new Set(lastUnlocked.map((a) => a.id));
 
+  /*
+   * 世界层（Phase 2）：这一局的收束**已经并进哪个世界**。
+   * 记档发生在 `App.tsx` 的 effect 里（与生涯同一时机），所以这里读到的
+   * 一定包含刚跑完的这局 —— `runs[0]` 就是它。
+   */
+  const worlds = useStore((s) => s.worlds);
+  const worldName = useStore((s) => s.worldName);
+  const moduleTitle = useStore((s) => s.module.title);
+  const world = useMemo(
+    () => findWorld(Object.values(worlds), worldName.trim() || defaultWorldName(moduleTitle)),
+    [worlds, worldName, moduleTitle]
+  );
+
   return (
     <>
       {/* 本局统计 */}
@@ -144,7 +166,16 @@ function RunAndCareer() {
             value={`${t.checks}`}
             hint={careerRate === null ? undefined : `过了 ${careerRate}%`}
           />
-          <Stat label="成就" value={`${all.length} / ${all.length + 0}`} hint="达成即记，不重复" />
+          {/*
+            P2-2：分母是**全部成就**，不是"已解锁的条数"。
+            以前分子分母都是 `unlockedAchievements` → 永远显示 x/x（"4 / 4"），
+            看着像全解锁了，其实才拿到四个之一。设置页一直是对的，这里跟它对齐。
+          */}
+          <Stat
+            label="成就"
+            value={`${all.length} / ${ACHIEVEMENTS.length}`}
+            hint="达成即记，不重复"
+          />
         </div>
         <p className="mt-2 text-[11px] leading-relaxed text-mist-500">
           结局记录：达成 {t.outcomes.success} · 灰色 {t.outcomes.grey} · 失守 {t.outcomes.failure} ·
@@ -170,6 +201,26 @@ function RunAndCareer() {
           </details>
         )}
       </div>
+
+      {/* 世界（Phase 2）：这一局留下了什么给"下一次" */}
+      {world && (
+        <div className="mt-4 rounded-xl border border-ink-700 bg-ink-900/50 p-4">
+          <h2 className="text-[12px] tracking-wider text-mist-400">这个世界</h2>
+          <p className="mt-2 text-[12px] text-mist-200">
+            《{world.name}》<span className="text-mist-500"> · 第 {world.runs.length} 局</span>
+          </p>
+          {world.modules.length > 1 && (
+            <p className="mt-1 text-[11px] text-mist-500">
+              在这里跑过：{world.modules.join(' · ')}
+            </p>
+          )}
+          <p className="mt-2 text-[11px] leading-relaxed text-mist-500">
+            收束已经记进这个世界了。下次在同一个世界里开团（准备页「世界」里能选到它），
+            去过的地方、还活着的人、没办完的事会跟着过去 ——
+            但身上的东西、伤势和疯狂不会：那些是这一局的事。
+          </p>
+        </div>
+      )}
     </>
   );
 }
@@ -202,11 +253,23 @@ export function EndingScreen({
   const [exportMsg, setExportMsg] = useState('');
   if (!ending) return null;
 
-  // 关键节点按消息顺序排（玩家从后往前挑要退回哪一步）
-  const anchors = messages
+  /*
+   * 关键节点——**先留一份按发生顺序的**（导出用），界面那份倒过来（玩家从后往前挑要退回哪一步）。
+   *
+   * `text` 是玩家当时那句话的**全文**（§6.3a）。以前导出的结算分享只有标签，
+   * 而标签在 `App.tsx` 里生成时被截成 16 字 —— 那 16 字够"认出是哪个岔路口"，
+   * 不够"记下我当时做了什么"。
+   */
+  const anchorsChrono = messages
     .filter((m) => m.role === 'player' && snapshots[m.id]?.key)
-    .map((m) => ({ id: m.id, label: snapshots[m.id]!.label, snap: snapshots[m.id]! }))
-    .reverse();
+    .map((m) => ({
+      id: m.id,
+      label: snapshots[m.id]!.label,
+      snap: snapshots[m.id]!,
+      text: String(m.content ?? ''),
+      checks: checksOf(m),
+    }));
+  const anchors = [...anchorsChrono].reverse();
 
   /*
    * 导出（用户 2026-09-16 拍板：Markdown / 文本，分成"结算分享"与"整体流程分享"）。
@@ -217,14 +280,26 @@ export function EndingScreen({
    * 带图战报的画面：**配了图的那些守密人回合**，按发生顺序。
    * 图是自动（关键节点）或手动挂在那条消息上的，这里只管把它们按顺序串起来。
    */
+  /*
+   * §6.3b：每个画面挂上**那一回玩家说了什么**。
+   * 「这一幕属于第几回」的判据在 `exportGame.roundPlayerLines`（只有那一份），这里只取值。
+   */
+  const playerLines = roundPlayerLines(messages);
   const scenes = messages
-    .filter((m) => m.role === 'gm' && (messageImages[m.id] || m.sceneImage))
-    .map((m, i) => ({
-      label: `第 ${i + 1} 个画面`,
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => m.role === 'gm' && (messageImages[m.id] || m.sceneImage))
+    .map(({ m, i }, n) => ({
+      label: `第 ${n + 1} 个画面`,
       // 兜底：万一正文里还留着契约块，别把它印进战报
       text: String(m.content ?? '').replace(/```json[\s\S]*$/i, '').trim(),
       image: messageImages[m.id] ?? m.sceneImage,
+      player: playerLines[i],
     }));
+  /*
+   * 这几张图里有没有"只是临时链接"的（P2-3）。
+   * 界面文案跟着它说 —— 导出页脚由 `exportGame` 自己判同一件事，两处判据同源。
+   */
+  const linkedScenes = scenes.filter((s) => s.image && !isSelfContainedImage(s.image)).length;
   const exportInput: ExportInput = {
     scenes,
     character,
@@ -232,7 +307,25 @@ export function EndingScreen({
     gameState,
     chronicle,
     summary,
-    anchors: anchors.map((a) => ({ label: a.label || '关键抉择' })),
+    /*
+     * P2-4：把这一局的**全部对话**交给导出（原来只给 `chronicle`，玩家原话与骰点全丢）。
+     *
+     * 契约块（```json）**不在这里洗** —— `exportGame` 自己会洗（`stripContract`），
+     * 判据只有那一份。这里洗一遍等于两处判据，早晚分叉。
+     */
+    messages: messages
+      .filter((m) => m.role === 'player' || m.role === 'gm')
+      .map((m) => ({
+        role: m.role,
+        content: String(m.content ?? ''),
+        checks: checksOf(m),
+      })),
+    // 结算分享里的「关键行动」按**发生顺序**读起来才顺，用倒过来之前那份
+    anchors: anchorsChrono.map((a) => ({
+      label: a.label || '关键抉择',
+      text: a.text,
+      checks: a.checks,
+    })),
     rulesetName: rs.name,
     mainDice: rs.mainDice,
     characteristicLabels: Object.fromEntries(
@@ -385,14 +478,18 @@ export function EndingScreen({
             </div>
           </div>
           {/*
-           * 带图战报（G）：把这些画面串成一个**自包含**的 HTML。
+           * 带图战报（G）：把这些画面串成一个 HTML。
            * 单独一块、不用上面那个 Markdown 网格 —— 它是另一种东西（有图、能直接发给人看）。
            */}
           <div className="mt-3 rounded-lg border border-ink-700 p-3">
             <div className="text-[12px] text-mist-300">带图战报（HTML）</div>
             <div className="mt-0.5 text-[10px] leading-relaxed text-mist-500">
               {scenes.length > 0
-                ? `把这一局留下的 ${scenes.length} 个画面连同当时的叙事串成一份网页，图片已内嵌，单个文件就能发给别人。`
+                ? `把这一局留下的 ${scenes.length} 个画面连同当时的叙事串成一份网页。${
+                    linkedScenes > 0
+                      ? `其中 ${linkedScenes} 张图是临时链接（约 ${REMOTE_LINK_HOURS} 小时后可能失效），要长期保存请重新生成一次。`
+                      : '图片已内嵌，单个文件就能发给别人。'
+                  }`
                 : '这一局还没有配图。在设置里打开「带图战报」，或对某一条消息点「配图」，之后再来导出。'}
             </div>
             <div className="mt-2.5 flex gap-1.5">

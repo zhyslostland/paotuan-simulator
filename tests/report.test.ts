@@ -78,3 +78,36 @@ describe('带图战报：内容与红线', () => {
     expect(html).not.toContain('终幕 ·');
   });
 });
+
+describe('页脚不许撒谎（P2-3）', () => {
+  it('图全是 data URI → 才可以说"已内嵌"', () => {
+    const html = buildIllustratedReportHtml(
+      base({ scenes: [{ text: '门开了。', image: 'data:image/png;base64,AAAA' }] })
+    );
+    expect(html).toContain('已内嵌');
+    expect(html).not.toContain('失效');
+  });
+
+  it('**只要有一张是临时链接，就不许说"已内嵌"，并要说它会失效**', () => {
+    /*
+     * 这是这一刀的核心：以前页脚写死"本文件自包含，图片已内嵌"，
+     * 而服务商的 url 过一天就没了 —— 玩家转发出去，别人打开一排裂图。
+     */
+    const html = buildIllustratedReportHtml(
+      base({
+        scenes: [
+          { text: '第一幕。', image: 'data:image/png;base64,AAAA' },
+          { text: '第二幕。', image: 'https://cdn.example.com/tmp.png' },
+        ],
+      })
+    );
+    expect(html).not.toContain('图片已内嵌');
+    expect(html).toContain('24'); // 说清楚大概多久失效
+    expect(html).toContain('失效');
+  });
+
+  it('没有配图时也不提"内嵌"（没什么可内嵌的）', () => {
+    const html = buildIllustratedReportHtml(base());
+    expect(html).not.toContain('图片已内嵌');
+  });
+});

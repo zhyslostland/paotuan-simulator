@@ -34,6 +34,28 @@ export class ModelError extends Error {
 }
 
 /**
+ * 「连不上」时给玩家的提示（P4-2）。
+ *
+ * ## 为什么不能一律提 Ollama
+ * 早先这句是写死的：
+ * > 无法连接到 X。若是浏览器直连，请确认该服务允许跨域（CORS）；本地 Ollama 需要设置 OLLAMA_ORIGINS=*
+ *
+ * 可**绝大多数玩家用的不是 Ollama**（硅基流动 / DeepSeek / 通义…）。
+ * 一个连不上云服务的玩家，被告知去设 `OLLAMA_ORIGINS` 环境变量 ——
+ * 那是**指错路**：他既没有 Ollama，也没法照做，只能更困惑。
+ *
+ * 所以按 baseUrl 分流：**只有真指向本机时才提 Ollama**。
+ * `localhost` / `127.0.0.1` / `[::1]` 三种写法都认（IPv6 的方括号也算）。
+ */
+export function connectHint(url: string): string {
+  const isLocal = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(url);
+  const tail = isLocal
+    ? '本地 Ollama 需要设置 OLLAMA_ORIGINS=* 并重启服务。'
+    : '请确认地址与 Key 是否填对、网络是否可达；若服务商要求白名单，把你的域名加进去。';
+  return `无法连接到 ${url}。若是浏览器直连，请确认该服务允许跨域（CORS）；${tail}`;
+}
+
+/**
  * 网络层重试：弱网 / 切后台再回来时，连接建立失败很常见。
  * 对"连不上"重试一次，4xx/5xx 这类服务端明确拒绝则不重试（重试也没用）。
  */
@@ -89,9 +111,7 @@ export async function* streamChat(
     });
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
-    throw new ModelError(
-      `无法连接到 ${url}。若是浏览器直连，请确认该服务允许跨域（CORS）；本地 Ollama 需要设置 OLLAMA_ORIGINS=*`
-    );
+    throw new ModelError(connectHint(url));
   }
 
   if (!res.ok || !res.body) {
@@ -146,10 +166,15 @@ export async function chat(
 }
 
 /**
- * 生图接口（占位实现）
+ * 生图接口。
+ *
+ * 走 OpenAI 兼容的 `/images/generations`。两条与"图存哪儿"有关的口径：
+ *
+ * 1. **优先要 `b64_json`**（图进响应体）—— 我们要的是图，不是一个过两天就失效的链接。
+ * 2. 只拿到 `url` 时返回链接，由调用方决定要不要 `fetchImageAsLocal()` 抓回来。
+ *    **返回值不保证自包含**，判据统一放 `core/imageData.ts`（只有一处说法）。
  *
  * 用户要求"看看速度行不行"——接口先留好，接哪家取决于速度实测。
- * 目前支持 OpenAI 兼容的 /images/generations，以及通用的图床返回格式。
  */
 export interface ImageGenConfig extends ModelConfig {
   size?: string;
@@ -161,6 +186,16 @@ export async function generateImage(
 ): Promise<string | null> {
   if (!cfg.apiKey) throw new ModelError('生图未配置 API Key');
   const url = `${cfg.baseUrl.replace(/\/+$/, '')}/images/generations`;
+  /*
+   * **要 base64，不要链接**（P2-3）。
+   *
+   * 服务商给的 url 是**临时的** —— 存下来当时能看，隔天就是一张裂图，
+   * 而导出战报还傻乎乎地写着"图片已内嵌、本文件自包含"。
+   * 所以优先要 `b64_json`（图直接进响应体，拿到即拥有）。
+   *
+   * 兼容性：有些服务商不认这个参数、直接忽略并仍然返回 url —— 那就走下面的
+   * `fetchImageAsLocal()` 再抓一次；两条路都走不通才降级成"临时链接"。
+   */
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -172,6 +207,7 @@ export async function generateImage(
       prompt,
       size: cfg.size ?? '1024x1024',
       n: 1,
+      response_format: 'b64_json',
     }),
   });
   if (!res.ok) {
@@ -180,5 +216,34 @@ export async function generateImage(
   const json = (await res.json()) as { data?: { url?: string; b64_json?: string }[] };
   const first = json.data?.[0];
   if (!first) return null;
-  return first.url ?? (first.b64_json ? `data:image/png;base64,${first.b64_json}` : null);
+  // 有的服务商返回 `data:image/png;base64,xxx` 整串，有的只给裸 base64 —— 两种都要认
+  if (first.b64_json) {
+    const b = first.b64_json.trim();
+    return /^data:/i.test(b) ? b : `data:image/png;base64,${b}`;
+  }
+  return first.url ?? null;
+}
+
+/**
+ * 把一张远端图片抓回本地，转成 data URI（P2-3）。
+ *
+ * 生图接口只给链接时走这里。**失败不重试、不绕代理**：
+ * 跨源 `fetch` 被 CORS 挡掉是很正常的，那不是"错误"，
+ * 而是一种需要如实告诉玩家的结果（→ `{ kind: 'remote' }`，界面与导出改说"临时链接"）。
+ */
+export async function fetchImageAsLocal(
+  url: string
+): Promise<{ kind: 'self'; value: string } | { kind: 'remote'; value: string } | { kind: 'fail'; reason: string }> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return { kind: 'remote', value: url };
+    const blob = await res.blob();
+    if (!blob.size) return { kind: 'remote', value: url };
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const { toDataUri } = await import('../core/imageData.js');
+    return { kind: 'self', value: toDataUri(blob.type, bytes) };
+  } catch (e) {
+    // 跨源被挡（CORS）会走到这里；这不是故障，是"这张图只能留链接"
+    return { kind: 'remote', value: url };
+  }
 }

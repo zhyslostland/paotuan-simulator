@@ -56,6 +56,40 @@ describe('轮数必须跟着引擎记的 疯狂轮数 走（§2.1 潜伏 bug）'
   });
 });
 
+/*
+ * H16 / H16·残留（协作方第 22、23 版）：**同一状态只许一种说法**。
+ *
+ * `临时疯狂` 是被引擎解释过的状态，不是模型留的叙事 ——
+ * 所以状态栏与世界页「剧情标记」都必须取 `insanityOf().label`，
+ * 不能有一处去复读 flags 里那句原始描述（会变成
+ * 「临时疯狂：理智骤降 6 点，陷入临时疯狂」这种复读）。
+ */
+describe('H16：临时疯狂的那句话只有一份（引擎算的 label）', () => {
+  it('label 说人话 —— 带轮数，且**不含** flags 里那句原始描述', () => {
+    const ins = insanityOf(
+      { 临时疯狂: '理智骤降 6 点，陷入临时疯狂', 疯狂轮数: 2 },
+      'percent',
+      2
+    );
+    expect(ins.label).toBe('临时疯狂（还剩 2 轮）');
+    // 关键：不能把原始描述再抄一遍（那是 H16 要消灭的复读）
+    expect(ins.label).not.toContain('理智骤降');
+  });
+
+  it('同一份 flags 算两次，两处界面拿到的一定是同一句（判据只有一处）', () => {
+    const flags = { 临时疯狂: '他抓着自己的头发喃喃自语', 疯狂轮数: 3 };
+    const a = insanityOf(flags, 'percent', 3).label;
+    const b = insanityOf(flags, 'percent', 3).label;
+    expect(a).toBe(b);
+    expect(a).toBe('临时疯狂（还剩 3 轮）');
+  });
+
+  it('没疯时不许显示任何"疯狂"（label 是"神志清醒"）', () => {
+    expect(insanityOf({}, 'percent').label).toBe('神志清醒');
+    expect(insanityOf({ 临时疯狂: false }, 'percent').active).toBe(false);
+  });
+});
+
 describe('临时疯狂：有界、可恢复的数值惩罚（用户 09-16 拍板）', () => {
   it('没疯时不罚', () => {
     expect(insanityOf({}, 'percent').active).toBe(false);

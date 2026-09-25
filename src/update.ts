@@ -17,6 +17,7 @@
  * 两条路任一命中都会亮出「有新版本」横幅，用户可以立刻更新，也可以去设置里手动点「检查更新」。
  */
 import { updateSW } from './pwa.js';
+import { navigateFresh } from './nav.js';
 import { isOwnCache, isOwnRegistration } from './purgeScope.js';
 import {
   APP_VERSION,
@@ -104,23 +105,6 @@ async function purgeEverything(): Promise<void> {
   }
 }
 
-/**
- * 带戳导航：连 CDN 边缘缓存一起绕开。replace 不会在历史里留"后退又触发"的记录。
- *
- * **顺带把 pathname 归一化到根路径**：线上 `/index.html` 与 `/` 是**两条独立缓存**，
- * 平台每次部署只刷新 `/`，`/index.html` 那条长期残留着很早的旧包。
- * 从那条路进来的玩家必须被挪走，否则怎么刷新都是旧的。
- */
-function navigateFresh(): void {
-  try {
-    const url = new URL(location.href);
-    url.pathname = url.pathname.replace(/\/index\.html$/, '/');
-    url.searchParams.set('_v', Date.now().toString(36));
-    location.replace(url.toString());
-  } catch {
-    location.reload();
-  }
-}
 
 /**
  * 把地址栏上的 `_v=` 戳抹掉（协作方第 6 版 §3.14b）。

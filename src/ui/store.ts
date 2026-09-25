@@ -1,4 +1,125 @@
 import { create } from 'zustand';
+
+/* E 档 E1b：读档与初值装配已搬到 ui/state/。此处 import + 转发 —— 调用点零改动 */
+import {
+  loadJson,
+  loadWorldbook,
+  loadMessages,
+  loadGameState,
+  loadTheme,
+  loadRulesetId,
+  loadCustomGenres,
+  loadGenreId,
+  loadTypography,
+  loadCareer,
+  loadWorlds,
+  loadWorldName,
+  loadArchive,
+  loadImageJobs,
+  loadFlag,
+  loadGmVoice,
+  loadConfig,
+  loadCharacter,
+  loadModule,
+  SAVE_VERSION,
+  MERGE_MODULE_DEFAULTS,
+  mergeCharacter,
+  migrateCharacter,
+  mergeModule,
+  mergeWorldbook,
+  migrateSave,
+  fallbackState,
+  deriveVitalsMax,
+  deriveVitalsFor,
+  isLifeFull,
+  reconcileVitals,
+  sanitizeModuleTokens,
+  initialLocation,
+  initialNpcs,
+  deadlineOf,
+  modDeadlineLabel,
+  cnNumber,
+  FALLBACK_OPENINGS,
+  firstLocationLine,
+  moduleOpening,
+  openingText,
+  DEFAULT_WORLDBOOK,
+  WELCOME_ID,
+  DEFAULT_TYPOGRAPHY,
+  DEFAULT_CONFIG,
+  DEFAULT_CHARACTER,
+  TYPOGRAPHY_PRESETS,
+} from './state/loaders.js';
+export {
+  loadCustomGenres,
+  SAVE_VERSION,
+  mergeCharacter,
+  mergeModule,
+  mergeWorldbook,
+  migrateSave,
+  deriveVitalsMax,
+  deriveVitalsFor,
+  isLifeFull,
+  reconcileVitals,
+  sanitizeModuleTokens,
+  initialLocation,
+  initialNpcs,
+  deadlineOf,
+  modDeadlineLabel,
+  firstLocationLine,
+  moduleOpening,
+  openingText,
+  TYPOGRAPHY_PRESETS,
+};
+import {
+  deriveAddress,
+  addressOf,
+  fillPlayerTokens,
+} from './state/tokens.js';
+export {
+  fillPlayerTokens,
+  addressOf,
+  deriveAddress,
+};
+import type { StoreState } from './state/storeState.js';
+
+/* 内置模组与起始角色已搬到 core/seeds.ts（D 档批 2），这里只做转发 */
+import { DEFAULT_MODULE, MODULE_LIGHTHOUSE, MODULE_FANTASY, BUILTIN_MODULES, STARTER_CHARACTERS } from '../core/seeds.js';
+export { BUILTIN_MODULES, STARTER_CHARACTERS };
+
+
+/* 类型定义已搬到 core/types.ts（D 档批 0），这里只做转发 —— 调用点不用改 */
+import type {
+  DiceBadge, CheckBadge, NpcLine, PendingCheck, StateChangeLine, StateChangeNotice, WorldbookEntry, ChronicleEntry, TurnSnapshot, Message, ApiConfig, CharacterProfile, ModuleNpc, MapNode, Module, ModuleMonster, ModuleItem, ThemeName, Typography, SaveFile,
+} from '../core/types.js';
+export type {
+  DiceBadge, CheckBadge, NpcLine, PendingCheck, StateChangeLine, StateChangeNotice, WorldbookEntry, ChronicleEntry, TurnSnapshot, Message, ApiConfig, CharacterProfile, ModuleNpc, MapNode, Module, ModuleMonster, ModuleItem, ThemeName, Typography, SaveFile,
+};
+
+/* 技能与属性：实现已搬到 core/skills.ts（D 档），这里只做转发 —— 调用点不用改 */
+import {
+  SKILL_ALIAS,
+  canonicalSkillName,
+  characteristicBudget,
+  checkTargetText,
+  defaultCharacteristics,
+  resolveCheckTarget,
+  requiredWeaponFor,
+  skillBudget,
+  weaponMissingFor,
+} from '../core/skills.js';
+export {
+  SKILL_ALIAS,
+  canonicalSkillName,
+  characteristicBudget,
+  checkTargetText,
+  defaultCharacteristics,
+  resolveCheckTarget,
+  requiredWeaponFor,
+  skillBudget,
+  weaponMissingFor,
+};
+
 import {
   SCALE_LABEL,
   actExpandSystemPrompt,
@@ -21,7 +142,16 @@ import {
   type StateDelta,
   type Thread,
   type Wound,
+  type Deadline,
+  type StoryClock,
 } from '../core/state/gameState.js';
+import {
+  DEFAULT_CLOCK,
+  clockLabel,
+  deadlineFromDays,
+  normalizeClock,
+  tickClock,
+} from '../core/clock.js';
 import { isLifeVital } from '../core/rulesets/types.js';
 import {
   INSANITY_TURNS,
@@ -60,8 +190,36 @@ import { getRuleset, listRulesets, loadCustomRulesets } from '../core/rulesets/i
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
 import { DEFAULT_GM_VOICE, gmVoiceOf, type GmVoice } from '../core/voices.js';
 import { emptyCareer, recordRun, type AchievementDef, type Career } from '../core/career.js';
+import { stripModuleWorldbook } from '../core/worldbook.js';
 import { summarizeRun } from './runSummary.js';
+import {
+  applySnapshot,
+  defaultWorldName,
+  findWorld,
+  harvest,
+  worldKey,
+  type World,
+} from '../core/campaign.js';
+import {
+  findCharacter as findArchivedCharacter,
+  removeCharacter,
+  upsertCharacter,
+  type ArchivedCharacter,
+} from './archive.js';
+import {
+  beginJob,
+  dropJob,
+  enqueueJob,
+  failJob,
+  hasRoom,
+  jobKey,
+  nextQueued,
+  reviveJobs,
+  type ImageJob,
+  type ImageJobKind,
+} from './imageJobs.js';
 import { encumbranceOf, encumbranceNote, type Encumbrance } from '../core/encumbrance.js';
+import { presentNpcNames, pruneNpcNotes, touchNpcNotes } from '../core/npcNotes.js';
 
 export type { Encumbrance };
 
@@ -79,240 +237,17 @@ import {
 } from './audio.js';
 import { idbGet, idbSet } from './idb.js';
 import { pruneSnapshots } from './snapshotPrune.js';
+import { generateImage, fetchImageAsLocal, ModelError } from '../providers/model.js';
+import { isSelfContainedImage, isStoreableImage } from '../core/imageData.js';
 
 export type { AudioConfig };
-
-export interface DiceBadge {
-  expression: string;
-  total: number;
-  groups: { sides: number; results: number[] }[];
-}
-
-export interface CheckBadge {
-  skill: string;
-  target: number;
-  roll: number;
-  label: string;
-  tier: string;
-  success: boolean;
-  /** 请求时的难度，重掷要用它复现 */
-  difficulty?: 'regular' | 'hard' | 'extreme';
-  /** 主骰表达式（"1d100" / "1d20"），UI 据此决定显示 % 还是 +加值 */
-  mainDice?: string;
-  /** 描述加权给出的目标值修正量（正数＝更容易）；重掷时沿用 */
-  bonus?: number;
-}
-
-/** 模型返回的同行者发言，单独渲染，不混进 GM 叙事 */
-export interface NpcLine {
-  id: string;
-  name: string;
-  action?: string;
-  line?: string;
-}
-
-/**
- * 检定目标值的显示文案。
- *
- * 为什么要有它：目标值的含义随规则包而变——COC 的 d100 是"成功率百分比"，
- * DnD 的 d20 是"检定加值"。早期 UI 与引擎提示里写死了 `%`，
- * 换到 DnD 就会出现"目标值 +2%"这种自相矛盾的文案。
- */
-export function checkTargetText(b: { target: number; mainDice?: string }): string {
-  return b.mainDice === '1d20'
-    ? `加值 ${b.target >= 0 ? '+' : ''}${b.target}`
-    : `目标值 ${b.target}%`;
-}
-
-/** 守密人要求、等待玩家掷骰的检定 */
-export interface PendingCheck {
-  skill: string;
-  difficulty?: string;
-  reason?: string;
-}
-
-/** 主页面"状态变化"提示里的一行 */
-export interface StateChangeLine {
-  text: string;
-  /**
-   * down = 变坏（掉血 / 掉理智 / 失去物品），up = 变好，info = 中性，
-   * warn = 引擎拦下的变更，good = 引擎特意留的一线生机（濒死冻结）。
-   */
-  tone: 'down' | 'up' | 'info' | 'warn' | 'good';
-}
-
-/**
- * 一轮结束后给玩家看的状态变化摘要。
- *
- * 为什么需要：状态栏（左侧角色卡）更新是"静默"的——玩家摔了一跤、
- * 血掉了 3 点，主页面完全没有提示，等发现时已经不知道是什么时候变的。
- */
-export interface StateChangeNotice {
-  id: string;
-  ts: number;
-  lines: StateChangeLine[];
-}
-
-/** 世界书条目。keys 命中时才注入提示词，避免撑爆上下文 */
-export interface WorldbookEntry {
-  id: string;
-  keys: string[];
-  content: string;
-  /** 数值越大越优先，超预算时优先保留 */
-  priority: number;
-  enabled: boolean;
-  /** 由「模组包」派生（重新生成时只替换这类，不动用户手写的） */
-  fromModule?: boolean;
-}
-
-/**
- * 事件日志 —— 长期记忆的真相来源。
- *
- * 每轮只存一句客观事实（约 20 字），所以哪怕跑几百轮也塞得下。
- * 原文层会被裁剪，摘要层会丢细节，唯独这层从头保留到尾。
- */
-export interface ChronicleEntry {
-  turn: number;
-  text: string;
-  location?: string;
-}
-
-/**
- * 回合快照 —— 每个回合开始时的状态存档，供"回溯 / 重掷"使用。
- * 以触发该回合的玩家消息 id 为键。
- */
-export interface TurnSnapshot {
-  gameState: GameState;
-  chronicle: ChronicleEntry[];
-  summary: string;
-  /**
-   * 是否为**关键决策点**（回溯锚点）。
-   * 普通快照是"每一回合都能退回去"，锚点是"值得退回去的那几个岔路口"——
-   * 结档时玩家要从这里选从哪一步重来。
-   */
-  key?: boolean;
-  /** 锚点的一句话说明（如"掷骰：潜行"、"进入战斗"、"受伤 -3"） */
-  label?: string;
-  /**
-   * 这一回合结束时留下的待掷检定队列。
-   * 回溯要能把它一起恢复，否则"GM 一次要了 2 个检定、掷了 1 个、想退回去重来"时，
-   * 另一个检定就再也找不回来了（协作方 F）。
-   */
-  pendingChecks?: PendingCheck[];
-}
 
 /** 快照最多保留的回合数，超出的从最旧的开始丢 */
 const SNAPSHOT_LIMIT = 60;
 
-export interface Message {
-  id: string;
-  role: 'gm' | 'player' | 'system';
-  content: string;
-  dice?: DiceBadge[];
-  check?: CheckBadge;
-  /**
-   * 一次行动里的多次检定（"一次全掷"）。
-   * 保留 `check` 字段是为了兼容老存档与已有的渲染/重掷逻辑——
-   * 单次检定仍然走 `check`，只有两次以上才用 `checks`。
-   */
-  checks?: CheckBadge[];
-  npcLines?: NpcLine[];
-  /** 该条 GM 回复配的动作场景小图（生图结果，可空） */
-  sceneImage?: string;
-  ts: number;
-}
 
-export interface ApiConfig {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  temperature: number;
-  maxTokens: number;
-  /** 采样参数 top_p（0-1，空则用服务商默认） */
-  topP?: number;
-  /** 是否开启思考模式（DeepSeek enable_thinking），默认关 */
-  thinking?: boolean;
-  /** 生图模型（与对话模型分开），如硅基流动的 black-forest-labs/FLUX.1-schnell */
-  imageModel?: string;
-  /** 生图尺寸，如 1024x1024 */
-  imageSize?: string;
-}
 
-/**
- * 角色卡
- *
- * 叙事层：对齐 SillyTavern Character Card V2 的字段命名
- * （description / personality / scenario / first_mes / mes_example）
- * 数值层：由规则包的 characteristicDefs + 技能表定义，换规则只换这一层
- */
-export interface CharacterProfile {
-  // —— 叙事层（V2）——
-  name: string;
-  /** 性别，用于推导称呼 */
-  gender?: string;
-  /** 描述：外貌、年龄、职业、来历，一段自然语言 */
-  description: string;
-  /** 性格 */
-  personality: string;
-  /** 对话示例（可选） */
-  mes_example: string;
-  /** 开局处境：开局时人在何处、正在做什么（V2 字段；也用作开局地点的兜底） */
-  scenario?: string;
 
-  // —— 数值层（规则驱动）——
-  /** 属性，键由规则包的 characteristicDefs 决定（COC 是 str/con/…） */
-  characteristics: Record<string, number>;
-  /** 技能 */
-  skills: Record<string, number>;
-  /** 随身物品/装备（开团时会放进背包）。只存名字，供手改 */
-  items?: string[];
-  /**
-   * 物品详情（AI 生成时一并产出）：名字 → 简介 / 类别 / 武器属性。
-   * 手改物品只动 items，这里保留生成时的说明，开团时合并进背包。
-   */
-  itemDetails?: { name: string; desc?: string; kind?: string; damage?: string; skill?: string }[];
-
-  // —— 应用内部 ——
-  /** 他人如何称呼你；留空则按姓名 + 性别推导 */
-  address?: string;
-  /** 角色立绘（生图结果 URL / data URI） */
-  portrait?: string;
-}
-
-const FEMALE_RE = /女|female|woman|girl|^f$/i;
-
-/**
- * 从姓名 + 性别推一个得体的默认称呼。
- * 西式译名按"名字·姓氏"取最后一段作姓："艾伦·霍尔特" → "霍尔特先生"。
- * 单名直接用："卢卡斯" → "卢卡斯先生"。用户可随时手动改。
- */
-export function deriveAddress(name: string, gender?: string): string {
-  const honorific = FEMALE_RE.test((gender ?? '').trim()) ? '女士' : '先生';
-  const n = name.trim();
-  if (!n) return honorific;
-  const parts = n.split(/[·・.\s]+/).filter(Boolean);
-  const surname = parts.length > 1 ? parts[parts.length - 1]! : n;
-  return `${surname}${honorific}`;
-}
-
-/** 取角色的称呼：优先用用户自定义的，没有就从姓名 + 性别推导 */
-export function addressOf(c: CharacterProfile): string {
-  return c.address?.trim() || deriveAddress(c.name, c.gender);
-}
-
-/**
- * 把模组/模型文本里残留的占位符替换成真实值。
- *
- * 为什么需要：模组开场白支持 `{{称呼}}` 占位符，但模型有时会把它**漏到状态里**
- * （用户报过"当前地点：{{称呼}}的公寓房间"）。凡是模型产出的文本进入
- * 显示或状态之前，都要过一遍这里。
- */
-export function fillPlayerTokens(text: string, c: CharacterProfile): string {
-  if (!text || !text.includes('{{')) return text;
-  return text
-    .replace(/\{\{\s*称呼\s*\}\}/g, addressOf(c))
-    .replace(/\{\{\s*(name|玩家名|姓名|char)\s*\}\}/gi, c.name);
-}
 
 /** 一段文本里是否还残留占位符（用于"只在需要时才重建对象"的短路判断） */
 function hasToken(text: string | undefined): boolean {
@@ -369,24 +304,6 @@ export function sanitizeStateTokens(s: GameState, c: CharacterProfile): GameStat
   };
 }
 
-/** 模组里的关键人物。玩家只看到表面，动机与秘密是 GM 内部参考 */
-export interface ModuleNpc {
-  id: string;
-  name: string;
-  role: string;
-  motive: string;
-  secret: string;
-}
-
-/** 地图上的一个地点节点（空间信息的最小单位） */
-export interface MapNode {
-  name: string;
-  /** 与之相通的地点名（无向；界面上连成线，表示"走得到"） */
-  links?: string[];
-  /** 一句话说明（如"码头区，夜里没人敢去"） */
-  note?: string;
-}
-
 /**
  * 由 locations 兜底生成地图节点（没有显式关系图时用）。
  *
@@ -432,584 +349,177 @@ function chainNodes(nodes: MapNode[]): MapNode[] {
   }));
 }
 
-/**
- * 模组（团 / 剧本）—— 这一局"讲的是什么故事"。
- *
- * 注意：这**不是一份完整剧本，而是故事骨架**。AI 守密人会据此即兴生成
- * 场景、NPC 对白与线索；骨架的作用是保证几十轮不跑偏、不前后矛盾。
- * 世界书是它的细节层（关键词触发的设定条目），不是故事本身。
- */
-export interface Module {
-  /** 模组名 */
-  title: string;
-  /** 前言 / 引子：玩家听得到的开局背景 */
-  premise: string;
-  /** 开场白：第一幕的场景文本；留空则用内置场景模板 */
-  opening: string;
-  /** 真相：幕后到底发生了什么（**绝不可直接告知玩家**） */
-  truth: string;
-  /** 关键人物 */
-  npcs: ModuleNpc[];
-  /** 关键地点（一行一个） */
-  locations: string;
-  /**
-   * 开局地点：第一幕玩家身处何处。开团时直接写进"当前地点"，
-   * 避免开局面板空着、要玩家先动一下才刷新。留空则取 locations 第一行。
-   */
-  startLocation?: string;
-  /**
-   * 地图节点与可达关系（给"空间信息"用）：
-   * 地点是节点，links 是与之相通的地点（无向）。界面上画成关系图，点节点即动身。
-   * 留空则由 locations 自动生成节点（无连线）。
-   */
-  mapNodes?: MapNode[];
-  /** 线索链：哪条线索通向哪里，防止卡关 */
-  clueChain: string;
-  /** 幕结构 / 推进节点 */
-  acts: string;
-  /** 结局与失败条件 */
-  endings: string;
-  /** GM 自由备注（内部） */
-  notes: string;
-  /**
-   * 玩家目标：这个调查员在这个故事里**要达成什么**。
-   * 回答"我要干嘛"——这是玩家最容易迷茫的一环，模组必须给出明确方向。
-   */
-  goal?: string;
-  /** 赌注：不做、或失败会付出什么代价（给行动以重量） */
-  stakes?: string;
-  /** 紧迫感：为什么是现在，不能再等（推着玩家往前走，避免站着聊半天） */
-  urgency?: string;
-  /** 来源说明：这张卡是"按原版还原"还是"AI 自创"（生成时由模型诚实标注） */
-  sourceNote?: string;
-  /** 题材标签（内置模组用）：决定"选了某题材时，哪些模组最合适" */
-  genre?: string;
-  /**
-   * 篇幅（决定时间尺度与地点/幕的数量）。
-   *
-   * 为什么要显式区分：早期不分篇幅，模型默认把"紧迫感"写成
-   * 「只剩 15 分钟 / 天亮之前」——短篇合适，长篇就完全对不上：
-   * 横跨几周的调查被塞进 15 分钟，玩家一出门就"时间到"。
-   */
-  scale?: ModuleScale;
-  /**
-   * 怪物 / 敌对者表（R38 的第一半）。
-   *
-   * 和道具表同一思路：**单独生成**。以前怪物的数值全靠模型临场发挥，
-   * 同一个东西前后两轮血量、攻击方式都对不上，玩家打赢了也不知道赢在哪。
-   * 定下来之后，数值是引擎的事实，模型照此演出。
-   */
-  monsters?: ModuleMonster[];
-  /**
-   * 道具表：**单独生成**的一张"这个模组里会出现的东西"清单（含作用）。
-   *
-   * 为什么和角色卡的个人物品分开：塞进角色生成里会让模型一次想太多东西，
-   * 结果物品说明短、作用含糊、拾取后不知道能干嘛。分开生成准确率明显更高。
-   */
-  items?: ModuleItem[];
-}
-
 /** 模组篇幅（定义在 orchestrator/generate，这里只是再导出，避免 UI 反向依赖） */
 export type { ModuleScale };
-
-/**
- * 模组里的一个敌对者。**数值一旦定下就是事实**（引擎会拿它初始化 `combat.foes`），
- * 模型不得临场改。
- */
-export interface ModuleMonster {
-  id: string;
-  name: string;
-  /** 外观 / 气味 / 声音——玩家能感知到的东西 */
-  look?: string;
-  /** 生命值上限 */
-  hp?: number;
-  /** 攻击方式与伤害（如"爪击 1d6"） */
-  attack?: string;
-  /** 行为特点：怎么打、什么时候退、怕什么 */
-  behavior?: string;
-  /** 弱点 / 破解方式（这一条是给玩家的活路） */
-  weakness?: string;
-}
-
-/** 模组道具表条目（作用由 AI 单独生成，玩家拿到就能看懂能干嘛） */
-export interface ModuleItem {
-  id: string;
-  name: string;
-  /** 一句话外观 / 来历 */
-  look?: string;
-  /** 作用：用掉它会怎样、检定时给什么便利 —— 这一条是玩家最需要的 */
-  effect?: string;
-  kind?: 'weapon' | 'tool' | 'clue' | 'consumable' | 'other';
-}
-
-const DEFAULT_MODULE: Module = {
-  title: '失踪的玛乔丽',
-  premise:
-    '1924 年 3 月，马萨诸塞州。老霍华德的女儿玛乔丽已失踪十一天，警方认定她是自行离家。她从不离身的那台相机却留在了家里——这不合常理。老霍华德辗转找到你，因为他听说你处理过一些"不寻常的事"。',
-  opening: '',
-  truth:
-    '玛乔丽并非离家出走。她在冲洗自己拍的照片时，无意间拍到了旧城区「圣烛照相馆」暗房里的一场仪式——那个圈子借冲洗的由头聚在暗房，做的却不是摄影的事。她带着底片想找人帮忙，随即被对方发现并扣下。老霍华德隐约知道女儿沾上了不该碰的东西，却不敢对警察开口。',
-  npcs: [
-    {
-      id: 'mod-npc-1',
-      name: '老霍华德',
-      role: '委托人 / 工厂主',
-      motive: '找回女儿，同时掩盖自己与那个圈子的旧交情',
-      secret: '他早年给圣烛照相馆捐过钱，知道"暗房冲洗服务"是什么，却一直装作不知情。',
-    },
-    {
-      id: 'mod-npc-2',
-      name: '圣烛照相馆店主',
-      role: '暗房主人',
-      motive: '守住仪式的秘密，追回玛乔丽带走的底片',
-      secret: '他不是唯一的主事者；真正的幕后另有其人，且从不见客。',
-    },
-  ],
-  locations: '霍尔特的侦探事务所（接待室 / 盥洗室）\n旧城区 · 圣烛照相馆（门面 / 暗房）\n玛乔丽的公寓\n码头区的旧仓库',
-  mapNodes: [
-    { name: '事务所', links: ['旧城区', '玛乔丽的公寓'], note: '你的地盘，安全但没什么线索' },
-    { name: '旧城区', links: ['事务所', '圣烛照相馆', '码头区'], note: '圣烛照相馆在这条街上' },
-    { name: '圣烛照相馆', links: ['旧城区'], note: '门面正常，暗房在里间' },
-    { name: '玛乔丽的公寓', links: ['事务所'], note: '已被翻动过' },
-    { name: '码头区', links: ['旧城区'], note: '夜里没什么人' },
-  ],
-  clueChain:
-    '盥洗室的血迹与刮痕 → 老霍华德知情却撒谎 → 玛乔丽遗留的相机里有未冲洗的胶卷 → 冲出的照片指向圣烛照相馆 → "暗房冲洗服务"是切口 → 暗房仪式 → 玛乔丽的下落',
-  acts: '第一幕 · 接案与试探：委托人对真相有所隐瞒，玩家从细节里发现破绽。\n第二幕 · 追查：循着相机、底片与照片，线索指向旧城区。\n第三幕 · 暗房：进入圣烛照相馆，直面仪式与真相，做出选择。',
-  endings:
-    '成功：找到玛乔丽并带出证据（她可能已精神崩溃）。\n失败：证据被毁、玛乔丽失踪，或玩家自身理智耗尽。\n灰色：救出人但代价惨重，或与圈子达成某种交易。',
-  notes: '基调：克制的悬疑与不安，不写血腥猎奇。让"相机 / 冲洗 / 影像"反复作为意象出现。',
-  startLocation: '霍尔特的侦探事务所',
-  // 注意：goal/stakes/urgency 只能写"玩家开局就知道的事"，绝不点破真相与关键物品——
-  // 之前这里写了"胶卷""圣烛照相馆正在清理痕迹"，等于开局剧透。
-  goal: '查出玛乔丽失踪的真相，把她带回家。',
-  stakes: '她已失踪十一天，警方正准备以"自行离家"结案。一旦结案，就再没人会去找她了。',
-  urgency:
-    '失踪满两周，警局就会归档。老霍华德能给你的时间，只剩这几天。',
-  genre: 'coc',
-};
-
-/** 第二套内置模组：雾港灯塔（可玩的成品模组） */
-const MODULE_LIGHTHOUSE: Module = {
-  title: '雾港灯塔',
-  premise:
-    '1922 年 11 月，缅因州雾港镇。入冬后，守塔人连续三晚没点灯，过往的货船差点触礁。镇议会请你去看看——报酬不多，但据说那塔里最近总能听见海雾里有人在唱歌。',
-  opening: `海雾压得很低。你站在雾港镇的码头上，脚下的木板被潮气泡得发软。
-
-渡船把你放在这里就匆匆开走了，说是"雾天不进港"。渔具店的灯还亮着，一个系围裙的女人正在收摊，看见你便停下手里的活。
-
-"你也是来看灯塔的？"她打量你，"三晚没亮了。镇议会贴了告示，可没人敢去。"
-
-远处海面上，那座灯塔的黑影一动不动。雾里传来一种很轻的声音，像有人在很远的地方哼歌。
-
-她把卷帘门拉下一半，又停住。"先生，"她说，"天黑了就回客栈。晚上别往海边去。"`,
-  truth:
-    '守塔人不是失职，是被"海雾里的歌声"逼疯了。他半个月前在海滩上捡到一尊被海水泡得发绿的青铜小像，从此夜夜梦见海底的钟声。小像其实是"深潜者"信徒的祭器，会把持有者慢慢拖向海底。守塔人已经把塔顶的灯换成了信号，招引雾中的东西上岸。',
-  npcs: [
-    {
-      id: 'lh-npc-1',
-      name: '守塔人老马林',
-      role: '灯塔看守',
-      motive: '守住那尊青铜小像，完成"召唤"',
-      secret: '他早已不是人了——夜里会走到礁石滩，对着海雾说话。',
-    },
-    {
-      id: 'lh-npc-2',
-      name: '米莉安',
-      role: '镇上的渔具店老板娘',
-      motive: '劝你赶紧离开这个镇子',
-      secret: '她父亲就是十年前在灯塔上失踪的，她认得海雾里的歌声。',
-    },
-  ],
-  locations: '雾港镇码头（渔具店 / 客栈）\n海边的老灯塔（塔底 / 塔顶灯室）\n礁石滩\n守塔人的小屋',
-  mapNodes: [
-    { name: '雾港码头', links: ['渔具店', '老灯塔'], note: '镇上的中心，白天有人' },
-    { name: '渔具店', links: ['雾港码头'], note: '米莉安的店' },
-    { name: '老灯塔', links: ['雾港码头', '礁石滩', '守塔人的小屋'], note: '三晚没点灯' },
-    { name: '礁石滩', links: ['老灯塔'], note: '退潮时才走得过去' },
-    { name: '守塔人的小屋', links: ['老灯塔'], note: '门窗紧闭' },
-  ],
-  clueChain:
-    '灯塔为何不点灯 → 老马林形迹可疑、拒绝开门 → 小屋里的盐渍、湿脚印与青铜小像 → 米莉安认出歌声、说起十年前失踪的父亲 → 塔顶的灯被改装成信号 → 雾夜里的东西上岸 → 抉择',
-  acts: '第一幕 · 登塔探访：雾港的怪谈与老马林的异常。\n第二幕 · 真相浮现：青铜小像、海雾歌声与十年前的旧案。\n第三幕 · 雾夜：信号已经发出，必须在天亮前做出选择。',
-  endings:
-    '成功：毁掉小像或让灯恢复原状，赶在雾散前救下守塔人（或给他一个了断）。\n失败：歌声把你拖向礁石滩，或雾中的东西登上了岸。\n灰色：你活着逃出雾港，但把"它"引到了别处。',
-  notes: '基调：潮湿、咸腥、孤独的海雾。反复用"雾、盐、钟声、湿脚印"做意象。',
-  startLocation: '雾港镇码头',
-  goal: '查清灯塔为何停摆，找到守塔人，让雾夜里的船安全进港。',
-  stakes: '今夜海雾最浓，灯若再不亮，下一班货船就会撞上礁石。',
-  urgency: '天亮前有货船经过雾港，米莉安说海里的歌声一夜比一夜近——你只剩今晚。',
-  sourceNote: '原创内置模组',
-  genre: 'coc',
-};
-
-/**
- * 奇幻内置模组（配「剑与魔法」题材 + DnD 规则）。
- * 和 COC 模组一样是完整的一套：目标三件套、开局地点、地图关系，开箱即可跑。
- */
-const MODULE_FANTASY: Module = {
-  title: '枯井之约',
-  premise:
-    '铁砧镇是商道边上的一个小镇。入夏后，那口干了二十年的老井重新出水——喝过的人夜里会做同一个梦：有人在水底叫他们的名字。镇长悬赏查清水源的来历，赏金够你走完下一段路；够不够买你这条命，就不好说了。',
-  opening: `铁砧镇的井台边围了一圈人。井绳湿漉漉地垂着，井口冒出的水腥气里混着一股说不清的甜味。
-
-镇长是个矮胖的中年人。他把一袋定金塞进你手里，眼睛却不敢看那口井。
-
-"三天里，已经有七个人做了同样的梦。"他压低声音，"梦里有人叫他们的名字。先生，我们不敢再喝了。"
-
-井台另一头，一个披灰斗篷的年轻女人始终没说话。你注意到她的靴子——沾着的泥是镇子外围那片沼地的颜色。她去过不该去的地方。
-
-围观的人都在等你开口。`,
-  truth:
-    '井底连通着沼地深处的一座封石神殿。神殿里封着一头"低语者"——它离不开水，却能顺着水脉把名字送进梦里。二十年前的大旱让它沉睡，如今地下水脉重新贯通，它醒了。灰斗篷女人瑟琳是神殿守誓者的后裔，一直在暗中试图重新封住水脉，但她需要有人替她下井。最早喝水的七个人，若在梦里被叫到名字时应了一声，就已经被"标记"了。而二十年前下令封井、把守誓者一家赶出镇子的，正是镇长的父亲。',
-  npcs: [
-    {
-      id: 'fj-npc-1',
-      name: '镇长·巴尔',
-      role: '铁砧镇镇长 / 委托人',
-      motive: '尽快压下井水的事，保住镇子和自己的位子',
-      secret: '二十年前下令封井、并把守誓者一家赶出镇子的是他父亲；他知道井底有什么，却不敢说。',
-    },
-    {
-      id: 'fj-npc-2',
-      name: '瑟琳',
-      role: '披灰斗篷的年轻女人 / 守誓者后裔',
-      motive: '重新封住水脉，哪怕要拿喝过水的人做代价',
-      secret: '她手里有一卷残缺的封石咒文，缺的正是最关键的一页——那一页在她叛逃的兄长手里。',
-    },
-    {
-      id: 'fj-npc-3',
-      name: '柯尔',
-      role: '沼地里的猎手 / 瑟琳的兄长',
-      motive: '把低语者放出来，用它换回被神殿夺走的一切',
-      secret: '他已经应了梦里那个名字。',
-    },
-  ],
-  locations:
-    '铁砧镇（井台 / 镇长宅 / 铁匠铺）\n镇外的沼地\n沼地深处的封石神殿（外殿 / 水室）\n猎人的窝棚',
-  mapNodes: [
-    { name: '铁砧镇', links: ['沼地'], note: '井台边围满了人' },
-    { name: '沼地', links: ['铁砧镇', '猎人的窝棚', '封石神殿'], note: '泥泞难行，夜里起雾' },
-    { name: '猎人的窝棚', links: ['沼地'], note: '挂满风干的皮子' },
-    { name: '封石神殿', links: ['沼地'], note: '大半没入水下' },
-  ],
-  clueChain:
-    '井水发甜、带腥气 → 七人同梦、梦里被叫名字 → 镇长的父亲当年下令封井 → 斗篷女人靴上的沼地泥 → 沼地旧界碑（守誓者被除名） → 猎人的窝棚与缺失的那页咒文 → 封石神殿水室 → 低语者与"应名"的真相',
-  acts:
-    '第一幕 · 井台：接下委托，察觉镇长与斗篷女人各怀心事。\n第二幕 · 沼地：循着泥与界碑找到守誓者与叛逃的兄长，拿到咒文残页。\n第三幕 · 水室：下到井底神殿，在低语者彻底醒来前做出选择。',
-  endings:
-    '成功：补全咒文重新封石，井水变回死水，做过梦的人一夜之间忘了那个名字。\n失败：有人应了名字，低语者顺着水脉进入镇上的每一口井。\n灰色：封住了井，却把低语者引向沼地另一侧的村子。',
-  notes: '基调：潮湿、甜腥、慢性的不安。反复用"水、名字、回声、泥"做意象。',
-  startLocation: '铁砧镇',
-  goal: '查清井水为何重新出水，在更多人做同一个梦之前把水源的事解决掉。',
-  stakes: '已经有七个人做了同样的梦。若有人应了梦里那一声，就不只是做梦那么简单了。',
-  urgency: '今夜是第七夜——梦里叫名字的声音，一夜比一夜清楚。',
-  sourceNote: '原创内置模组',
-  genre: 'fantasy',
-};
-
-/** 内置模组库：开新团时可一键套用 */
-export const BUILTIN_MODULES: Module[] = [DEFAULT_MODULE, MODULE_LIGHTHOUSE, MODULE_FANTASY];
-
-/**
- * 示例角色：每个题材一份，供"开箱即玩"（不用先想人设）。
- * 只管叙事层；数值层在套用时按当前规则包重建，避免和规则对不上。
- */
-export const STARTER_CHARACTERS: Record<string, Partial<CharacterProfile>> = {
-  coc: {
-    name: '艾伦·霍尔特',
-    gender: '男',
-    description:
-      '34 岁，私家侦探，曾是战地记者，左腿落下旧伤。常穿一件洗得发白的风衣，随身带着一台禄来福来双反相机。',
-    personality:
-      '沉默寡言，观察力强。因三年前一桩始终没查清的失踪案，他对"无法解释的事"有近乎偏执的兴趣。',
-    scenario: '深夜，你独自在事务所整理卷宗，门外传来迟疑的敲门声。',
-    items: ['笔记本', '.38 左轮手枪', '禄来福来双反相机', '手电筒'],
-    itemDetails: [
-      { name: '笔记本', desc: '记录案子的随身本，边角磨得起了毛。', kind: 'clue' },
-      {
-        name: '.38 左轮手枪',
-        desc: '警用制式左轮，六发装填，握把缠了防滑胶带。',
-        kind: 'weapon',
-        damage: '1d10',
-        skill: '射击（手枪）',
-      },
-      { name: '禄来福来双反相机', desc: '从战地一起带回来的老相机，还能用。', kind: 'tool' },
-      { name: '手电筒', desc: '黄铜外壳的旧手电，光有点发黄但照得远。', kind: 'tool' },
-    ],
-  },
-  tokyo: {
-    name: '佐仓真白',
-    gender: '女',
-    description:
-      '24 岁，自由撰稿人，专写都市怪谈与失踪案。总背着一个塞满录音笔的旧帆布包，眼睛常年熬得发红。',
-    personality:
-      '嘴上大大咧咧、爱开玩笑，其实比谁都怕黑。收集别人的故事，是为了不去想自己那一件。',
-    scenario: '凌晨一点，你在便利店门口等人，手机里那条读者私信还亮着：别去那栋公寓。',
-    items: ['录音笔', '旧帆布包', '数码相机', '罐装咖啡'],
-    itemDetails: [
-      { name: '录音笔', desc: '采访用的小录音笔，能连续录十几个小时。', kind: 'tool' },
-      { name: '旧帆布包', desc: '塞满备用电池和稿纸的帆布包，侧袋里藏着一把折叠伞。', kind: 'tool' },
-      { name: '数码相机', desc: '二手单反，闪光灯坏了，白天拍得清楚。', kind: 'tool' },
-      { name: '罐装咖啡', desc: '便利店买的黑咖啡，一口下去能再撑两小时。', kind: 'consumable' },
-    ],
-  },
-  fantasy: {
-    name: '凯尔·渡鸦',
-    gender: '男',
-    description:
-      '29 岁的流浪剑客，前王国斥候，因违抗命令被除名。一身磨损的皮甲，左手小指缺了一截，背着一把用旧了的长剑。',
-    personality:
-      '话不多，但答应的事一定做到。讨厌贵族和神棍，对钱却算得很清楚——因为欠着债。',
-    scenario: '你在铁砧镇的酒馆里啃着干面包，盘算着赏金还差多少能还清那笔债。',
-    items: ['用旧的长剑', '磨损的皮甲', '干粮', '一枚褪色的雇兵徽章'],
-    itemDetails: [
-      {
-        name: '用旧的长剑',
-        desc: '剑刃上满是修磨的痕迹，握柄缠着旧布条，重心很顺手。',
-        kind: 'weapon',
-        damage: '1d8+2',
-        skill: '格斗（斗殴）',
-      },
-      { name: '磨损的皮甲', desc: '前胸有一道没补好的裂口，但还能挡几下。', kind: 'tool' },
-      { name: '干粮', desc: '硬得能敲桌子的黑面包和一条肉干。', kind: 'consumable' },
-      { name: '一枚褪色的雇兵徽章', desc: '你不想再戴却一直没扔的旧徽章。', kind: 'clue' },
-    ],
-  },
-  acg: {
-    name: '神代遥',
-    gender: '女',
-    description:
-      '17 岁，高二学生，文艺部部员，有点近视。总把校服袖口拉到手心，书包上挂着一整串没什么用的挂件。',
-    personality:
-      '嘴硬心软，遇事爱吐槽但从不缺席。对"讲不通的事"有种不服输的执拗。',
-    scenario: '放课后的活动室只剩你一个人，窗外天色暗得比平时早。',
-    items: ['书包', '手机', '文艺部活动记录本', '一盒薄荷糖'],
-    itemDetails: [
-      { name: '书包', desc: '挂着整串没用的挂件，侧袋里塞着伞和充电宝。', kind: 'tool' },
-      { name: '手机', desc: '屏幕角上贴了防摔膜，聊天记录里存着那几条怪事。', kind: 'tool' },
-      { name: '文艺部活动记录本', desc: '部里传下来的旧本子，最后几页的字迹不是部员的。', kind: 'clue' },
-      { name: '一盒薄荷糖', desc: '提神用，还剩小半盒。', kind: 'consumable' },
-    ],
-  },
-  urban: {
-    name: '江临',
-    gender: '男',
-    description:
-      '23 岁，无业，靠接些"处理麻烦"的私活过活。能短暂强化自己的速度和反应，但用多了会流鼻血。左耳戴着一只从不摘的旧耳机。',
-    personality:
-      '表面吊儿郎当、爱贫嘴，真到要紧关头比谁都冷静。讨厌"组织"和说教，却对街上无家可归的孩子格外心软。',
-    scenario: '凌晨的便利店，你盯着货架发呆，手机里那条匿名消息又亮了：今晚别坐 7 号线。',
-    items: ['旧耳机', '手机', '一次性打火机', '便利店饭团'],
-    itemDetails: [
-      { name: '旧耳机', desc: '左耳那只从没摘下来过，线皮已经开胶。', kind: 'tool' },
-      { name: '手机', desc: '屏幕右上角碎了一小块，那条匿名消息还在。', kind: 'tool' },
-      { name: '一次性打火机', desc: '便利店顺手拿的，火苗忽大忽小。', kind: 'tool' },
-      { name: '便利店饭团', desc: '刚买的，还温着。', kind: 'consumable' },
-    ],
-  },
-};
 
 /** 取某个题材的示例角色（没有就返回 undefined） */
 export function starterCharacterOf(genreId: string): Partial<CharacterProfile> | undefined {
   return STARTER_CHARACTERS[genreId];
 }
 
-const DEFAULT_CONFIG: ApiConfig = {
-  baseUrl: 'https://api.deepseek.com/v1',
-  apiKey: '',
-  model: 'deepseek-chat',
-  temperature: 0.9,
-  // 留足余量：若输出被 max_tokens 截断，尾部 JSON 契约会残缺，状态就同步不了
-  maxTokens: 3072,
-};
-
-/**
- * 属性默认值由规则包提供，换规则就自动换一套属性。
+/*
+ * ---------------------------------------------------------------------------
+ * 示例角色的**技能** —— 一人一套，跟着人设走
+ * ---------------------------------------------------------------------------
+ * 主人 2026-09-17 报的：「属性技能与人设不匹配」。
  *
- * **不能直接填 `d.default`**：COC 的 default 是 50，八个属性全套 50
- * 意味着"力量、体质、智力、教育完全一样"——那不是一个活人，是一张表格。
- * （用户 2026-09-16 实测反馈："默认模组里面的人物属性是不是太平均了"。）
+ * 病灶：原来"套用示例角色"时技能一律取 `rs.starterSkills`
+ * （规则包给的**通用起始 8 项**），于是：
+ *   - 奇幻的流浪剑客（凯尔·渡鸦）拿到的是「侦查 / 图书馆使用 / 聆听 / 说服」——
+ *     一个背长剑的斥候不识字也不打架，这不是"数值对不上"，是**人设塌了**；
+ *   - 灯塔模组的记者拿到同一套，也不合身。
  *
- * 这里按 `(rulesetId, 属性下标)` 做一次**确定性散列**，给每个属性一个固定的偏移。
- * 为什么必须确定性：这个函数在"缺省回退"（角色卡里没填的属性）与"新建角色"两处被调用，
- * 每次返回不同的值会让界面上的数字自己跳。
+ * 规矩改成：**技能属于"人设"，不属于"规则包"**。
+ * 规则包只负责回答"这个名字合不合法、基础值多少"，
+ * 具体练了哪几项由人设说了算。
  *
- * 摆幅按规则包的属性全幅算：COC（1-99）得到 ±20，落在 30-70；
- * DnD（3-18）全幅小，改用更大的比例，得到 ±6，落在 4-16（贴近标准数组的手感）。
+ * 两条硬约束（都在 `starterSkillsFor` 里兜住）：
+ *   ① 名字必须是当前规则包 `skillCatalog` 上有的（过 `canonicalSkillName` 规范化），
+ *      否则角色卡上会出现一条查不到基础值的野技能 —— 掷不出来。
+ *   ② 名字在规则包上找不到时**退回该规则包的通用起始项**，
+ *      而不是硬塞一个野名字（宁可不合身，不能让角色卡坏掉）。
+ *
+ * 数值的尺度也随规则包变：COC 是百分比（70 = 70%），DnD 是加值（+3）。
+ * 所以每个题材给两套数，用 `mainDice` 判据选。
  */
-export function defaultCharacteristics(rulesetId = 'coc7'): Record<string, number> {
-  const rs = getRuleset(rulesetId);
-  return Object.fromEntries(
-    rs.characteristicDefs.map((d, i) => {
-      const span = Math.max(d.max - d.min, 1);
-      const swing = Math.max(3, Math.round(span * (span < 20 ? 0.4 : 0.2)));
-      const off = Math.round(deterministicUnit(`${rulesetId}#${d.key}`) * swing);
-      const v = Math.max(d.min, Math.min(d.max, d.default + off));
-      return [d.key, v];
-    })
-  );
+interface StarterSkillProfile {
+  /** COC（1d100 百分比）用的一套 */
+  coc: Record<string, number>;
+  /** DnD（d20 加值）用的一套 */
+  dnd: Record<string, number>;
 }
 
-/** 由字符串得到 [-1, 1] 的确定性伪随机数（同一个串永远同一个值） */
-function deterministicUnit(seed: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return ((h >>> 0) % 2001) / 1000 - 1;
-}
-
-/**
- * 常见技能别名 —— 模型与老档里写过的非规范名，映射到规则包技能表里的标准名。
- *
- * 为什么需要：`skillCatalog` 里叫「射击（手枪）」「图书馆使用」，
- * 但模型（和老角色卡）经常写成「手枪」「图书馆学」。
- * 名字对不上，就查不到基础值、算不准技能点预算，未受训技能还会被兜底成 50%。
- */
-export const SKILL_ALIAS: Record<string, string> = {
-  手枪: '射击（手枪）',
-  左轮: '射击（手枪）',
-  射击: '射击（手枪）',
-  步枪: '射击（步枪/霰弹枪）',
-  霰弹枪: '射击（步枪/霰弹枪）',
-  图书馆学: '图书馆使用',
-  图书馆: '图书馆使用',
-  侦察: '侦查',
-  聆听: '聆听',
-  急救术: '急救',
-  医疗: '医学',
-  电脑使用: '计算机使用',
-  电子学: '电子学',
-  母语: '母语',
-  外语: '外语（其他）',
-  攀爬: '攀爬',
-  闪避: '闪避',
-  驾驶: '汽车驾驶',
-};
-
-/** 把技能名规范化成规则包里的标准名（找不到就原样返回） */
-export function canonicalSkillName(name: string, rs: ReturnType<typeof getRuleset>): string {
-  const key = name.trim();
-  const aliased = SKILL_ALIAS[key] ?? key;
-  if (rs.skillCatalog.some((s) => s.name === key)) return key;
-  if (rs.skillCatalog.some((s) => s.name === aliased)) return aliased;
-  // 再退一步：包含关系（"手枪" ⊂ "射击（手枪）"）
-  const partial = rs.skillCatalog.find((s) => s.name.includes(key) || key.includes(s.name));
-  return partial?.name ?? aliased;
-}
-
-/**
- * 按"技能名 或 属性键/中文标签"解析检定目标值。
- *
- * 技能查表的顺序是**角色卡的技能 → 规则包技能表的基础值 → 属性**。
- * 中间这一步很关键：角色卡里没写「游泳」，不代表不能游泳——
- * 规则包里「游泳」的基础值是 20%，未受训就按基础值掷，
- * 而不是兜底成 50%（那等于白送 30 个百分点）。
- *
- * 找不到返回 null（调用方自行决定回退值）。
- */
-export function resolveCheckTarget(
-  name: string,
-  character: CharacterProfile,
-  rs: ReturnType<typeof getRuleset>
-): number | null {
-  const key = name.trim();
-  if (character.skills[key] != null) return character.skills[key];
-  // 别名/规范名再查一次角色卡（"手枪" → 卡里可能存的是"射击（手枪）"）
-  const canon = canonicalSkillName(key, rs);
-  if (canon !== key && character.skills[canon] != null) return character.skills[canon];
-  // 规则包技能表的基础值：未受训也能掷，只是低
-  const sk = rs.skillCatalog.find((s) => s.name === canon || s.name === key);
-  if (sk) return sk.base;
-  const ch = character.characteristics;
-  if (ch[key] != null) return ch[key];
-  // 属性可能用中文标签（"力量"→str），或反过来用键
-  const def = rs.characteristicDefs.find((d) => d.label === key || d.key === key);
-  if (def && ch[def.key] != null) return ch[def.key] ?? null;
-  return null;
-}
-
-/**
- * 技能点预算（COC 7e）：职业技能点 = 教育×4，兴趣点 = 智力×2。
- * 每个技能的"投入点数"＝技能值 − 基础值（基础值从标准技能表查，查不到按 0）。
- * 已用超过预算就不能再加点。
- */
-export function skillBudget(
-  character: CharacterProfile,
-  rulesetId: string
-): { total: number; spent: number; remaining: number } {
-  const rs = getRuleset(rulesetId);
-  const edu = character.characteristics.edu ?? 50;
-  const int = character.characteristics.int ?? 50;
-  const total = edu * 4 + int * 2;
-  // 名字要先规范化，否则"手枪"查不到「射击（手枪）」的基础值，
-  // 会把 20 点基础当成投入点数，预算直接算错。
-  const baseMap = new Map(rs.skillCatalog.map((s) => [s.name, s.base]));
-  let spent = 0;
-  for (const [name, value] of Object.entries(character.skills)) {
-    const base = baseMap.get(canonicalSkillName(name, rs)) ?? 0;
-    spent += Math.max(0, value - base);
-  }
-  return { total, spent, remaining: total - spent };
-}
-
-const DEFAULT_CHARACTER: CharacterProfile = {
-  name: '艾伦·霍尔特',
-  // gender / address 留空：这两个会随用户输入变化，写死默认值会盖掉老存档里的设置
-  gender: '',
-  description:
-    '34 岁，私家侦探，曾是战地记者，左腿落下旧伤。常穿一件洗得发白的风衣，随身带着一台禄来福来双反相机。',
-  personality:
-    '沉默寡言，观察力强。因三年前一桩始终没查清的失踪案，他对"无法解释的事"有近乎偏执的兴趣；面对超自然现象时，用职业性的冷静掩饰内心的动摇。',
-  mes_example: '',
-  characteristics: defaultCharacteristics(),
-  // 技能名一律用规则包 skillCatalog 里的**标准名**
-  skills: {
-    侦查: 70,
-    图书馆使用: 55,
-    说服: 50,
-    心理学: 60,
-    潜行: 45,
-    锁匠: 30,
-    '射击（手枪）': 40,
-    克苏鲁神话: 8,
-  },
-  items: ['笔记本', '.38 左轮手枪', '禄来福来双反相机'],
-  itemDetails: [
-    { name: '笔记本', desc: '记录案子的随身本，边角磨得起了毛。', kind: 'clue' },
-    {
-      name: '.38 左轮手枪',
-      desc: '警用制式左轮，六发装填，握把缠了防滑胶带。',
-      kind: 'weapon',
-      damage: '1d10',
-      skill: '射击（手枪）',
+const STARTER_SKILLS: Record<string, StarterSkillProfile> = {
+  coc: {
+    // 私家侦探：查案的本事是吃饭家伙
+    coc: {
+      侦查: 70,
+      图书馆使用: 55,
+      心理学: 60,
+      说服: 50,
+      潜行: 45,
+      锁匠: 30,
+      '射击（手枪）': 40,
+      急救: 40,
     },
-    { name: '禄来福来双反相机', desc: '从战地一起带回来的老相机，还能用。', kind: 'clue' },
-  ],
+    dnd: {},
+  },
+  tokyo: {
+    // 记者：跑现场、挖料、跟人磨
+    coc: {
+      侦查: 65,
+      图书馆使用: 60,
+      说服: 60,
+      心理学: 50,
+      聆听: 55,
+      摄影: 50,
+      母语: 60,
+      潜行: 35,
+    },
+    dnd: {},
+  },
+  acg: {
+    // 高中生：文艺部，观察力好但没什么战斗力
+    coc: {
+      侦查: 55,
+      聆听: 50,
+      图书馆使用: 45,
+      说服: 45,
+      母语: 60,
+      闪避: 45,
+      跳跃: 35,
+      心理学: 35,
+    },
+    dnd: {},
+  },
+  urban: {
+    // 街头"处理麻烦"的人：跑得快、下手狠、嘴也利
+    coc: {
+      潜行: 65,
+      侦查: 55,
+      闪避: 55,
+      '格斗（斗殴）': 55,
+      聆听: 50,
+      说服: 45,
+      心理学: 40,
+      追踪: 35,
+    },
+    dnd: {},
+  },
+  fantasy: {
+    // 流浪剑客 / 前斥候：会打、会潜、会看路
+    coc: {
+      '格斗（斗殴）': 70,
+      '射击（步枪）': 55,
+      潜行: 60,
+      侦查: 55,
+      追踪: 55,
+      聆听: 50,
+      闪避: 60,
+      急救: 40,
+    },
+    // DnD 那一侧用加值（不是百分比）
+    dnd: {
+      运动: 3,
+      隐匿: 3,
+      察觉: 3,
+      生存: 2,
+      威吓: 2,
+      调查: 1,
+    },
+  },
 };
 
-export type ThemeName = 'midnight' | 'ash' | 'parchment';
+/**
+ * 把题材的技能配方**适配到当前规则包**上。
+ *
+ * 为什么必须适配而不能直接用：同一份人设可能在两套规则下跑
+ * （奇幻可以配 DnD，也可以配 COC —— 题材×规则是正交的，这是项目铁律）。
+ * 配方里的 COC 百分比名（「格斗（斗殴）」）与 DnD 加值名（「运动」）
+ * 属于两套**不同的词汇表**，硬套会把对方的名字写成野技能。
+ *
+ * 找不到该规则包对应的那一套 → 退到规则包自己的 `starterSkills`
+ * （通用但不野，至少每一项都能掷）。
+ * `rs` 为 `specificRuleset ?? mainDiceRuleset`：
+ * 优先看当前规则包有没有专属那一套（如 fantasy 的 dnd），
+ * 没有就退回规则包自带的通用项。
+ */
+export function starterSkillsFor(
+  genreId: string,
+  rulesetId: string
+): Record<string, number> {
+  const rs = getRuleset(rulesetId);
+  const profile = STARTER_SKILLS[genreId];
+  const isPercent = rs.mainDice === '1d100';
+  const want = profile ? (isPercent ? profile.coc : profile.dnd) : undefined;
 
-/** 正文排版设置 */
-export interface Typography {
-  /** 正文缩放（0.9 – 1.4） */
-  scale: number;
-  /** 行距倍数（1.5 – 2.4） */
-  lineHeight: number;
-  /** 首行缩进两字 */
-  indent: boolean;
+  // 规则包自己的通用起始项：永远是"合法的"，作为兜底
+  const fallback = Object.fromEntries((rs.starterSkills ?? []).map((s) => [s.name, s.value]));
+
+  if (!want || Object.keys(want).length === 0) return fallback;
+
+  /*
+   * 逐项对照规则包：名字不在技能表上的丢掉（写进角色卡也掷不出来）。
+   * 用 `canonicalSkillName` 而不是精确匹配 —— 它能认别名
+   * （"手枪" → "射击（手枪）"），也能认包含关系。
+   */
+  const known = new Set(rs.skillCatalog.map((s) => s.name));
+  const out: Record<string, number> = {};
+  for (const [rawName, value] of Object.entries(want)) {
+    const name = canonicalSkillName(rawName, rs);
+    if (!known.has(name)) continue;
+    out[name] = value;
+  }
+  /*
+   * 一项都没对上（比如换了个完全不同的规则包）→ 退到通用项。
+   * 不做"部分保留"：留下半套残配方会比通用项更不像样。
+   */
+  return Object.keys(out).length > 0 ? out : fallback;
 }
 
-export const TYPOGRAPHY_PRESETS: { id: string; name: string; value: Typography }[] = [
-  { id: 'compact', name: '紧凑', value: { scale: 0.95, lineHeight: 1.65, indent: false } },
-  { id: 'standard', name: '标准', value: { scale: 1, lineHeight: 1.9, indent: false } },
-  { id: 'loose', name: '宽松', value: { scale: 1.08, lineHeight: 2.1, indent: false } },
-  { id: 'book', name: '书卷', value: { scale: 1.05, lineHeight: 2, indent: true } },
-];
 
-const DEFAULT_TYPOGRAPHY: Typography = TYPOGRAPHY_PRESETS[1]!.value;
+
+
 
 /**
  * 内置的两个示例队友（老杰克 / 米拉·陈）——**只在需要演示时用**。
@@ -1048,36 +558,8 @@ export const SAMPLE_COMPANIONS: Companion[] = [
   },
 ];
 
-const DEFAULT_WORLDBOOK: WorldbookEntry[] = [
-  {
-    id: 'sample-town',
-    keys: ['敦威治', '小镇', '邓里奇'],
-    content:
-      '马萨诸塞州北部的小镇，人口不足四百。1890 年代起便有关于"山那边"的传闻，居民对外人沉默而警惕。镇上有一间杂货铺、一座浸礼会教堂，以及一间常年落锁的旧校舍。',
-    priority: 50,
-    enabled: true,
-  },
-];
 
-function loadWorldbook(): WorldbookEntry[] {
-  try {
-    const raw = localStorage.getItem('trpg.worldbook');
-    if (raw) return JSON.parse(raw) as WorldbookEntry[];
-  } catch {
-    /* 忽略损坏数据 */
-  }
-  return DEFAULT_WORLDBOOK;
-}
 
-function loadJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw) as T;
-  } catch {
-    /* 忽略损坏数据 */
-  }
-  return fallback;
-}
 
 /**
  * 真正的写入（同步、可能抛配额异常）。
@@ -1177,89 +659,65 @@ function scheduleSaveMessages(get: () => Store): void {
   saveJson('trpg.messages', get().messages);
 }
 
-function loadMessages(): Message[] {
-  const opening = openingText(loadCharacter(), loadModule(), loadGenreId());
-  const saved = loadJson<Message[] | null>('trpg.messages', null);
-  if (Array.isArray(saved) && saved.length > 0) {
-    // 迁移：早期开场白是写死的，这里按当前角色卡 + 模组同步一次
-    return saved.map((m) => (m.id === WELCOME_ID ? { ...m, content: opening } : m));
-  }
-  return [{ id: WELCOME_ID, role: 'gm', content: opening, ts: Date.now() }];
-}
+/*
+ * ── 生图队列（R40）的模块级零件 ─────────────────────────────────
+ * 三条刻意的：
+ * - **并发 2**：生图接口本来就慢（十几秒起），一次堆十个只会更慢、还容易撞限流。
+ * - **`pumping` 重入锁**：一条跑完会再叫一次泵，不能让两个泵同时抢同一条排队任务。
+ * - **队列立刻落盘**（`saveJsonNow`）：它是结构性的 —— 应用关掉之后再打开，
+ *   你还得看得见"上次有两张没画完"。
+ */
+const IMAGE_CONCURRENCY = 2;
+let pumping = false;
 
-function loadGameState(): GameState {
-  const saved = loadJson<GameState | null>('trpg.gameState', null);
-  if (saved && typeof saved === 'object' && saved.vitals) {
-    // 血上限实时由属性派生，老存档里的 vitalsMax 快照一律忽略并重算
-    const rid = loadRulesetId();
-    const max = deriveVitalsMax(loadCharacter(), rid);
-    saved.vitalsMax = max;
-    // 当前血量若超过派生上限（旧数据可能偏高），裁剪回去
-    for (const [k, v] of Object.entries(saved.vitals)) {
-      const m = max[k];
-      if (m != null && v > m) saved.vitals[k] = m;
-    }
-    // 缺键补齐：旧存档 / 换过规则包的档，vitals 可能缺 mp、san，界面上会显示成 0
-    return reconcileVitals(saved, loadCharacter(), rid);
-  }
-  return createInitialState({
-    vitals: { hp: 12, san: 70, mp: 14 },
-    vitalsMax: { hp: 12, san: 99, mp: 14 },
-    // 开团不带任何队友：队友只能来自模组包候选或玩家自己招募
-    companions: [],
-    inventory: [
-      { id: 'camera', name: '禄来福来双反相机', qty: 1 },
-      { id: 'revolver', name: '.38 左轮手枪', qty: 1 },
-      { id: 'notebook', name: '牛皮纸笔记本', qty: 1 },
-    ],
-    flags: {},
-    clues: [],
-    location: '霍尔特的侦探事务所',
-    npcsAlive: ['委托人：老霍华德'],
-  });
-}
-
-/** 由角色属性派生数值条上限（血/蓝由属性决定；SAN 上限固定 99） */
-export function deriveVitalsMax(c: CharacterProfile, rulesetId: string): Record<string, number> {
-  const rs = getRuleset(rulesetId);
-  const vitals = rs.deriveVitals(c.characteristics);
-  return Object.fromEntries(
-    rs.vitalDefs.map((v) => [v.key, v.key === 'san' ? 99 : (vitals[v.key] ?? v.default)])
-  );
-}
-
-/** 由角色属性派生数值条的**当前起始值**（血/蓝/理智各是多少） */
-export function deriveVitalsFor(c: CharacterProfile, rulesetId: string): Record<string, number> {
-  return getRuleset(rulesetId).deriveVitals(c.characteristics);
+function persistImageJobs(list: ImageJob[]): void {
+  saveJsonNow('trpg.imageJobs', list);
 }
 
 /**
- * 把 gameState 的数值条补齐到当前规则包的所有键。
+ * 把一张图写进 IndexedDB，并**把结果说出来**（P2-3）。
  *
- * 为什么需要：换规则包、或读早期存档时，vitals 可能缺键（比如 DnD 只存了 hp）。
- * 缺键在界面上会显示成 0（`vitals[key] ?? 0`），看起来像"MP/SAN 掉了"——
- * 其实只是没有这个键。这里按属性派生值补上，缺什么补什么。
+ * `idbSet` 自己吞掉了异常（它不能把界面搞崩），于是"存不下"和"存好了"
+ * 在调用方看来一模一样 —— 但这两件事对玩家的后果差得远：
+ * 存好了＝这张图以后一直在；存不下＝**只有内存里这份，刷新就没了**。
+ * 后者必须让玩家当场知道，否则他会以为图已经妥了。
+ *
+ * 返回 `true` 表示**图真的落到了盘上**。
  */
-export function reconcileVitals(
-  state: GameState,
-  character: CharacterProfile,
-  rulesetId: string
-): GameState {
-  const rs = getRuleset(rulesetId);
-  const derived = rs.deriveVitals(character.characteristics);
-  const vitals: Record<string, number> = { ...state.vitals };
-  let changed = false;
-  for (const def of rs.vitalDefs) {
-    const cur = vitals[def.key];
-    if (!Number.isFinite(cur)) {
-      vitals[def.key] = derived[def.key] ?? def.default;
-      changed = true;
-    }
-  }
-  // 旧存档可能没有 threads 字段（网状叙事的支线表是后加的）
-  const threads = Array.isArray(state.threads) ? state.threads : [];
-  return changed || threads !== state.threads ? { ...state, vitals, threads } : state;
+function putImageBlob(key: string, value: unknown): Promise<boolean> {
+  return idbSet(key, value).then(
+    () => true,
+    () => false
+  );
 }
+
+/** 存不下时的统一交代（只有一处说法） */
+const IMAGE_STORE_FAILED = '存不进本地数据库了（可能空间已满），这张图刷新后会丢。';
+
+/**
+ * 落盘前的归一化（P2-3）：把生图接口给的**任意形态**变成能存下来的东西。
+ *
+ * - data URI → 直接就是图，原样返回；
+ * - http 链接 → 试着 `fetch` 回来转 data URI（同源 / 允许 CORS 就能成）；
+ *   抓不回来就**如实标成 remote** —— 调用方据此改口径说"临时链接"。
+ *
+ * **不做代理、不重试**：跨源被 CORS 挡是常态，绕过它等于替玩家做了一个
+ * 他不知情的转发，而且会把他的 key 暴露给一个中间层。不值得。
+ */
+async function normalizeImage(
+  raw: string
+): Promise<{ kind: 'local' | 'remote'; value: string }> {
+  if (isSelfContainedImage(raw)) return { kind: 'local', value: raw };
+  const r = await fetchImageAsLocal(raw);
+  if (r.kind === 'self') return { kind: 'local', value: r.value };
+  return { kind: 'remote', value: raw };
+}
+
+
+
+
+
+
 
 /**
  * 把队友的数值规范到规则包定义的键（hp/san/mp），并记录状态条上限。
@@ -1280,296 +738,33 @@ export function normalizeCompanion(c: Companion, rulesetId = 'coc7'): Companion 
   };
 }
 
-const WELCOME_ID = 'welcome';
 
-/**
- * 模组里的 `{{称呼}}` 只允许留在开场白里（渲染时替换）。
- * 其它字段（especially startLocation / locations / mapNodes）是要直接显示的，
- * 一律提前替成真实值——否则会出现"当前地点：{{称呼}}的公寓房间"这种穿帮。
- */
-export function sanitizeModuleTokens(m: Module, c: CharacterProfile): Module {
-  const f = (t: string | undefined) => (t ? fillPlayerTokens(t, c) : t);
-  return {
-    ...m,
-    startLocation: f(m.startLocation),
-    locations: f(m.locations) ?? m.locations,
-    mapNodes: m.mapNodes?.map((n) => ({ ...n, name: f(n.name) ?? n.name, note: f(n.note) })),
-    npcs: m.npcs.map((n) => ({ ...n, name: f(n.name) ?? n.name, role: f(n.role) ?? n.role })),
-  };
-}
 
-/** 开局地点：优先模组的 startLocation，其次地点表第一行 */
-export function initialLocation(m: Module, c?: CharacterProfile): string {
-  const explicit = m.startLocation?.trim();
-  const raw = explicit || m.locations?.split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
-  return c ? fillPlayerTokens(raw, c) : raw;
-}
 
-/**
- * 开局在场人物：模组里在开场白 / 前言中点名出现的人。
- * 为什么不直接全填：没登场的人不该出现在"在场人物"里（会诱导 GM 拉人、也污染检定对象）。
- */
-export function initialNpcs(m: Module, c?: CharacterProfile): string[] {
-  const raw = `${m.opening ?? ''}\n${m.premise ?? ''}`;
-  if (!raw.trim()) return [];
-  const text = c ? fillPlayerTokens(raw, c) : raw;
-  return m.npcs.filter((n) => n.name && text.includes(n.name)).map((n) => n.name);
-}
 
-/**
- * 各题材的兜底开场白（模组没写 opening 时用）。
- *
- * 为什么不能只有一个：内置兜底原来写死了"1924 年 / 老霍华德"，
- * 拿它去开一个奇幻或校园模组会非常出戏。
- */
-const FALLBACK_OPENINGS: Record<string, (c: CharacterProfile) => string> = {
-  coc: (c) => `这是一间没有窗户的接待室。壁炉里的火早就熄了，空气里残留着冷烟草和旧纸的味道。
 
-坐在你对面的老人把一份卷宗推过来，指节发白。
 
-"${addressOf(c)}，我女儿失踪十一天了。警察说她是自己走的。"他停顿了一下，"但她从不会不带上那台相机。"
 
-卷宗封面上的日期是——**1924 年 3 月 7 日**。`,
-  tokyo: () => `手机在兜里震了一下，是读者发来的私信，只有一行字：别去那栋公寓。
 
-你抬头。那栋楼就在街对面，六层，外墙的瓷砖掉了大半，三楼那扇窗户亮着灯——你记得很清楚，这栋楼三年前就封了。
 
-末班电车从身后驶过，卷起一阵风。站台上只剩你一个人。
 
-雨开始下了。`,
-  acg: () => `放课后的活动室只剩下你一个人。夕阳把黑板照成暖橘色，走廊里还有社团收拾东西的动静。
 
-你手机亮了一下，是群里的消息：「明天的事，真的要去吗？」
 
-窗外，天暗得比平时早。`,
-  pink: () => `雨还在下。你站在车站的屋檐下，看着水在台阶上汇成一小股，流进下水口。
 
-她撑着一把透明的伞走过来，在你半步远的地方停下。
 
-"……你没带伞啊。"她说，顿了一下，"那，一起走吧。伞小了点。"
 
-伞面往你这边偏了偏。`,
-  fantasy: () => `酒馆的门被风吹开又合上。火塘里的柴噼啪响了两声。
 
-你把最后一块干面包咽下去，盘算着口袋里的银币还够走几天。
 
-对面的桌子旁，一个披灰斗篷的人一直没动，只是看着你。你注意到对方的靴子上沾着泥——镇子外围那片沼地的泥。`,
-};
 
-/**
- * 开场白 —— 属于模组（第一幕），不是角色卡。
- * 模组里填了 opening 就用它；否则用当前题材的兜底场景，并按"称呼"填充。
- */
-function openingText(c: CharacterProfile, m: Module, genreId = 'coc'): string {
-  const raw = m.opening?.trim();
-  const body = raw
-    ? // 模组开场里可用 {{称呼}} / {{name}} 指代玩家
-      raw
-        .replace(/\{\{\s*称呼\s*\}\}/g, addressOf(c))
-        .replace(/\{\{\s*name\s*\}\}/gi, c.name)
-    : (FALLBACK_OPENINGS[genreId] ?? FALLBACK_OPENINGS.fantasy ?? FALLBACK_OPENINGS.coc!)(c);
 
-  // 把"我要干嘛"直接摆到玩家眼前——这是最容易让人卡住的一环，不能只靠侧栏
-  if (!m.goal?.trim()) return body;
-  const lines = [`> **你要做的事**：${m.goal.trim()}`];
-  if (m.stakes?.trim()) lines.push(`> **赌注**：${m.stakes.trim()}`);
-  if (m.urgency?.trim()) lines.push(`> **时间**：${m.urgency.trim()}`);
-  return `${body}\n\n${lines.join('\n')}`;
-}
 
-function loadTheme(): ThemeName {
-  const t = localStorage.getItem('trpg.theme');
-  return t === 'ash' || t === 'parchment' ? t : 'midnight';
-}
 
-function loadRulesetId(): string {
-  const id = localStorage.getItem('trpg.rulesetId');
-  // 只有注册过的规则包 id 才算数，否则回退 COC
-  return id && listRulesets().some((r) => r.id === id) ? id : 'coc7';
-}
 
-/** 自建/导入的题材（存 localStorage，和内置题材合并使用） */
-export function loadCustomGenres(): Genre[] {
-  const list = loadJson<Genre[]>('trpg.customGenres', []);
-  return Array.isArray(list) ? list.filter((g) => g?.id && g?.name) : [];
-}
 
-function loadGenreId(): string {
-  const id = localStorage.getItem('trpg.genreId');
-  return id && listGenres(loadCustomGenres()).some((g) => g.id === id) ? id : 'coc';
-}
 
-function loadTypography(): Typography {
-  try {
-    const raw = localStorage.getItem('trpg.typography');
-    if (raw) return { ...DEFAULT_TYPOGRAPHY, ...JSON.parse(raw) };
-  } catch {
-    /* 忽略 */
-  }
-  return DEFAULT_TYPOGRAPHY;
-}
 
-/**
- * 守密人口吻（R8）。
- *
- * 为什么单独存一个 key 而不是塞进 `config`：它是**玩法口味**，不是 API 配置，
- * 不该跟着"导出配置"一起走（导出配置是给换机器/换模型用的）。
- * 读不出来一律退回默认 —— 默认口吻必须与"没做这个功能之前"的调子一致，
- * 这样没选过的人不会被平白换一种声音。
- */
-/**
- * 生涯记录（R13/R30）。
- *
- * **单独一个 key**（`trpg.career`），不跟单局存档混在一起 ——
- * 单局会被"开新团"清掉、被回溯重写，而"我一共跑过多少场、有哪些成就"
- * 是跨所有局的，混进去就会一开新团就归零。
- *
- * 读坏了就退回空生涯：**宁可履历丢了，也不能让存档打不开**。
- */
-function loadCareer(): Career {
-  try {
-    const raw = localStorage.getItem('trpg.career');
-    if (!raw) return emptyCareer();
-    const p = JSON.parse(raw) as Partial<Career>;
-    const base = emptyCareer();
-    return {
-      totals: { ...base.totals, ...(p.totals ?? {}), outcomes: { ...base.totals.outcomes, ...(p.totals?.outcomes ?? {}) } },
-      achievements: p.achievements ?? {},
-    };
-  } catch {
-    return emptyCareer();
-  }
-}
 
-/** 读一个布尔开关（缺省 / 读坏都退回 `fallback`，绝不因为一个坏值把启动弄挂） */
-function loadFlag(key: string, fallback: boolean): boolean {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw == null) return fallback;
-    const v = JSON.parse(raw);
-    return typeof v === 'boolean' ? v : fallback;
-  } catch {
-    return fallback;
-  }
-}
 
-function loadGmVoice(): GmVoice {
-  try {
-    const raw = localStorage.getItem('trpg.gmVoice');
-    if (raw) {
-      const id = JSON.parse(raw);
-      if (typeof id === 'string') return gmVoiceOf(id).id;
-    }
-  } catch {
-    /* 忽略 */
-  }
-  return DEFAULT_GM_VOICE;
-}
-
-function loadConfig(): ApiConfig {
-  try {
-    const raw = localStorage.getItem('trpg.config');
-    if (raw) return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  } catch {
-    /* 忽略损坏的配置 */
-  }
-  return DEFAULT_CONFIG;
-}
-
-/**
- * 把存档解析成角色卡，并兼容早期版本的结构。
- *
- * 注意：默认值里不能放"会随用户输入变化"的字段（如 address / gender），
- * 否则老存档缺这个键时会被默认值填上、盖掉用户改过的内容。
- */
-export function mergeCharacter(raw: string | null): CharacterProfile {
-  if (!raw) return DEFAULT_CHARACTER;
-  try {
-    return migrateCharacter(JSON.parse(raw) as Record<string, unknown>);
-  } catch {
-    return DEFAULT_CHARACTER;
-  }
-}
-
-/** 兼容早期角色卡：occupation / age / portrait / background → description */
-function migrateCharacter(p: Record<string, unknown>): CharacterProfile {
-  const base = DEFAULT_CHARACTER;
-  const l = p as {
-    name?: string;
-    gender?: string;
-    address?: string;
-    description?: string;
-    personality?: string;
-    scenario?: string;
-    first_mes?: string;
-    mes_example?: string;
-    characteristics?: Record<string, number>;
-    skills?: Record<string, number>;
-    occupation?: string;
-    age?: number;
-    portrait?: string;
-    background?: string;
-    items?: string[];
-  };
-  const description =
-    l.description ??
-    [
-      l.age ? `${l.age} 岁` : '',
-      l.occupation ?? '',
-      l.portrait ? `外貌：${l.portrait}` : '',
-      l.background ?? '',
-    ]
-      .filter(Boolean)
-      .join('。');
-  return {
-    name: l.name ?? base.name,
-    gender: l.gender ?? '',
-    description,
-    personality: l.personality ?? '',
-    mes_example: l.mes_example ?? '',
-    characteristics: { ...base.characteristics, ...(l.characteristics ?? {}) },
-    skills: l.skills ?? base.skills,
-    address: l.address,
-    portrait: l.portrait ?? '',
-    items: Array.isArray(l.items) ? l.items : [],
-  };
-}
-
-function loadCharacter(): CharacterProfile {
-  return mergeCharacter(localStorage.getItem('trpg.character'));
-}
-
-/**
- * 解析模组存档，兼容早期结构（只有 title/premise/opening/outline）。
- *
- * 老存档缺的新字段一律给空，而**不是**套 DEFAULT_MODULE ——
- * 否则会把默认模组的剧情内容混进用户自己的模组里。
- */
-export function mergeModule(raw: string | null): Module {
-  if (!raw) return DEFAULT_MODULE;
-  try {
-    const s = JSON.parse(raw) as Partial<Module> & { outline?: string };
-    return {
-      title: s.title ?? '',
-      premise: s.premise ?? '',
-      opening: s.opening ?? '',
-      truth: s.truth ?? s.outline ?? '',
-      npcs: Array.isArray(s.npcs) ? s.npcs : [],
-      locations: s.locations ?? '',
-      clueChain: s.clueChain ?? '',
-      acts: s.acts ?? '',
-      endings: s.endings ?? '',
-      notes: s.notes ?? '',
-    };
-  } catch {
-    return DEFAULT_MODULE;
-  }
-}
-
-function loadModule(): Module {
-  // 读盘时也过一遍占位符：老存档里可能残留 {{称呼}}
-  return sanitizeModuleTokens(mergeModule(localStorage.getItem('trpg.module')), loadCharacter());
-}
 
 /**
  * 把本轮的 applied 变更翻译成"人话"，给主页面的状态变化提示用。
@@ -1703,6 +898,26 @@ function describeChanges(
 const CHANGE_MERGE_MS = 4000;
 
 /**
+ * 这一轮的"时间已经推过了"标记。
+ *
+ * 为什么需要：一轮回复里 `applyModelDeltas` 会被调**不止一次**
+ * （状态一次、地点一次）。`elapsed` 是**整轮的量**，
+ * 传两遍就等于把"三个小时"算成六个小时，倒计时会凭空掉得更快。
+ *
+ * 用"最后一次推进的时间戳 + 同一个合并窗口"来去重：
+ * 窗口内的第二次调用认为"这一轮已经推过了"。
+ * 与状态提示的合并共用 `CHANGE_MERGE_MS`，两者口径一致。
+ */
+let clockTickedAt = 0;
+
+function shouldTickClock(): boolean {
+  const now = Date.now();
+  if (now - clockTickedAt < CHANGE_MERGE_MS) return false;
+  clockTickedAt = now;
+  return true;
+}
+
+/**
  * 引擎自己记的临时疯狂轮数（`flags.疯狂轮数`）。
  *
  * 为什么需要它：引擎写 `flags.临时疯狂` 时写的是**一句描述**
@@ -1782,69 +997,89 @@ function fillFoeNumbers(
   return touched ? out : deltas;
 }
 
-interface Store {
-  messages: Message[];
-  gameState: GameState;
-  config: ApiConfig;
-  character: CharacterProfile;
-  /** 模组（团）：这一局讲的是什么故事 */
-  module: Module;
-  rulesetId: string;
-  /** 题材预设：决定守密人写法、画风、模组与队友倾向（与规则包正交） */
-  genreId: string;
-  /** 自建/导入的题材（内置题材之外） */
-  customGenres: Genre[];
-  streaming: boolean;
-  panel: 'chat' | 'character' | 'world';
-  theme: ThemeName;
-  worldbook: WorldbookEntry[];
-  chronicle: ChronicleEntry[];
-  /** 远期剧情压缩后的段落，摘要层 */
-  summary: string;
-  /** 回合快照表：玩家消息 id → 回合开始时的状态 */
-  snapshots: Record<string, TurnSnapshot>;
-  /** 「模组包」生成的队友候选，等玩家挑谁入队 */
-  companionCandidates: Companion[];
-  /** 场景立绘：地点 → 图片（存 IndexedDB，避免 localStorage 超配额丢图） */
-  sceneImages: Record<string, string>;
-  /** 剧情消息上的动作小图：消息 id → 图片（同样存 IndexedDB） */
-  messageImages: Record<string, string>;
-  /** 地图总览图（data URI，存 IndexedDB） */
-  mapImage: string;
-  /**
-   * 守密人要求的、等待玩家掷骰的检定。
-   *
-   * 为什么是队列：一轮里守密人可能同时要求多个检定（如"潜行"与"聆听"）。
-   * 早期只取 `dice_requests[0]`，后面的请求会被整个丢掉——玩家永远掷不到。
+/**
+ * 模型写了 `combat.foes add` 却忘了 `name` —— 从它**自己刚写的正文**里把名字捞回来。
+ *
+ * ## 为什么是"从正文捞"而不是"从模组表挑"
+ * 用户 2026-09-16 实测报的是「敌对者没有命名」。
+ * 模型的行为模式很固定：正文里已经把那只东西描述得清清楚楚
+ * （"泥水里站起来一个瘦长的身影，正是你们在井底见过的那个东西"），
+ * 但它把 `combat.foes add` 当成"记一笔血量"，`name` 那栏就空着。
+ *
+ * 这时候**正确答案就在正文里**，只是没被填进结构。
+ * 从模组表里随便挑一只塞给它是最糟的做法：表里三只东西，挑错了
+ * 玩家就要打一个跟剧情无关的怪，而且图鉴（`encountered`）会记错人。
+ * 所以这里只做一件事：**找正文里出现过的、模组敌对者表里的名字**。
+ *
+ * ## 判据
+ * - 只在**缺 name** 时动手（模型填了的一律不动）。
+ * - 候选来源：这一轮正文/理由里出现过的、`module.monsters` 表上的名字。
+ *   表是"这个世界里合法存在的敌人"，从表里选不会凭空造出不存在的东西。
+ * - 只命中**一个**才用。命中两个以上说明分不清是谁 —— 宁可交给下游的
+ *   「不明的东西」兜底，也不赌。
+ * - 正文一个字都没有 / 一个都对不上 → 原样放行（交给核心层的兜底名字）。
+ *
+ * 注意这里的"捞名字"**不是**在猜剧情：正文是模型自己写的，表是作者填的，
+ * 我们只是把两者对上，不引入任何第三者信息。
+ */
+function patchUnnamedFoes(deltas: StateDelta[], narration: string | undefined): StateDelta[] {
+  const hasUnnamed = deltas.some(
+    (d) =>
+      d &&
+      d.target === 'combat.foes' &&
+      d.op === 'add' &&
+      d.value &&
+      typeof d.value === 'object' &&
+      !String((d.value as Partial<Foe>).name ?? '').trim()
+  );
+  if (!hasUnnamed) return deltas;
+
+  const monsters = getStateModuleMonsters();
+  if (!monsters?.length) return deltas;
+
+  const text = String(narration ?? '');
+  if (!text.trim()) return deltas;
+
+  // 正文里点到名的、且确实在表上的 —— 命中唯一才敢用
+  const hit = monsters
+    .map((m) => m.name.trim())
+    .filter((n) => n.length >= 2 && text.includes(n));
+  const unique = Array.from(new Set(hit));
+  if (unique.length !== 1) return deltas;
+  const name = unique[0];
+
+  /*
+   * 只补这一个字段，`hp` / `max` 一律不动 —— 后面 `fillFoeNumbers`
+   * 会因为名字对上了表而把数值补成表里的值，分工干净。
    */
-  pendingChecks: PendingCheck[];
-  /** 最近一轮的状态变化摘要，主页面用它弹提示 */
-  lastChanges: StateChangeNotice | null;
-  /**
-   * 待注入的「濒死施救引导」——**一次性**：下一次发给守密人时带上，带完即清。
-   *
-   * 为什么不在提示词里常驻：常驻等于每一轮都在提醒"你要死了"，
-   * 血没见底时也占着上下文。只在濒死那一轮说一次，才叫引导而不是唠叨。
-   * 纯运行时字段，**不进存档**（刷新页面丢失也不影响，死亡结算照旧）。
-   */
-  dyingNote: string | null;
-  /** 正文排版设置 */
-  typography: Typography;
-  /** 守密人口吻（R8）。只改"怎么说"，不改任何规则 */
-  gmVoice: GmVoice;
-  /**
-   * 带图战报的**总开关**：关键节点（回溯锚点）自动配一张图。
-   *
-   * **默认关**：它会真的花钱（每张图一次生图调用），默认开着等于替主人决定支出。
-   * 想开就在设置里打开，或随时对单条消息手动生成。
-   */
-  autoIllustrate: boolean;
-  /** 跨局的生涯记录与成就（R13/R30）。**独立于单局存档**，开新团不清 */
-  career: Career;
-  /** 刚刚这一次结档**新解锁**的成就（结档页高亮用）。不落盘，只是过路信息 */
-  lastUnlocked: AchievementDef[];
-  /** 音频设置（氛围音 / 自配 BGM / 判定音效） */
-  audio: AudioConfig;
+  return deltas.map((d) => {
+    if (
+      !d ||
+      d.target !== 'combat.foes' ||
+      d.op !== 'add' ||
+      !d.value ||
+      typeof d.value !== 'object'
+    ) {
+      return d;
+    }
+    const foe = d.value as Partial<Foe>;
+    if (String(foe.name ?? '').trim()) return d;
+    return { ...d, value: { ...foe, name } };
+  });
+}
+
+/**
+ * `patchUnnamedFoes` 要用的模组敌对者表。
+ *
+ * 单独取一个函数是因为调用点在 `applyModelDeltas` 内部，
+ * 那时候 `get()` 已经解构过了 —— 与其在参数里再穿一层，
+ * 不如就地拿一次，语义也更清楚："此刻生效的模组是谁"。
+ */
+function getStateModuleMonsters(): readonly ModuleMonster[] | undefined {
+  return useStore.getState().module?.monsters;
+}
+
+interface Store extends StoreState {
 
   addMessage(m: Omit<Message, 'id' | 'ts'>): string;
   updateMessage(id: string, patch: Partial<Message>): void;
@@ -1860,6 +1095,27 @@ interface Store {
   removeCustomGenre(id: string): void;
   setCharacter(patch: Partial<CharacterProfile>): void;
   setModule(patch: Partial<Module>): void;
+  /**
+   * 处理契约里的 `deadline_days`（P2-5：期限归引擎，模型只许**定初值**、不许**改现值**）。
+   *
+   * - **已经有一个期限对象在**（不论剩多少、哪怕 `remain` 已归零）→ **整条忽略**。
+   *   推进、到点、收尾只由 `applyModelDeltas` 的时钟结算按 `elapsed` 负责 ——
+   *   否则模型一句「还剩 21 天」就能把倒计时续回来。
+   * - **还没有期限**（开局模组推不出来）→ 才把这次申报当初值用，给短篇一个下限。
+   * - 传非正数 / 非有限数＝设成无期限（`null`）；**但已有期限时同样忽略**，
+   *   要清期限得走 `setDeadline(null)`（引擎侧的动作，不归模型）。
+   */
+  setDeadlineDays(days: number | undefined): void;
+  /** 直接设定期限（含说明文字），开团时把模组的长线倒计时摆上 */
+  setDeadline(d: Deadline | null): void;
+  /**
+   * **换模组**的完整动作（推荐用它，别自己拼 `setModule`）：
+   * 改模组 + 撤掉上一个模组的世界书 + 装上这一个模组自带的世界书 + 同步开场白。
+   *
+   * `keepDerived` = true 时不动队友候选与 AI 生成的世界书条目
+   * （用于"只改模组里某个字段"这种不算换模组的场景）。
+   */
+  applyModule(patch: Partial<Module>, opts?: { keepDerived?: boolean; affectsOpening?: boolean }): void;
   setStreaming(v: boolean): void;
   setPanel(p: Store['panel']): void;
   setTheme(t: ThemeName): void;
@@ -1878,13 +1134,53 @@ interface Store {
   /** 剧情里出现某候选的名字时，标记为"已登场"（未登场不可入队） */
   markCandidatesMet(text: string): void;
   /** 保存某地点的场景立绘 */
-  setSceneImage(location: string, url: string): void;
+  /** 落盘成功返回 true（存不下＝刷新就丢，调用方可能要提示玩家） */
+  setSceneImage(location: string, url: string): Promise<boolean>;
   /** 给某条 GM 回复挂/删一张动作场景小图 */
-  setMessageSceneImage(msgId: string, url: string): void;
+  setMessageSceneImage(msgId: string, url: string): Promise<boolean>;
   /** 设置 / 清除地图总览图 */
-  setMapImage(url: string): void;
+  setMapImage(url: string): Promise<boolean>;
   /** 启动时把 IndexedDB 里的图片读回内存（异步，故不能放在初始化里） */
   hydrateImages(): Promise<void>;
+  /*
+   * ── 生图队列（R40）────────────────────────────────────────────
+   * 以前生图是**组件里的一次 await**：切个页签回来，组件卸载了，
+   * 那张图既看不见进度、也不知道最后落哪儿去了。现在它住在这里。
+   */
+  /**
+   * 排一个生图任务。返回排进去/命中的那条；
+   * **没配 API Key 或没填生图模型时返回 null**（调用方负责说人话，不排空任务）。
+   */
+  queueImage(job: {
+    kind: ImageJobKind;
+    target: string;
+    prompt: string;
+    label: string;
+  }): ImageJob | null;
+  /** 重试一条失败的任务 */
+  retryImageJob(id: string): void;
+  /** 不管了 —— 从队列里去掉（失败的那条） */
+  dismissImageJob(id: string): void;
+  /** 推一把队列：把排队的按并发上限发出去（多余的等前面跑完自动续） */
+  pumpImageJobs(): Promise<void>;
+  /**
+   * 跑一条任务（**内部用**，公开只因为 zustand 的方法都挂在同一个对象上）。
+   * 成功后结果直接落到该在的位置并出队；失败留在队列里等重试。
+   */
+  runImageJob(job: ImageJob): Promise<void>;
+  /**
+   * 把生成好的图**送到它该在的位置**（消息小图 / 地点场景 / 地图 / 立绘）。
+   * 抽出来是为了"往哪儿写"只有一处说法 —— 以后加新的图种只改这里。
+   *
+   * **只收已经落地的图**：调用方必须先过 `normalizeImage()`。
+   * 这里再保一道闸（`isSelfContainedImage`）—— 一个 http 链接从这道门进去，
+   * 就意味着导出会撒谎说"已内嵌"。
+   */
+  /**
+   * **返回 `boolean`**：`true` = 落下了；`false` = 被闸门拒了（P1-2）。
+   * 拒落时调用方必须走 `failJob`，不能照常 `dropJob` —— 否则玩家什么也看不到。
+   */
+  applyImageResult(job: ImageJob, url: string): Promise<boolean>;
   /** 覆盖整条待掷检定队列（守密人一次要求多个时用） */
   setPendingChecks(list: PendingCheck[]): void;
   /** 掷掉队列里的第 index 个 */
@@ -1893,6 +1189,8 @@ interface Store {
   clearPendingChecks(): void;
   /** 清掉主页面的状态变化提示 */
   clearChanges(): void;
+  /** 取走后台留下的一句提示（取完即清，不会重复弹） */
+  takeNotice(): void;
   /** 当前负重（界面与提示词共用同一份计算，别各算一遍） */
   encumbrance(): Encumbrance;
   /**
@@ -1949,6 +1247,32 @@ interface Store {
   /** 带图战报总开关（关键节点自动生图）。默认关 —— 开了会真的花钱 */
   setAutoIllustrate(on: boolean): void;
   /**
+   * 世界层（Phase 2）：改"这一局属于哪个世界"。
+   *
+   * 空字符串＝跟着模组名走（见 `currentWorldName()`）。改名**不会丢留档**：
+   * 留档按 `worldKey(name)` 找，只有玩家**主动点了一个已有世界**或
+   * **打了一个新名字**才会换 —— 准备页就是这么给的。
+   */
+  setWorldName(name: string): void;
+  /** 开新团时要不要接着上一次跑 */
+  setCarryWorld(on: boolean): void;
+  /** 忘掉一个世界的留档（名字与履历一起删）。**只是世界的事，不碰任何存档** */
+  forgetWorld(id: string): void;
+  /**
+   * 角色档案库：把**当前这张卡**存进去（同名＝更新）。
+   * @returns 入库的那条 + 是不是覆盖了同名卡
+   */
+  archiveCurrentCharacter(): { entry: ArchivedCharacter; replaced: boolean };
+  /**
+   * 从档案库取一张卡当当前角色卡。
+   *
+   * **只换人设与数值，不动这一局正在跑的剧情** ——
+   * 换卡是准备页的事，真要按新卡开局得开新团（`startNewGame`）。
+   */
+  useArchivedCharacter(id: string): boolean;
+  /** 从档案库删一张卡 */
+  deleteArchivedCharacter(id: string): void;
+  /**
    * R13/R30：把**这一局**记进生涯（并结算成就）。
    *
    * 只该在**结档时调用一次** —— 它会 +1 局。返回这一局**新解锁**的成就
@@ -1984,8 +1308,21 @@ interface Store {
    * 所以判定、成功率与结果标签都是一致的 —— 不是事后改数。
    */
   skillCheck(skill: string, difficulty?: 'regular' | 'hard' | 'extreme', bonus?: number): CheckBadge;
-  /** 应用模型返回的状态变更 */
-  applyModelDeltas(deltas: StateDelta[]): void;
+  /**
+   * 应用模型返回的状态变更。
+   *
+   * `opts.elapsed` ＝ 这一轮剧情里过去了多久（守密人申报的自然语言量）。
+   * 引擎会折算成分钟推进故事时钟、并扣减期限倒计时；同一轮的第二次调用会被去重。
+   *
+   * `opts.mentionedItems` ＝ 玩家这一句里**点名**到的背包物品（由 `itemsMentionedIn()` 算出）。
+   * 只用来做「模型忘了扣」的可见反馈（协作方第 17 版 D）：
+   * 点了全名、契约里却没有对应的 `inventory dec` → 状态变化里说一句「「××」还在背包里」。
+   * **绝不**据此替玩家扣东西 —— 那是 A+B 明令禁止的本地预扣。
+   */
+  applyModelDeltas(
+    deltas: StateDelta[],
+    opts?: { elapsed?: string; mentionedItems?: string[] }
+  ): void;
   /** 记录回合开始时的状态快照（以该回合的玩家消息 id 为键），供回溯使用 */
   snapshotTurn(playerMsgId: string): void;
   /** 把某个回合标成"关键决策点"（回溯锚点） */
@@ -2018,155 +1355,20 @@ interface Store {
   buildSave(): SaveFile;
 }
 
-export interface SaveFile {
-  version: number;
-  exportedAt: string;
-  character: CharacterProfile;
-  module?: Module;
-  gameState: GameState;
-  messages: Message[];
-  chronicle?: ChronicleEntry[];
-  summary?: string;
-  worldbook?: WorldbookEntry[];
-  /**
-   * 队友候选（准备页「同行者」里那些还没入队的）。
-   * 早先它只活在当前浏览器的 localStorage 里，任何换档 / 导档 / 清缓存都会丢——
-   * 玩家看到的就是"准备页的同行者不见了"。
-   */
-  companionCandidates?: Companion[];
-  snapshots?: Record<string, TurnSnapshot>;
-}
+
 
 /**
- * 存档结构版本号。
+ * 这一局**实际**用哪个世界名。
  *
- * 改动存档结构时把它 +1，并在 `migrateSave` 里补一条迁移 ——
- * 否则玩家读旧档时会因为缺字段而报错，看起来就像"存档坏了"。
+ * 玩家没写过就跟着模组名走 —— 这样"不填"永远是合理的默认，
+ * 而不是一个叫"未命名"的世界（那对玩家没有任何意义）。
  */
-export const SAVE_VERSION = 4;
-
-/**
- * 世界书合并：取**并集**（按 id 优先、其次按正文去重），而不是整体替换。
- *
- * 为什么：整体替换意味着"读一个条目更少的档 = 删掉我现在的东西"，
- * 玩家看到的就是"世界书消失了"。读档一律只补不删。
- */
-export function mergeWorldbook(
-  current: WorldbookEntry[],
-  incoming?: WorldbookEntry[]
-): WorldbookEntry[] {
-  if (!incoming?.length) return current;
-  const out = [...current];
-  for (const e of incoming) {
-    const idx = out.findIndex((x) => x.id === e.id || x.content === e.content);
-    if (idx >= 0) out[idx] = { ...out[idx]!, ...e };
-    else out.push(e);
-  }
-  return out;
+export function currentWorldName(s: { worldName: string; module: { title: string } }): string {
+  const explicit = (s.worldName ?? '').trim();
+  return explicit || defaultWorldName(s.module?.title ?? '');
 }
 
-/**
- * 存档迁移：把任意历史版本的存档补成当前结构。
- *
- * 原则是**只补不删**：旧档里没有的新字段一律给安全默认值，
- * 已有字段原样保留，绝不静默丢弃玩家的进度。
- */
-export function migrateSave(raw: unknown): Partial<SaveFile> {
-  const data = { ...((raw ?? {}) as Partial<SaveFile>) };
-  const rid = loadRulesetId();
-  const character = data.character
-    ? migrateCharacter(data.character as unknown as Record<string, unknown>)
-    : loadCharacter();
-  if (data.character) data.character = character;
 
-  if (data.module) {
-    data.module = sanitizeModuleTokens(
-      { ...MERGE_MODULE_DEFAULTS, ...data.module } as Module,
-      character
-    );
-  }
-
-  if (data.gameState && typeof data.gameState === 'object') {
-    let gs = data.gameState as GameState;
-    // 1) 数值条补齐到当前规则包的全集（缺键在界面上会显示成 0）
-    gs = reconcileVitals(gs, character, rid);
-    // 2) 地图迷雾的"去过的地方"是后加的
-    if (!Array.isArray(gs.visited)) {
-      gs = { ...gs, visited: gs.location?.trim() ? [gs.location.trim()] : [] };
-    }
-    // 3) 支线表与战斗轮也是后加的
-    if (!Array.isArray(gs.threads)) gs = { ...gs, threads: [] };
-    if (!gs.combat || typeof gs.combat !== 'object') {
-      gs = { ...gs, combat: { active: false, round: 0, foes: [] } };
-    } else if (!Array.isArray(gs.combat.foes)) {
-      gs = { ...gs, combat: { ...gs.combat, foes: [] } };
-    }
-    if (!Array.isArray(gs.companions)) gs = { ...gs, companions: [] };
-    if (!Array.isArray(gs.inventory)) gs = { ...gs, inventory: [] };
-    if (!Array.isArray(gs.clues)) gs = { ...gs, clues: [] };
-    if (!Array.isArray(gs.npcsAlive)) gs = { ...gs, npcsAlive: [] };
-    /*
-     * 伤口是 09-17 加的可选字段：旧档没有就是"没有伤口"，**不需要升 `SAVE_VERSION`**
-     * （可选新增字段不升，替换/重命名结构才升 —— 判据见台账第 4 节）。
-     * 这里只是把类型拢一下，避免下游到处写 `?? []`。
-     */
-    if (!Array.isArray(gs.wounds)) gs = { ...gs, wounds: [] };
-    /*
-     * 图鉴台账（R38）同样是可选新增字段：旧档没有就是"什么都没见过"。
-     * 与 `wounds` / `npcNotes` 同一判据 —— **不升 `SAVE_VERSION`**。
-     */
-    if (!Array.isArray(gs.encountered)) gs = { ...gs, encountered: [] };
-    if (!Array.isArray(gs.fought)) gs = { ...gs, fought: [] };
-    if (!gs.flags || typeof gs.flags !== 'object') gs = { ...gs, flags: {} };
-    // 濒死标记与结档信息是后加的
-    if (typeof gs.dying !== 'boolean') gs = { ...gs, dying: false };
-    if (gs.ending === undefined) gs = { ...gs, ending: null };
-    /*
-     * 4) 负重：v4 给每件物品补 `weight`。
-     * 老存档没有这个字段，缺了会被 `itemWeight()` 当成 1 兜底（结果一样），
-     * 但补上之后玩家在背包里能看到重量、也能手动改，不必等他捡到新东西才有。
-     */
-    if (gs.inventory.some((it) => typeof it.weight !== 'number')) {
-      gs = {
-        ...gs,
-        inventory: gs.inventory.map((it) =>
-          typeof it.weight === 'number' ? it : { ...it, weight: 1 }
-        ),
-      };
-    }
-    data.gameState = gs;
-  }
-
-  // 队友候选是后来才纳入存档的（早期只存在 localStorage，换档就丢）
-  if (!Array.isArray(data.companionCandidates)) data.companionCandidates = [];
-
-  // 编年史：早期版本折叠后回合号会错乱，这里统一修正成单调递增
-  if (Array.isArray(data.chronicle) && data.chronicle.length > 0) {
-    let prev = 0;
-    data.chronicle = data.chronicle.map((c, i) => {
-      const turn = Number.isFinite(c?.turn) && c.turn > prev ? c.turn : prev + 1;
-      prev = turn;
-      return { ...c, turn };
-    });
-  }
-
-  data.version = SAVE_VERSION;
-  return data;
-}
-
-/** 读档时给模组补的最小默认值（只补键，不塞剧情内容） */
-const MERGE_MODULE_DEFAULTS: Module = {
-  title: '',
-  premise: '',
-  opening: '',
-  truth: '',
-  npcs: [],
-  locations: '',
-  clueChain: '',
-  acts: '',
-  endings: '',
-  notes: '',
-};
 
 let seq = 0;
 const uid = () => `${Date.now().toString(36)}-${(seq++).toString(36)}`;
@@ -2192,14 +1394,21 @@ export const useStore = create<Store>((set, get) => ({
   sceneImages: {},
   messageImages: {},
   mapImage: '',
+  imageJobs: loadImageJobs(),
   pendingChecks: [],
   lastChanges: null,
   dyingNote: null,
+  uiNotice: null,
   typography: loadTypography(),
   gmVoice: loadGmVoice(),
   autoIllustrate: loadFlag('trpg.autoIllustrate', false),
   career: loadCareer(),
   lastUnlocked: [],
+  worlds: loadWorlds(),
+  worldName: loadWorldName(),
+  // 默认**开**：有留档就接着跑，正是这东西存在的理由；准备页会明写会带什么过去
+  carryWorld: loadFlag('trpg.carryWorld', true),
+  characterArchive: loadArchive(),
   audio: loadAudioConfig(),
 
   addMessage(m) {
@@ -2455,6 +1664,16 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
+  /**
+   * 改模组里的字段。
+   *
+   * ⚠️ **它不是"换模组"** —— 它只动你给的那几个键，
+   * 既不撤上一个模组的世界书、也不装新模组自带的那份。
+   * 真要换一个模组（内置模组按钮 / 测试沙盒 / AI 生成 / 贴文本导入 / 应用预设）
+   * 一律走 `applyModule()`，否则会出现"换了模组世界观还是上一个的"。
+   *
+   * 这里保留 `setModule` 是给"编辑当前模组的某个字段"用的（准备页那一堆输入框）。
+   */
   setModule(patch) {
     const next = sanitizeModuleTokens({ ...get().module, ...patch }, get().character);
     saveJson('trpg.module', next);
@@ -2466,12 +1685,19 @@ export const useStore = create<Store>((set, get) => ({
      * 都会把上一条开场白留在屏幕上**——测试沙盒的「切到某个脚本化模组」按钮就是这样，
      * 玩家看到的还是上一个模组的前言（用户 2026-09-16 实测："换模组后文案没清"）。
      * 而 `openingText()` 里其实还拼了 goal / stakes / urgency 三行，它们变了同样得同步。
+     *
+     * 09-17 再补三条：**没写 opening 的模组**，开场白是用它自己的
+     * `premise` / `startLocation` / `locations` 拼出来的（见 `moduleOpening`），
+     * 所以这三样变了也得重算——否则又是一次"文案没清"。
      */
     const affectsOpening =
       patch.opening !== undefined ||
       patch.goal !== undefined ||
       patch.stakes !== undefined ||
-      patch.urgency !== undefined;
+      patch.urgency !== undefined ||
+      patch.premise !== undefined ||
+      patch.startLocation !== undefined ||
+      patch.locations !== undefined;
     if (affectsOpening) {
       const opening = openingText(get().character, next, get().genreId);
       const current = get().messages;
@@ -2486,6 +1712,51 @@ export const useStore = create<Store>((set, get) => ({
 
   setStreaming: (v) => set({ streaming: v }),
   setPanel: (p) => set({ panel: p }),
+
+  setDeadlineDays(days) {
+    /*
+     * P2-5（协作方第 20 版）：期限是**引擎的**，不是模型的。
+     *
+     * 病灶：以前这里无条件接受契约里的 `deadline_days` —— 于是模型每轮随口报一个
+     * 「还剩 21 天」，玩家就永远卡在 21 天（时钟走了、期限不走，实测 4 轮 09:00→09:03
+     * 而期限一步没动）。同时 label 取不到就写 `?? ''`，一空永空，界面只能显示
+     * 「期限：这件事 · 还剩 21 天」（连这是什么期限都说不出来）。
+     *
+     * 现在分两条：
+     *   ① **已经有一个期限对象在**（不论剩多少、**哪怕已归零**）→ 申报**整条忽略**。
+     *      推进、到点、结束只由 `applyModelDeltas` 的时钟结算按 `elapsed` 负责。
+     *      为什么连 `remain === 0` 也挡：到点了意味着该走模组的「结局与失败条件」，
+     *      这时模型一句「还剩 21 天」就能把倒计时续回来 —— 那正是这条要防的事。
+     *   ② **还没有期限**（开局模组推不出来）→ 才把申报当前值用，给短篇一个下限。
+     *
+     * 玩家真需要新期限 / 想清掉期限时，走引擎侧的 `setDeadline`，不归模型管。
+     */
+    const cur = get().gameState.deadline;
+    if (cur) return; // 已经有期限：时钟说了算，模型一个字都改不动
+
+    const d =
+      Number.isFinite(days as number) && (days as number) > 0
+        ? {
+            remain: Math.round((days as number) * 60 * 24),
+            /*
+             * label 回落：模组 `urgency` 首句（与 `deadlineOf` 共用 `modDeadlineLabel`，
+             * 判据只有一份）→ 都没有时写「期限」。
+             * 以前这里是 `?? ''`，一空永空 → 界面显示「期限：这件事 · 还剩 21 天」。
+             */
+            label: modDeadlineLabel(get().module),
+          }
+        : null;
+    const next = { ...get().gameState, deadline: d };
+    // 期限是结构性的（影响倒计时与结局判断），立刻落盘
+    saveJsonNow('trpg.gameState', next);
+    set({ gameState: next });
+  },
+
+  setDeadline(d) {
+    const next = { ...get().gameState, deadline: d };
+    saveJsonNow('trpg.gameState', next);
+    set({ gameState: next });
+  },
 
   upsertWorldbookEntry(e) {
     const list = get().worldbook;
@@ -2507,13 +1778,16 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   /**
-   * 清掉"由 AI 生成的世界书条目"（`fromModule`）。
+   * 清掉"属于某个模组"的世界书条目。
    *
    * 这是 N6 的手动入口：世界书在跨档读档时取并集，不同模组的条目会累积，
-   * 需要一个手动清理的口子。用户手写的条目与内置示例条目**不动**。
+   * 需要一个手动清理的口子。**只留玩家自己手写的**（判据在 `core/worldbook.ts`）。
+   *
+   * ⚠️ 这里以前只滤 `fromModule`，**漏了 `mw-`（模组自带）** —— 于是手动清理清不干净
+   * （协作方第 14 版 §2 抓到的漏网）。判据必须只有一份，别再手写过滤条件。
    */
   clearModuleWorldbook() {
-    const kept = get().worldbook.filter((e) => !e.fromModule);
+    const kept = stripModuleWorldbook(get().worldbook);
     localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
     set({ worldbook: kept });
   },
@@ -2539,10 +1813,114 @@ export const useStore = create<Store>((set, get) => ({
   devMode: localStorage.getItem('trpg.devMode') === '1',
 
   clearModuleDerived() {
-    const kept = get().worldbook.filter((e) => !e.fromModule && !e.id.startsWith('sample-'));
+    // 同上：判据用 `core/worldbook.ts` 那一份（这里以前漏了 `mw-`）
+    const kept = stripModuleWorldbook(get().worldbook);
     localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
     saveJson('trpg.companionCandidates', []);
     set({ worldbook: kept, companionCandidates: [] });
+  },
+
+  /*
+   * ── 换模组（applyModule）──────────────────────────────────────
+   *
+   * **换模组是一个动作，不是一次赋值。**
+   *
+   * 以前"套用模组"散在四个地方，每个都自己拼一坨 `setModule({...})`：
+   * 内置模组按钮、测试沙盒、AI 生成、贴文本导入。
+   * 结果它们**各漏各的**：内置模组按钮忘了清上一个模组的派生数据，
+   * 脚本化模组忘了清、也忘了装世界书 —— 于是主人 2026-09-17 实测到：
+   * "预设模组的世界书没显示""换模组了世界观还是上一个的"。
+   *
+   * 现在收成一个入口：**改模组 + 撤旧世界书 + 装新世界书**，一次做完。
+   * 谁要换模组都走这里，别再各写各的。
+   */
+  applyModule(patch, opts) {
+    const s = get();
+    /*
+     * 世界书**不继承上一个模组的**。
+     *
+     * 主人 2026-09-20 试玩撞到的：AI 一键生成了一个新模组，上一个模组的地点
+     * 还留在世界书里。根因就是这里 —— `patch` 里没有 `worldbook` 时，
+     * `{...s.module, ...patch}` 把**旧模组的世界书留了下来**，紧接着下面 ② 又给它
+     * 打上 `mw-` 装回去，等于"换模组却带着上一个世界的地图"。
+     *
+     * 换模组＝换一个世界：世界书以 `patch` 为准，没给就是没有。
+     * 唯一的例外是 `keepDerived`（同一模组内补派生数据），那时才保留。
+     * （"开新团不清世界书"那条铁律说的是**重开同一局**，走的是别的路径，不受这里影响。）
+     */
+    const merged = sanitizeModuleTokens(
+      { ...s.module, ...patch, worldbook: patch.worldbook ?? (opts?.keepDerived ? s.module.worldbook : []) },
+      s.character
+    );
+
+    /*
+     * ① 撤掉**上一个模组**的世界书条目。
+     *
+     * 判据只有一份：`core/worldbook.ts` 的 `stripModuleWorldbook()`。
+     * （以前这里和 `Preparation` 各写一份、口径还不一样 —— 撤了又被加回来，永远清不掉。）
+     * 撤的是：模组派生的（`fromModule`）、模组自带的（`mw-`）、开局示例（`sample-`）；
+     * **留下来的只有玩家自己手加的**（协作方第 14 版指出上面那句"留内置示例"的注释已过时）。
+     */
+    const baseWorldbook = opts?.keepDerived ? s.worldbook : stripModuleWorldbook(s.worldbook);
+
+    /*
+     * ② 装上**新模组自带**的世界书。
+     *
+     * id 前缀 `mw-`（module worldbook）：这是"模组自带的"标记，
+     * 下次换模组时靠它认领撤掉；`fromModule` 留给 AI 单独生成的那一批
+     * （它们由 `clearModuleDerived()` 管），两者分开才好各撤各的。
+     */
+    const own: WorldbookEntry[] = (merged.worldbook ?? [])
+      .filter((e) => e.content?.trim())
+      .map((e, i) => ({
+        ...e,
+        id: e.id?.startsWith('mw-') ? e.id : `mw-${i}-${e.keys?.[0] ?? 'entry'}`,
+        keys: e.keys?.length ? e.keys : [e.content.slice(0, 6)],
+        priority: e.priority ?? 50,
+        enabled: e.enabled ?? true,
+      }));
+    const worldbook = [...baseWorldbook, ...own];
+
+    localStorage.setItem('trpg.worldbook', JSON.stringify(worldbook));
+    saveJson('trpg.module', merged);
+    set({ module: merged, worldbook });
+
+    /*
+     * ③ 队友候选：和 `clearModuleDerived()` 同一条件 —— 换了模组就清。
+     * （队友候选全是"上一个模组推荐的人"，留着会冒出不相干的人。）
+     */
+    if (!opts?.keepDerived) {
+      saveJson('trpg.companionCandidates', []);
+      set({ companionCandidates: [] });
+    }
+
+    /*
+     * ④ 开场白同步。
+     *
+     * 这里比 `setModule` 多认三样：`premise` / `startLocation` / `locations`。
+     * 为什么必须认出它们：模组没写 `opening` 时，开场白是**用它自己的**
+     * 前提与起始地点拼出来的（`moduleOpening`）——
+     * 只盯着 `opening` 字段的话，"换了个没写开场白的模组"就会把上一家的开场白留在屏幕上。
+     */
+    const affectsOpening =
+      opts?.affectsOpening ??
+      (patch.opening !== undefined ||
+        patch.goal !== undefined ||
+        patch.stakes !== undefined ||
+        patch.urgency !== undefined ||
+        patch.premise !== undefined ||
+        patch.startLocation !== undefined ||
+        patch.locations !== undefined ||
+        patch.title !== undefined);
+    if (affectsOpening) {
+      const opening = openingText(s.character, merged, s.genreId);
+      const current = get().messages;
+      const messages = current.map((m) => (m.id === WELCOME_ID ? { ...m, content: opening } : m));
+      if (messages.some((m, i) => m.content !== current[i]!.content)) {
+        saveJson('trpg.messages', messages);
+        set({ messages });
+      }
+    }
   },
 
   upsertCompanion(c) {
@@ -2616,7 +1994,11 @@ export const useStore = create<Store>((set, get) => ({
     if (url) next[location] = url;
     else delete next[location];
     set({ sceneImages: next });
-    void idbSet('sceneImages', next);
+    // 存不下就当场说（静默失败会让玩家以为图妥了，实际刷新就没）
+    return putImageBlob('sceneImages', next).then((ok) => {
+      if (!ok && url) set({ uiNotice: IMAGE_STORE_FAILED });
+      return ok;
+    });
   },
 
   setMessageSceneImage(msgId, url) {
@@ -2624,7 +2006,6 @@ export const useStore = create<Store>((set, get) => ({
     if (url) next[msgId] = url;
     else delete next[msgId];
     set({ messageImages: next });
-    void idbSet('messageImages', next);
     // 老数据可能把图直接塞在消息里，顺手清掉，避免消息数组被 base64 撑爆
     const messages = get().messages.map((m) =>
       m.id === msgId && m.sceneImage ? { ...m, sceneImage: undefined } : m
@@ -2633,24 +2014,256 @@ export const useStore = create<Store>((set, get) => ({
       saveJson('trpg.messages', messages);
       set({ messages });
     }
+    return putImageBlob('messageImages', next).then((ok) => {
+      if (!ok && url) set({ uiNotice: IMAGE_STORE_FAILED });
+      return ok;
+    });
   },
 
   setMapImage(url) {
     set({ mapImage: url });
-    void idbSet('mapImage', url);
+    return putImageBlob('mapImage', url).then((ok) => {
+      if (!ok && url) set({ uiNotice: IMAGE_STORE_FAILED });
+      return ok;
+    });
+  },
+
+  queueImage({ kind, target, prompt, label }) {
+    const s = get();
+    /*
+     * 没配 Key / 没填生图模型 → **不排空任务**，返回 null 让调用方说人话。
+     * 排一条注定失败的任务只会让角标上多一个红点，玩家还得自己去猜为什么。
+     */
+    if (!s.config.apiKey) return null;
+    if (!s.config.imageModel?.trim()) return null;
+
+    const job: ImageJob = {
+      id: uid(),
+      kind,
+      target,
+      // 提示词在**排队那一刻**就定下来：之后改配置、改模组都不该影响已排的队
+      prompt,
+      label,
+      status: 'queued',
+      at: Date.now(),
+    };
+    const next = enqueueJob(s.imageJobs, job);
+    /*
+     * 已经有一条同位置的活跃任务 → `enqueueJob` 会原样返回列表。
+     * 这时要把它**找出来返回**（调用方据此显示"排队中"），而不是返回新造的那条。
+     */
+    const picked = next.find((j) => jobKey(j) === jobKey(job));
+    set({ imageJobs: next });
+    persistImageJobs(next);
+    void get().pumpImageJobs();
+    return picked ?? job;
+  },
+
+  retryImageJob(id) {
+    const next = get().imageJobs.map((j) =>
+      j.id === id ? { ...j, status: 'queued' as const, error: undefined } : j
+    );
+    set({ imageJobs: next });
+    persistImageJobs(next);
+    void get().pumpImageJobs();
+  },
+
+  dismissImageJob(id) {
+    const next = dropJob(get().imageJobs, id);
+    set({ imageJobs: next });
+    persistImageJobs(next);
+  },
+
+  async pumpImageJobs() {
+    // 重入保护：并发那一轮自己会再叫一次，不能让两个 pump 同时抢同一条任务
+    if (pumping) return;
+    pumping = true;
+    try {
+      // 一次把还能开的都开出去（上限 IMAGE_CONCURRENCY）；跑完一条会自动续
+      for (;;) {
+        const s = get();
+        if (!hasRoom(s.imageJobs, IMAGE_CONCURRENCY)) break;
+        const job = nextQueued(s.imageJobs);
+        if (!job) break;
+        set({ imageJobs: beginJob(s.imageJobs, job.id) });
+        // **不 await**：图上头这一秒不该挡着后面的任务出队
+        void get().runImageJob(job);
+      }
+    } finally {
+      pumping = false;
+    }
+  },
+
+  async runImageJob(job) {
+    const s = get();
+    /*
+     * 任务排着的时候消息可能已经被清掉 / 回溯掉了。
+     * 那种情况下这张图已经没有地方可落 —— 悄悄出队，别浪费一次调用。
+     */
+    if (job.kind === 'action' && !s.messages.some((m) => m.id === job.target)) {
+      const next = dropJob(get().imageJobs, job.id);
+      set({ imageJobs: next });
+      persistImageJobs(next);
+      return;
+    }
+
+    try {
+      const raw = await generateImage(job.prompt, {
+        ...s.config,
+        model: s.config.imageModel!.trim(),
+        size: s.config.imageSize || '1024x1024',
+      });
+      if (!raw) throw new ModelError('生图接口没有返回图片，换一个生图模型试试');
+      /*
+       * 落盘前**归一化**（P2-3）：手里得是真图（data URI），不能是个链接。
+       *
+       * 服务商只给 url 时先抓一次（同源 / 允许 CORS 就能成）。
+       * 抓不回来**不是失败** —— 这张图现在确实看得到，只是过一阵会失效，
+       * 所以照常落盘，但把它标记成链接并在界面上说清楚。骗玩家说"已内嵌"才是错的。
+       */
+      const local = await normalizeImage(raw);
+      const landed = await get().applyImageResult(job, local.value);
+      /*
+       * 🔴 P1-2：闸门拒落时**必须留在队列里**。
+       *
+       * 以前这里照常 `dropJob`（因为 `applyImageResult` 是 `Promise<void>`，
+       * 拒落和成功看起来一模一样）→ 玩家只看见"转了 40 秒然后没了"。
+       * 现在拒落走 `failJob`：任务留在队列上标红，玩家能看见、能重试。
+       */
+      if (!landed) {
+        const next = failJob(
+          get().imageJobs,
+          job.id,
+          '这张图没能保存下来（接口返回的不是图片数据）。可以重试一次，或去「设置」换个生图模型。'
+        );
+        set({ imageJobs: next });
+        persistImageJobs(next);
+        return;
+      }
+      if (local.kind === 'remote') {
+        set({
+          uiNotice: '这张图只有服务商的临时链接（过一阵可能失效）；要长期保存就重新生成一次。',
+        });
+      }
+      // 成功即出队：图已经落在它该在的地方，那才是玩家要看的反馈
+      const next = dropJob(get().imageJobs, job.id);
+      set({ imageJobs: next });
+      persistImageJobs(next);
+    } catch (e) {
+      const msg = e instanceof ModelError ? e.message : `生图失败：${(e as Error).message}`;
+      // 失败**留在队列里**：这是最需要被看见的状态，还得能重试
+      const next = failJob(get().imageJobs, job.id, msg);
+      set({ imageJobs: next });
+      persistImageJobs(next);
+    } finally {
+      // 空出一个位置就接着推（无论成功失败）
+      void get().pumpImageJobs();
+    }
+  },
+
+  applyImageResult(job, url) {
+    /*
+     * 保一道闸，但**只拦"根本不像图"的东西**。
+     *
+     * 为什么不能"不是自包含就拒"：抓不回来的 http 链接是**正当的降级态** ——
+     * 图现在确实看得见，只是过一阵会失效，导出侧会如实说明。
+     * 拦掉它等于让生图整个失败，那是把小问题变成大问题。
+     * 真正该拦的是相对路径、非图片串这类脏数据（它们连今天都显示不出来）。
+     */
+    if (!isStoreableImage(url)) {
+      /*
+       * 🔴 P1-2：拒落**不许静默**。
+       *
+       * 以前这里 `console.warn` 然后 `Promise.resolve()`，而调用方紧接着照常 `dropJob` ——
+       * 玩家视角就是"点了生成、转了 40 秒、然后什么都没发生"，零提示、零重试。
+       * 正踩「状态变化必须可见」：一次失败比一次成功更需要被看见。
+       *
+       * 现在返回 `false`，由 `runImageJob` 把它交给 `failJob`（留队 + 可重试 + 说人话）。
+       */
+      console.warn('[跑团] 拒绝落一份不像图的数据（生图接口返回了非图片串）', job.kind);
+      set({
+        uiNotice:
+          '这张图没能保存下来 —— 接口返回的不是图片数据。可以重试一次，或去「设置」换个生图模型。',
+      });
+      return Promise.resolve(false);
+    }
+    const done: Promise<unknown>[] = [];
+    switch (job.kind) {
+      case 'action':
+        done.push(get().setMessageSceneImage(job.target, url));
+        break;
+      case 'scene':
+        done.push(get().setSceneImage(job.target, url));
+        break;
+      case 'map':
+        done.push(get().setMapImage(url));
+        break;
+      case 'portrait':
+        /*
+         * 立绘有两个人：玩家自己（target = 'character'）与队友（target = 队友 id）。
+         * 队友那条**两个名单都要打**：他可能还在候选里，也可能已经入队了 ——
+         * 只打一个的话，玩家切到另一个列表会看到"没生成"。
+         */
+        if (job.target === 'character') {
+          get().setCharacter({ portrait: url });
+          // 立绘原本只在 localStorage 里，一张 base64 立绘能有几百 KB ——
+          // 塞进 localStorage 会直接顶到配额，表现成"立绘莫名其妙没了"。
+          // 与场景 / 消息图同一条口径：**大件走 IndexedDB**。
+          done.push(putImageBlob('characterPortrait', url));
+        } else {
+          // 队友在**两个名单**里都可能：已入队的在 gameState.companions，还没入队的在候选里
+          const gs = get().gameState;
+          if (gs.companions.some((c) => c.id === job.target)) {
+            const next: GameState = {
+              ...gs,
+              companions: gs.companions.map((c) =>
+                c.id === job.target ? { ...c, portrait: url } : c
+              ),
+            };
+            saveJsonNow('trpg.gameState', next);
+            set({ gameState: next });
+          }
+          const cands = get().companionCandidates;
+          if (cands.some((c) => c.id === job.target)) {
+            get().setCompanionCandidates(
+              cands.map((c) => (c.id === job.target ? { ...c, portrait: url } : c))
+            );
+          }
+        }
+        break;
+    }
+    return Promise.all(done).then(() => true);
   },
 
   async hydrateImages() {
-    const [sceneImages, messageImages, mapImage] = await Promise.all([
+    const [sceneImages, messageImages, mapImage, portrait] = await Promise.all([
       idbGet<Record<string, string>>('sceneImages'),
       idbGet<Record<string, string>>('messageImages'),
       idbGet<string>('mapImage'),
+      idbGet<string>('characterPortrait'),
     ]);
     const patch: Partial<Store> = {
       sceneImages: sceneImages ?? {},
       messageImages: messageImages ?? {},
       mapImage: mapImage ?? '',
     };
+    /*
+     * 立绘（P2-3）：新数据存 IndexedDB，老数据还在 localStorage 的角色卡里。
+     * 两处都认 —— IndexedDB 优先；那里没有而内存里有，说明是老档，顺手搬过去。
+     *
+     * 搬迁**不回写 localStorage**（角色卡照旧保留，读档逻辑不用动），
+     * 只是让下次刷新能从 IndexedDB 拿回来：一张 base64 立绘几百 KB，
+     * 长期压在 localStorage 那 5MB 里迟早把别的东西挤掉。
+     */
+    const memPortrait = get().character.portrait;
+    if (portrait) {
+      patch.character = { ...get().character, portrait };
+    } else if (memPortrait) {
+      void putImageBlob('characterPortrait', memPortrait);
+      if (!isSelfContainedImage(memPortrait)) {
+        patch.uiNotice = '这张立绘来自临时链接，过一阵可能失效；要长期保存就重新生成一次。';
+      }
+    }
     // 一次性迁移：老存档把小图直接存在消息里，搬到 IndexedDB 并瘦身消息
     const msgs = get().messages;
     const migrated: Record<string, string> = { ...(messageImages ?? {}) };
@@ -2686,6 +2299,10 @@ export const useStore = create<Store>((set, get) => ({
 
   clearChanges() {
     set({ lastChanges: null });
+  },
+
+  takeNotice() {
+    set({ uiNotice: null });
   },
 
   encumbrance() {
@@ -2818,7 +2435,91 @@ export const useStore = create<Store>((set, get) => ({
     // 生涯是"记录"：立刻落盘，别让它跟别的待写混在一起
     saveJsonNow('trpg.career', career);
     set({ career, lastUnlocked: unlocked });
+
+    /*
+     * 世界层（Phase 2）：顺手把这一局**收回世界**（铁律①的另一半）。
+     *
+     * 时机与生涯完全一致 —— 结档那一刻，编年史 / 线索 / 支线都已定稿；
+     * 去重也靠同一个 `ending.at`（调用方保证只调一次）。
+     * **没有 ending 就不收**：留档必须以"这一局真的结束了"为准，
+     * 否则半途开个新团会把"跑了一半的状态"当成世界的现状记下来。
+     */
+    const ending = s.gameState.ending;
+    if (ending?.at) {
+      const name = currentWorldName(s);
+      const id = worldKey(name);
+      const world = harvest(s.worlds[id], name, s.gameState, {
+        moduleTitle: s.module.title,
+        characterName: s.character.name,
+        outcome: run.outcome,
+        turns: run.turns,
+        at: ending.at,
+        note: ending.reason,
+      });
+      const worlds = { ...s.worlds, [id]: world };
+      // 世界留档同样是"记录"：立刻落盘
+      saveJsonNow('trpg.worlds', worlds);
+      set({ worlds });
+    }
     return unlocked;
+  },
+
+  setWorldName(name) {
+    const t = (name ?? '').trim();
+    // 世界名决定"这一局的留档落到哪个世界"：属于结构，立刻落盘
+    saveJsonNow('trpg.worldName', t);
+    set({ worldName: t });
+  },
+
+  setCarryWorld(on) {
+    const v = Boolean(on);
+    saveJsonNow('trpg.carryWorld', v);
+    set({ carryWorld: v });
+  },
+
+  forgetWorld(id) {
+    const key = worldKey(id);
+    if (!get().worlds[key]) return;
+    const worlds = { ...get().worlds };
+    delete worlds[key];
+    saveJsonNow('trpg.worlds', worlds);
+    set({ worlds });
+  },
+
+  archiveCurrentCharacter() {
+    const s = get();
+    const { list, entry, replaced } = upsertCharacter(s.characterArchive, s.character, {
+      rulesetId: s.rulesetId,
+    });
+    saveJsonNow('trpg.archive', list);
+    set({ characterArchive: list });
+    return { entry, replaced };
+  },
+
+  useArchivedCharacter(id) {
+    const entry = findArchivedCharacter(get().characterArchive, id);
+    if (!entry) return false;
+    /*
+     * 取出来时**再深拷一层**：档案库那份必须是不会被后续编辑改到的。
+     * 只换人设与数值，**不动这一局正在跑的剧情**——
+     * 换卡是准备页的事，真要按新卡开局得开新团。
+     */
+    const profile: CharacterProfile = {
+      ...entry.profile,
+      characteristics: { ...entry.profile.characteristics },
+      skills: { ...entry.profile.skills },
+      items: [...(entry.profile.items ?? [])],
+      itemDetails: (entry.profile.itemDetails ?? []).map((d) => ({ ...d })),
+    };
+    localStorage.setItem('trpg.character', JSON.stringify(profile));
+    set({ character: profile });
+    return true;
+  },
+
+  deleteArchivedCharacter(id) {
+    const list = removeCharacter(get().characterArchive, id);
+    saveJsonNow('trpg.archive', list);
+    set({ characterArchive: list });
   },
 
   setAutoIllustrate(on) {
@@ -2985,14 +2686,41 @@ export const useStore = create<Store>((set, get) => ({
       // 开局面板不再空着：地点与在场人物直接摆出来，玩家一眼就知道"我在哪、谁在"
       location: initialLocation(s.module, s.character),
       npcsAlive: initialNpcs(s.module, s.character),
+      /*
+       * 故事时钟：**开新团＝从头开始数**。
+       * 上一局的"第 27 天"不带过来 —— 那和"开新团不带上局的队友"是同一条道理。
+       * 期限从模组推（见 `deadlineOf`），推不出来就没有期限。
+       */
+      clock: { ...DEFAULT_CLOCK },
+      deadline: deadlineOf(s.module),
       visited: (() => {
         const here = initialLocation(s.module, s.character).trim();
         return here ? [here] : [];
       })(),
     });
+    /*
+     * 世界层（Phase 2）：**只在会话边界搬运**（铁律①）。
+     *
+     * 接着上一次跑＝把这四样灌进来：地点 / 在场人物 / 未结的支线 / 标记。
+     * 只在玩家开着开关、且这个世界确实有留档时生效；
+     * 没有留档（第一次跑这个世界）时 `applySnapshot` 原样返回，什么都不改。
+     *
+     * 读留档**不删留档** —— 玩家可能反复开团试不同的走法，
+     * 真正的"收回"只发生在结档那一刻（见 `recordCurrentRun`）。
+     */
+    const resolvedWorldName = currentWorldName(s);
+    const world = findWorld(Object.values(s.worlds), resolvedWorldName);
+    const willCarry = s.carryWorld && Boolean(world?.snapshot);
+    const carriedState = willCarry ? applySnapshot(gameState, world?.snapshot) : gameState;
+    /*
+     * 留一个"这一局从哪接上来的"的记号给守密人看（`carriedFrom`）。
+     * 没有它，模型会以为玩家是第一次站在这条甲板上 ——
+     * 明明在场的人都认识他，它却要重新自我介绍一遍。
+     */
+    const finalState = willCarry ? { ...carriedState, carriedFrom: world!.name } : carriedState;
     // 开新团：立刻落盘
     saveJsonNow('trpg.messages', messages);
-    saveJsonNow('trpg.gameState', gameState);
+    saveJsonNow('trpg.gameState', finalState);
     saveJsonNow('trpg.chronicle', []);
     saveJsonNow('trpg.summary', '');
     saveJsonNow('trpg.snapshots', {});
@@ -3011,7 +2739,7 @@ export const useStore = create<Store>((set, get) => ({
     void idbSet('mapImage', '');
     set({
       messages,
-      gameState,
+      gameState: finalState,
       chronicle: [],
       summary: '',
       snapshots: {},
@@ -3022,6 +2750,7 @@ export const useStore = create<Store>((set, get) => ({
       // 上一局遗留的待掷检定、状态提示与濒死引导也一并清掉
       pendingChecks: [],
       lastChanges: null,
+      uiNotice: null,
       dyingNote: null,
     });
   },
@@ -3100,16 +2829,29 @@ export const useStore = create<Store>((set, get) => ({
     };
   },
 
-  applyModelDeltas(deltas) {
+  applyModelDeltas(deltas, opts) {
     const { gameState, rulesetId, character } = get();
+    const tickNow = opts?.elapsed !== undefined && shouldTickClock();
     /*
-     * 敌人数值兜底：模型用 `combat.foes add` 即兴开打时，
-     * 缺的 hp / max 用模组敌对者表补上 —— 否则"打的时候一个数、图鉴里另一个数"
-     * （判据在 `fillFoeNumbers`，只补没给的，模型写了就以模型为准）。
+     * 敌人兜底，**两道**，顺序有讲究：
+     *
+     *   1. `patchUnnamedFoes` —— 模型忘了写 name 的，从这一轮的正文里把名字捞回来。
+     *      （核心层还有一道"不许拒绝"的兜底，这里是把名字尽量救回来的机会）
+     *   2. `fillFoeNumbers` —— 名字对得上模组敌对者表的，把 hp / max 补成表里的值。
+     *
+     * 顺序不能反：第一步给不出名字，第二步再宽松匹配也是白搭。
+     * 两步都只"补缺"，模型显式给了的一律不动（判据在各自的函数头）。
      */
-    const report = applyDeltas(gameState, fillFoeNumbers(deltas, get().module.monsters), {
+    const withNames = patchUnnamedFoes(deltas, opts?.elapsed);
+    const report = applyDeltas(gameState, fillFoeNumbers(withNames, get().module.monsters), {
       ruleset: getRuleset(rulesetId),
       vitalsMax: deriveVitalsMax(character, rulesetId),
+      /*
+       * 故事时钟：把守密人申报的"过了多久"交给引擎折算。
+       * 只在**这一轮的第一次调用**里传 —— 一轮里可能分几次调
+       * （状态一次、地点一次），传两遍会把时间算两次。
+       */
+      ...(tickNow ? { elapsed: opts!.elapsed } : {}),
     });
     // 模型偶尔会把模组里的 {{称呼}} 占位符漏进状态（地点/线索/物品名）。
     // 状态是要显示给玩家的，进库前统一替换成真实值。
@@ -3389,6 +3131,34 @@ export const useStore = create<Store>((set, get) => ({
       if (filled) nextState = { ...nextState, inventory };
     }
 
+    /*
+     * 人物档案（`npcNotes`）的容量：**先打时间戳，再淘汰**。
+     *
+     * 顺序要紧 —— 先打时间戳，本轮刚接触过的人就不会被当成"最久未接触"踢掉。
+     * 判据是用户 09-17 拍板的三条：上限 30 / 淘汰最久未接触者 / **在场者永不淘汰**
+     * （详见 `core/npcNotes.ts` 文件头）。
+     *
+     * 回合号与 `addChronicle` 同一算法（现有最大号 + 1，不能用 length+1，
+     * 早期条目折进摘要后 length 会小于实际回合数）。
+     */
+    {
+      const lastTurn = get().chronicle.reduce(
+        (m, c) => (Number.isFinite(c.turn) && c.turn > m ? c.turn : m),
+        0
+      );
+      const present = presentNpcNames(nextState);
+      const touched = touchNpcNotes(nextState.npcNotes, present, lastTurn + 1);
+      const pruned = pruneNpcNotes(touched, present);
+      if (pruned.notes !== nextState.npcNotes) {
+        nextState = { ...nextState, npcNotes: pruned.notes };
+      }
+      // 淘汰的是"早就离场、久未接触"的人，玩家不需要为它弹提示（那是内部清理）；
+      // 留在 console 里是为了以后排查"我的档案怎么没了"。
+      if (pruned.dropped.length > 0) {
+        console.warn('[跑团] 人物档案超上限，已淡出：', pruned.dropped.join('、'));
+      }
+    }
+
     saveJson('trpg.gameState', nextState);
     set({ gameState: nextState });
 
@@ -3430,6 +3200,29 @@ export const useStore = create<Store>((set, get) => ({
      */
     if (bleedNote) {
       lines.push({ text: bleedNote, tone: bleedNote.includes('止住') ? 'good' : 'down' });
+    }
+    /*
+     * P3-2/D 之外，这里补第 17 版 D：**模型点名了却没扣**的情况要说出来。
+     *
+     * 场景：玩家写了「把绷带铺在地上」，引擎把"点到了止血绷带"报给守密人
+     * （提示词红线二之五），但这一轮的契约里**忘了写 `inventory dec`**。
+     * 引擎**不替他扣**（A+B 撤掉了本地预扣，实物的用法引擎猜不出来），
+     * 但也不能一声不吭 —— 那样玩家会以为"这东西是无限的"。
+     *
+     * 判据：`opts.mentionedItems` 里点了全名、而 `report.applied` 里
+     * **没有**该物品的 `inventory` `dec` → 说一句"它还在背包里"。
+     * 措辞刻意是**陈述**不是告警：这不是错误，只是把账摊开给玩家看。
+     */
+    for (const name of opts?.mentionedItems ?? []) {
+      const consumed = report.applied.some(
+        (a) =>
+          a.delta.target === 'inventory' &&
+          a.delta.op === 'dec' &&
+          String(a.delta.value ?? '') === name
+      );
+      if (!consumed) {
+        lines.push({ text: `「${name}」还在背包里`, tone: 'info' });
+      }
     }
     /*
      * 疯没疯、缓过来没有，也要说一声。

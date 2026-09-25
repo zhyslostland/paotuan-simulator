@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useStore, TYPOGRAPHY_PRESETS, checkTargetText, type ThemeName } from './store';
 import { ConfirmDialog } from './ConfirmDialog';
 import { TestSandbox } from './TestSandbox';
@@ -11,6 +11,7 @@ import {
   promptInstall,
 } from '../pwa.js';
 import { applyUpdate, checkForUpdate, forceReload, versionLabel } from '../update.js';
+import { navigateFresh } from '../nav.js';
 import {
   AMBIENCE_LABEL,
   AUDIO_SIZE_WARN,
@@ -23,9 +24,23 @@ import {
   type AmbienceKind,
   type SfxSlot,
 } from './audio.js';
-import { listRulesets, registerCustomRuleset, getRuleset, type CustomRulesetConfig } from '../core/rulesets/index.js';
+import {
+  listRulesets,
+  registerCustomRuleset,
+  unregisterCustomRuleset,
+  isBuiltinRuleset,
+  getRuleset,
+  type CustomRulesetConfig,
+} from '../core/rulesets/index.js';
 import { listGenres, type Genre } from '../core/genres.js';
 import { listGmVoices } from '../core/voices.js';
+import { checksOf } from './runSummary.js';
+import {
+  ACHIEVEMENTS,
+  OUTCOME_LABEL,
+  passRate,
+  unlockedAchievements,
+} from '../core/career.js';
 import { generateJson, presetSystemPrompt } from '../orchestrator/generate.js';
 import { ModelError } from '../providers/model.js';
 import {
@@ -224,6 +239,11 @@ const CUSTOM_KEY = 'trpg.customRulesets';
  * 光按标题匹配会搜不到，所以把同义词都列上。
  */
 const SECTIONS = [
+  {
+    id: 'sec-career',
+    label: '生涯与成就',
+    keys: '生涯 成就 战绩 累计 局数 统计 履历 勋章',
+  },
   { id: 'sec-rules', label: '规则与题材', keys: '规则 题材 跑团 coc dnd 自定义 口吻 说书人 旁白 搭档 命运' },
   { id: 'sec-look', label: '外观与排版', keys: '外观 主题 配色 排版 字号 行距 缩进' },
   { id: 'sec-audio', label: '音频', keys: '音频 音量 音效 bgm 氛围音 静音' },
@@ -293,6 +313,22 @@ function Section({
   );
 }
 
+/**
+ * 生涯面板里的一格数。
+ *
+ * 刻意与结档页那一份（`EndingScreen` 的 `Stat`）**不去合并**：那边的格子带"本局 vs 生涯"的语境，
+ * 这边是常驻入口，字段与措辞都不一样 —— 为了少写一个组件去跨文件 import UI，不值当（规则包那边同理）。
+ */
+function CareerStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-lg border border-ink-700 bg-ink-900/50 px-2.5 py-2">
+      <div className="text-[10px] text-mist-500">{label}</div>
+      <div className="mt-0.5 text-[16px] leading-tight text-mist-100">{value}</div>
+      {hint && <div className="mt-0.5 text-[10px] text-mist-600">{hint}</div>}
+    </div>
+  );
+}
+
 /** 解析"名称=默认值"这种每行一条的文本，返回属性/数值条列表 */
 function parseAttrLines(text: string): { key: string; label: string; default: number }[] {
   return text
@@ -336,6 +372,13 @@ function CustomRulesetEditor({ onSaved }: { onSaved: () => void }) {
   const [chars, setChars] = useState('力量=50\n敏捷=50\n体质=50\n智力=50\n意志=50');
   const [skills, setSkills] = useState('侦查=20\n聆听=20\n格斗=25\n说服=10');
   const [vitals, setVitals] = useState('生命=12\n理智=70');
+  /*
+   * 1.0 阶段 B：武器表与状态表。沿用这个编辑器一贯的**文本行**写法
+   * （`名字=值|值|值`），不另起一套表格 UI —— 风格一致比好看更要紧。
+   * 都可留空：留空＝不启用，行为与现在完全一样。
+   */
+  const [weapons, setWeapons] = useState('');
+  const [statuses, setStatuses] = useState('');
   const [msg, setMsg] = useState('');
 
   if (!open) {
@@ -358,6 +401,9 @@ function CustomRulesetEditor({ onSaved }: { onSaved: () => void }) {
       characteristics: parseAttrLines(chars),
       skills: parseSkillLines(skills),
       vitals: parseAttrLines(vitals),
+      // 两张表都是"留空＝不启用"，所以空串也要原样记下来（undefined 与 [] 等价）
+      weapons: weapons.trim() ? weapons.split('\n').map((s) => s.trim()).filter(Boolean) : undefined,
+      statuses: statuses.trim() ? statuses.split('\n').map((s) => s.trim()).filter(Boolean) : undefined,
     };
     if (cfg.characteristics.length === 0) {
       setMsg('至少写一条属性');
@@ -432,6 +478,34 @@ function CustomRulesetEditor({ onSaved }: { onSaved: () => void }) {
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-500">数值条（每行「名称=默认值」）</span>
         <textarea className={`${inputCls} resize-none`} rows={2} value={vitals} onChange={(e) => setVitals(e.target.value)} />
+      </label>
+      {/*
+       * 1.0 阶段 B：这两张表**可留空**（留空＝不启用，伤害与状态仍按现在的方式走）。
+       * 填了，守密人才有"武器打多少、中毒扣多少"的依据 —— 不用靠模型随口报。
+       */}
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-mist-500">
+          武器（可留空，每行「名字=伤害骰|技能名|手数|弹药」）
+        </span>
+        <textarea
+          className={`${inputCls} resize-none`}
+          rows={2}
+          value={weapons}
+          onChange={(e) => setWeapons(e.target.value)}
+          placeholder={'手枪=1d10|射击（手枪）|1|7\n撬棍=1d6|格斗（斗殴）'}
+        />
+      </label>
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-mist-500">
+          状态（可留空，每行「名字=数值变化|轮数|解除条件」）
+        </span>
+        <textarea
+          className={`${inputCls} resize-none`}
+          rows={2}
+          value={statuses}
+          onChange={(e) => setStatuses(e.target.value)}
+          placeholder={'中毒=hp-1|3|找到解毒剂\n恐惧=san-1d4|2|离开让你害怕的东西'}
+        />
       </label>
       <button
         onClick={save}
@@ -709,10 +783,45 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
   const setGenre = useStore((s) => s.setGenre);
+  const removeCustomGenre = useStore((s) => s.removeCustomGenre);
+  /**
+   * 生涯（跨局累计的那本账）。它活在独立的 `trpg.career` 里，
+   * 开新团与回溯都清不掉 —— 所以这里读到的就是"我一共跑过多少"。
+   */
+  const career = useStore((s) => s.career);
+  /** 自定义题材的删除：点一次进入待确认，再点一次才真删（禁 window.confirm，也不值得为它开弹层） */
+  const [pendingDeleteGenre, setPendingDeleteGenre] = useState<string | null>(null);
+  /** 自建规则包的删除：同一套手势（协作方第 14 版要求与题材对称） */
+  const [pendingDeleteRuleset, setPendingDeleteRuleset] = useState<string | null>(null);
+
+  /**
+   * 删掉一个自建规则包。
+   * 内存注册表归 `core` 管（`unregisterCustomRuleset`），localStorage 那份 UI 自己写 ——
+   * **core 不许有 IO**，所以这两步分开。删的要是正在用的那个，退回内置规则包，不留空指向。
+   */
+  const removeCustomRuleset = (id: string) => {
+    try {
+      const raw = localStorage.getItem(CUSTOM_KEY);
+      const list = raw ? (JSON.parse(raw) as CustomRulesetConfig[]) : [];
+      localStorage.setItem(
+        CUSTOM_KEY,
+        JSON.stringify(list.filter((c) => c?.id !== id))
+      );
+    } catch {
+      // 落盘失败也要把内存里的撤掉 —— 不能让界面继续显示一个已注销的规则包
+    }
+    unregisterCustomRuleset(id);
+    if (rulesetId === id) setRuleset('coc7');
+    setCustomVersion((v) => v + 1); // 让列表立刻重画
+    setPendingDeleteRuleset(null);
+  };
   const gmVoice = useStore((s) => s.gmVoice);
   const setGmVoice = useStore((s) => s.setGmVoice);
   const autoIllustrate = useStore((s) => s.autoIllustrate);
   const setAutoIllustrate = useStore((s) => s.setAutoIllustrate);
+  /** 成就：按解锁时间排好的已解锁列表（`career.totals.runs === 0` 时自然是空的） */
+  const unlockedList = useMemo(() => unlockedAchievements(career), [career]);
+  const careerRate = passRate(career.totals);
 
   const [testing, setTesting] = useState<'idle' | 'ok' | 'fail'>('idle');
   const [testMsg, setTestMsg] = useState('');
@@ -789,8 +898,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
       .map((m) => {
         const who = m.role === 'gm' ? '守密人' : m.role === 'player' ? '玩家' : '系统';
         let line = `【${who}】${m.content}`;
-        if (m.check) {
-          line += `\n  ↳ ${m.check.skill} ${checkTargetText(m.check)} · 掷出 ${m.check.roll} · ${m.check.label}`;
+        /*
+         * P2-1：走 `checksOf(m)`（唯一真源）。
+         * 以前只读 `m.check` —— 「一次全掷」那一批在复制出来的记录里**完全不见**，
+         * 拿这份记录去排查"我到底掷了什么"会漏掉一半。
+         */
+        for (const c of checksOf(m)) {
+          line += `\n  ↳ ${c.skill} ${checkTargetText(c)} · 掷出 ${c.roll} · ${c.label}`;
         }
         if (m.npcLines?.length) {
           for (const n of m.npcLines) {
@@ -861,7 +975,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
     localStorage.removeItem('trpg.messages');
     useStore.getState().clearProgress();
     useStore.getState().clearMessages();
-    location.reload();
+    // 不走 location.reload()：那会被旧 SW 接管，等于清空之后又退回旧包
+    navigateFresh();
   };
 
   /** 把当前进度存进一个命名的槽位（想同时开几局时用） */
@@ -1048,6 +1163,57 @@ export function Settings({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="space-y-5">
+          {/*
+           * 生涯与成就的**常驻入口**（第 0 条铁律：玩家看不见＝没做）。
+           * 这一块以前只活在结档页 —— 不跑完一局就永远看不到它，
+           * 而它记的恰恰是"跨所有局"的那本账（开新团也清不掉）。放在这里才是它的正经位置。
+           */}
+          <Section
+            id="sec-career"
+            title="生涯与成就"
+            hint="跨所有局的账：开新团、回溯都不会清零。成就达成即记，不重复计。"
+            query={query}
+          >
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <CareerStat label="跑过的局" value={`${career.totals.runs}`} />
+              <CareerStat label="累计回数" value={`${career.totals.turns}`} />
+              <CareerStat
+                label="累计检定"
+                value={`${career.totals.checks}`}
+                hint={careerRate === null ? undefined : `过了 ${careerRate}%`}
+              />
+              <CareerStat
+                label="成就"
+                value={`${unlockedList.length} / ${ACHIEVEMENTS.length}`}
+                hint="达成即记"
+              />
+            </div>
+            <p className="text-[11px] leading-relaxed text-mist-500">
+              结局记录：{OUTCOME_LABEL.success} {career.totals.outcomes.success} ·{' '}
+              {OUTCOME_LABEL.grey} {career.totals.outcomes.grey} · {OUTCOME_LABEL.failure}{' '}
+              {career.totals.outcomes.failure} · {OUTCOME_LABEL.death} {career.totals.outcomes.death}{' '}
+              · {OUTCOME_LABEL.insanity} {career.totals.outcomes.insanity}
+            </p>
+            {unlockedList.length > 0 ? (
+              <ul className="space-y-1">
+                {unlockedList.map(({ def, at }) => (
+                  <li key={def.id} className="text-[11px] leading-relaxed">
+                    <span className="text-mist-200">{def.name}</span>
+                    <span className="ml-1 text-mist-600">{at.slice(0, 10)}</span>
+                    <span className="ml-1 text-mist-500">— {def.desc}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[11px] leading-relaxed text-mist-500">
+                还没有解锁的成就。它们只记你
+                <span className="text-mist-300">干过什么</span>
+                （跑过多少局、掷过多少次骰、跟多少东西交过手），不给任何数值奖励 ——
+                这一版还没有成长系统，发一个花不掉的点数等于凭空造假机制。
+              </p>
+            )}
+          </Section>
+
           <Section
             id="sec-rules"
             title="规则与题材"
@@ -1061,20 +1227,55 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <span className="text-mist-500/70">（决定守密人怎么写、画风、队友倾向）</span>
             </span>
             <div className="grid grid-cols-2 gap-2">
-              {listGenres(customGenres).map((g) => (
-                <button
-                  key={g.id}
-                  onClick={() => setGenre(g.id)}
-                  className={`rounded-lg border p-2 text-left transition ${
-                    genreId === g.id
-                      ? 'border-gold-600/70 bg-gold-500/10'
-                      : 'border-ink-600 hover:border-gold-600/40'
-                  }`}
-                >
-                  <span className="block text-[12px] text-mist-100">{g.name}</span>
-                  <span className="block text-[10px] leading-snug text-mist-500">{g.blurb}</span>
-                </button>
-              ))}
+              {listGenres(customGenres).map((g) => {
+                /*
+                 * 删除只对**自建 / 导入**的题材出现。
+                 * 判据＝它在这个玩家的 `customGenres` 名单里（而不是单纯看 `builtin` 标记），
+                 * 这样万一哪天某个内置题材漏写了 `builtin: true`，也绝不会被误删。
+                 * 删除要**点两次**（第一次变「确认删除？」）—— 禁 `window.confirm`，
+                 * 但也不值得为一个按钮再开一层弹窗。
+                 */
+                const own = customGenres.some((x) => x.id === g.id);
+                const armed = pendingDeleteGenre === g.id;
+                return (
+                  <div key={g.id} className="relative">
+                    <button
+                      onClick={() => {
+                        setPendingDeleteGenre(null);
+                        setGenre(g.id);
+                      }}
+                      className={`w-full rounded-lg border p-2 text-left transition ${
+                        genreId === g.id
+                          ? 'border-gold-600/70 bg-gold-500/10'
+                          : 'border-ink-600 hover:border-gold-600/40'
+                      }`}
+                    >
+                      <span className={`block text-[12px] text-mist-100 ${own ? 'pr-6' : ''}`}>
+                        {g.name}
+                      </span>
+                      <span className="block text-[10px] leading-snug text-mist-500">{g.blurb}</span>
+                    </button>
+                    {own && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!armed) return setPendingDeleteGenre(g.id);
+                          removeCustomGenre(g.id);
+                          setPendingDeleteGenre(null);
+                        }}
+                        aria-label={armed ? `确认删除题材 ${g.name}` : `删除题材 ${g.name}`}
+                        className={`absolute right-1 top-1 rounded px-1.5 py-0.5 text-[10px] transition ${
+                          armed
+                            ? 'bg-gold-500/20 text-gold-100'
+                            : 'text-mist-500 hover:text-mist-200'
+                        }`}
+                      >
+                        {armed ? '确认删除？' : '×'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -1111,22 +1312,53 @@ export function Settings({ onClose }: { onClose: () => void }) {
               规则预设 <span className="text-mist-500/70">（换规则会重置属性与技能）</span>
             </span>
             <div className="grid grid-cols-2 gap-2">
-              {listRulesets().map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => {
-                    if (r.id !== rulesetId) setRuleset(r.id);
-                  }}
-                  className={`rounded-lg border p-2 text-left transition ${
-                    rulesetId === r.id
-                      ? 'border-gold-600/70 bg-gold-500/10'
-                      : 'border-ink-600 hover:border-gold-600/40'
-                  }`}
-                >
-                  <span className="block text-[12px] text-mist-100">{r.name}</span>
-                  <span className="block text-[10px] text-mist-500">{r.mainDice}</span>
-                </button>
-              ))}
+              {listRulesets().map((r) => {
+                /*
+                 * 自建的规则包可以删（协作方第 14 版：与"自建题材能删"对称 ——
+                 * 以前 `registerCustomRuleset` 单向，建错了只能一直挂着）。
+                 * **内置的两个不许删**（判据在 `isBuiltinRuleset`，不靠"名单里有没有"，
+                 * 免得哪天注册表没加载全就把内置当自定义的删了）。同样点两次才真删。
+                 */
+                const own = !isBuiltinRuleset(r.id);
+                const armed = pendingDeleteRuleset === r.id;
+                return (
+                  <div key={r.id} className="relative">
+                    <button
+                      onClick={() => {
+                        setPendingDeleteRuleset(null);
+                        if (r.id !== rulesetId) setRuleset(r.id);
+                      }}
+                      className={`w-full rounded-lg border p-2 text-left transition ${
+                        rulesetId === r.id
+                          ? 'border-gold-600/70 bg-gold-500/10'
+                          : 'border-ink-600 hover:border-gold-600/40'
+                      }`}
+                    >
+                      <span className={`block text-[12px] text-mist-100 ${own ? 'pr-6' : ''}`}>
+                        {r.name}
+                      </span>
+                      <span className="block text-[10px] text-mist-500">{r.mainDice}</span>
+                    </button>
+                    {own && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!armed) return setPendingDeleteRuleset(r.id);
+                          removeCustomRuleset(r.id);
+                        }}
+                        aria-label={armed ? `确认删除规则包 ${r.name}` : `删除规则包 ${r.name}`}
+                        className={`absolute right-1 top-1 rounded px-1.5 py-0.5 text-[10px] transition ${
+                          armed
+                            ? 'bg-gold-500/20 text-gold-100'
+                            : 'text-mist-500 hover:text-mist-200'
+                        }`}
+                      >
+                        {armed ? '确认删除？' : '×'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <div className="mt-2 flex items-center gap-1.5">
               <button
@@ -1504,7 +1736,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   className={inputCls}
                   value={config.imageModel ?? ''}
                   onChange={(e) => setConfig({ imageModel: e.target.value })}
-                  placeholder="black-forest-labs/FLUX.1-schnell"
+                  placeholder="Qwen/Qwen-Image"
                 />
               </Field>
               <Field label="尺寸">
@@ -1515,11 +1747,24 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 />
               </Field>
             </div>
+            {/*
+             * H15：首推的模型必须是**实测在架**的。
+             *
+             * 以前这里写 `black-forest-labs/FLUX.1-schnell`，而它 2026-09 已经下线
+             * （实测 403 `Model disabled`）—— 照抄必失败。
+             * 属服务商下架，不是代码写错，但对玩家的结果一样：白等 40 秒。
+             */}
             <p className="mt-1.5 text-[11px] leading-relaxed text-mist-500/80">
-              生图与对话共用同一个 API 地址和 Key，只是模型不同。硅基流动可用{' '}
+              生图与对话共用同一个 API 地址和 Key，只是模型不同。硅基流动目前可用{' '}
+              <code className="rounded bg-ink-700 px-1">Qwen/Qwen-Image</code>（2026-09 实测在架）；
               <code className="rounded bg-ink-700 px-1">black-forest-labs/FLUX.1-schnell</code>{' '}
-              （快）或{' '}
-              <code className="rounded bg-ink-700 px-1">Kwai-Kolors/Kolors</code>。留空则关闭生图。
+              已下线（会报 403）。留空则关闭生图。
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-gold-400/80">
+              {/* H18：JSX 不解析 Markdown —— 写 `**加粗**` 会把两对星号原样显示出来 */}
+              ⚠️ 模型名填错或服务商下架时，生图会
+              <strong className="font-medium text-gold-300">静默失败</strong>
+              （只是图出不来、也不报错）。如果点了「配图」一直没反应，先来这里换个模型试试。
             </p>
           </div>
 

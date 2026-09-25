@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { weighDescription, type WeighContext } from '../src/core/description.js';
+import { requiredWeaponFor, weaponMissingFor } from '../src/core/skills.js';
 
 const ctx: WeighContext = {
   npcs: ['老霍华德'],
@@ -117,6 +118,36 @@ describe('描述加权（改的是目标值，不是难度档位）', () => {
     const w = weighDescription(loaded, { ...ctx, rationalityBias: 'reward' });
     expect(w.score).toBe(2);
     expect(w.bonus).toBe(15);
+  });
+});
+
+describe('【全盘彻查 · 真源唯一】需要武器的技能只有一个判据（core/skills.ts）', () => {
+  const pistol = { kind: 'weapon', name: '手枪', skill: '射击（手枪）' };
+  const crowbar = { kind: 'tool', name: '撬棍' };
+
+  it('射击类技能要武器；近身/生活类不要', () => {
+    expect(requiredWeaponFor('射击（手枪）')).toBe('射击（手枪）');
+    expect(requiredWeaponFor('弓术')).toBe('弓术');
+    expect(requiredWeaponFor('投掷')).toBe('投掷');
+    expect(requiredWeaponFor('格斗（斗殴）')).toBeNull();
+    expect(requiredWeaponFor('撬锁')).toBeNull();
+  });
+
+  it('背包里有绑这个技能的武器 → 不缺；只有工具 → 缺', () => {
+    expect(weaponMissingFor('射击（手枪）', [pistol])).toBe(false);
+    expect(weaponMissingFor('射击（手枪）', [crowbar])).toBe(true);
+    // 武器绑的是别的技能（步枪）也算缺 —— 手里有枪不等于有这一把
+    expect(weaponMissingFor('射击（手枪）', [{ kind: 'weapon', skill: '射击（步枪）' }])).toBe(true);
+  });
+
+  it('不需要武器的技能永远不缺（别把"空手"当成缺武器）', () => {
+    expect(weaponMissingFor('格斗（斗殴）', [])).toBe(false);
+  });
+
+  it('【钉真源】背包为空 / undefined 都不会抛', () => {
+    expect(weaponMissingFor('射击（手枪）', [])).toBe(true);
+    // @ts-expect-error 故意喂脏数据：UI 传进来的可能是半截物品
+    expect(weaponMissingFor('射击（手枪）', undefined)).toBe(true);
   });
 });
 

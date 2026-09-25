@@ -146,4 +146,20 @@ export const dnd5e: Ruleset = {
   carryCapacity(ch) {
     return Math.max(10, Math.round(20 + g(ch, 'str') * 3));
   },
+  // 1.0 阶段 B：同样**只声明、不改行为**（生效在阶段 C）。字段原则同 COC7。
+  weaponTable: [
+    { name: '匕首', damage: '1d4', skill: '简易武器', hands: 1, tags: ['近战', '轻型'] },
+    { name: '短剑', damage: '1d6', skill: '军用武器', hands: 1, tags: ['近战'] },
+    { name: '长剑', damage: '1d8', skill: '军用武器', hands: 1, tags: ['近战'] },
+    { name: '巨斧', damage: '1d12', skill: '军用武器', hands: 2, tags: ['近战', '重型'] },
+    { name: '短弓', damage: '1d6', skill: '简易武器', hands: 2, tags: ['远程'] },
+    { name: '长弓', damage: '1d8', skill: '军用武器', hands: 2, tags: ['远程'] },
+    { name: '法杖', damage: '1d6', skill: '简易武器', hands: 1, tags: ['近战', '施法'] },
+  ],
+  statusEffects: [
+    { name: '中毒', perRound: {}, duration: 0, cure: '一次成功的体质豁免，或法术（如「解除毒素」）' },
+    { name: '眩晕', perRound: {}, duration: 2, cure: '每轮结束时豁免成功即解除' },
+    { name: '魅惑', perRound: {}, duration: 0, cure: '施展者停止专注，或一次成功的感知豁免' },
+    { name: '燃烧', perRound: { hp: '1d4' }, duration: 3, cure: '用一个动作扑灭，或撑过三轮' },
+  ],
 };

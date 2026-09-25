@@ -68,6 +68,15 @@ const SCRIPTED_MODULES = {
         weakness: '他怕你认出他是谁——点破身份会让他退让',
       },
     ] as ModuleMonster[],
+    /*
+     * 模组自带的世界书（测「换了模组，世界观跟不跟着走」）。
+     * 三个脚本化模组各给一份**互不相同**的词条：切换之后世界书面板里
+     * 应该只剩当前这一份，看到上一个模组的条目就是 bug。
+     */
+    worldbook: [
+      { id: 'mw-t-p1', keys: ['码头', '渔业'], content: '测试用：码头是镇上唯一能雇到船的地方，天不亮就有人出海。', priority: 60 },
+      { id: 'mw-t-p2', keys: ['杂货铺'], content: '测试用：杂货铺兼收渔获，老板娘认得镇上每一个人。', priority: 50 },
+    ],
   },
   combat: {
     title: '【测试】货舱里的东西',
@@ -113,11 +122,27 @@ const SCRIPTED_MODULES = {
         weakness: '强光 / 火',
       },
     ] as ModuleMonster[],
+    worldbook: [
+      { id: 'mw-t-c1', keys: ['货舱', '舱门'], content: '测试用：这条船的货舱有两道门，里门能从里面插上，外门只能从甲板开。', priority: 60 },
+      { id: 'mw-t-c2', keys: ['机舱'], content: '测试用：机舱的噪音盖得住任何喊声，也是船上唯一有电的地方。', priority: 50 },
+    ],
   },
   long: {
     title: '【测试】雨季结束之前',
     premise:
       '测试用长篇模组：一座终年下雨的山城，接连有人"走进雾里再没回来"。这件事拖了两个月，雨季还有二十三天结束。',
+    /*
+     * 长篇一定要有开场白。
+     * 原因是它最容易暴露"开场白串味"这个 bug（主人 2026-09-17 报的就是这个模组）：
+     * 以前没写 opening 时会套上默认模组《失踪的玛乔丽》的情节
+     * （"我女儿失踪十一天了" + "1924 年 3 月 7 日"）——
+     * 一个 2020 年代的山城雨雾故事，开局却在说 1924 年的马萨诸塞。
+     */
+    opening: `雨从下车那一刻就没停。旅店的檐下积了一小滩水，顺着砖缝往下渗。
+
+柜台后面的人在登记本上写了两笔，抬眼看了你一下："住几天？"没等你答，他又补了一句，"这个月山上已经少了三个人。"
+
+走廊尽头的窗户开着一条缝，风把雨味送进来。你注意到门厅的墙角堆着几把伞，一共四把，全都湿着。`,
     goal: '查清雾里到底是什么，并在雨季结束前带回一个活人',
     stakes: '雨季一结束，山下的村子就会断水，而雾会跟着水一起下来',
     urgency: '下一次满月还有二十三天，那是雨季结束的日子',
@@ -166,6 +191,11 @@ const SCRIPTED_MODULES = {
         weakness: '铜锣声 / 被人叫出它原来的名字',
       },
     ] as ModuleMonster[],
+    worldbook: [
+      { id: 'mw-t-l1', keys: ['山城', '雨季'], content: '测试用：山城一年有半年在下雨。雨季结束时山下放水，水位会退到全年最低。', priority: 60 },
+      { id: 'mw-t-l2', keys: ['旧水库'], content: '测试用：旧水库是一九七八年建成的，之后水位记录一直没断过，直到最近几年。', priority: 55 },
+      { id: 'mw-t-l3', keys: ['茶棚'], content: '测试用：山道半途有个茶棚，只有起雾的日子才开门，本地人也说不清是谁在经营。', priority: 50 },
+    ],
   },
 } as const;
 
@@ -258,6 +288,49 @@ function fillTestSave() {
   s.markSnapshotKey(pid, '第1回 · 去杂货铺 · 新线索');
 }
 
+/**
+ * 切到某个脚本化模组。
+ *
+ * **必须走 `applyModule()`**，不能自己拼 `setModule({...})`：
+ * 切换脚本化模组就是"换了一个模组"，要一并撤掉上一个模组的世界书、
+ * 装上这一个自带的那份、清掉上一个模组推荐的队友候选、重算开场白。
+ * 以前这里手打一长串 `setModule`，漏了世界书与派生数据清理 ——
+ * 于是切完模组世界书面板里还是上一个模组的内容
+ * （主人 2026-09-17 报的："世界书没同步"）。
+ *
+ * `opening` 一并写进去：脚本化模组都没写开场白时，开场白会退到
+ * `moduleOpening()` 用 premise + 起始地点拼 —— 那样也行，
+ * 但测试模组本来就该测"模组自己写了开场白"这条主流路径。
+ */
+function switchScriptedModule(m: (typeof SCRIPTED_MODULES)[keyof typeof SCRIPTED_MODULES]) {
+  useStore.getState().applyModule({
+    title: m.title,
+    premise: m.premise,
+    opening: 'opening' in m ? ((m as { opening?: string }).opening ?? '') : '',
+    startLocation: m.startLocation,
+    goal: m.goal,
+    stakes: m.stakes,
+    urgency: m.urgency,
+    truth: m.truth,
+    locations: m.locations,
+    mapNodes: cloneNodes(m),
+    npcs: m.npcs.map((n) => ({ ...n })),
+    clueChain: m.clueChain,
+    acts: m.acts,
+    endings: m.endings,
+    scale: m.scale,
+    items: m.items.map((i) => ({ ...i })),
+    monsters: m.monsters.map((x) => ({ ...x })),
+    worldbook: m.worldbook.map((e) => ({
+      id: e.id,
+      keys: [...e.keys],
+      content: e.content,
+      priority: e.priority ?? 50,
+      enabled: true,
+    })),
+  });
+}
+
 function mkCompanion(name: string, role: string): Companion {
   return {
     id: uid('cand'),
@@ -317,27 +390,7 @@ export function TestSandbox({ onClose }: { onClose: () => void }) {
           <button
             className={btn}
             onClick={() =>
-              run('解谜短篇', () => {
-                const m = SCRIPTED_MODULES.puzzle;
-                useStore.getState().setModule({
-                  title: m.title,
-                  premise: m.premise,
-                  startLocation: m.startLocation,
-                  goal: m.goal,
-                  stakes: m.stakes,
-                  urgency: m.urgency,
-                  truth: m.truth,
-                  locations: m.locations,
-                  mapNodes: cloneNodes(m),
-                  npcs: m.npcs.map((n) => ({ ...n })),
-                  clueChain: m.clueChain,
-                  acts: m.acts,
-                  endings: m.endings,
-                  scale: m.scale,
-                  items: m.items.map((i) => ({ ...i })),
-                  monsters: m.monsters.map((x) => ({ ...x })),
-                });
-              })
+              run('解谜短篇', () => switchScriptedModule(SCRIPTED_MODULES.puzzle))
             }
           >
             解谜短篇《灯塔第七夜》（含地图与道具表）
@@ -345,27 +398,7 @@ export function TestSandbox({ onClose }: { onClose: () => void }) {
           <button
             className={btn}
             onClick={() =>
-              run('战斗向', () => {
-                const m = SCRIPTED_MODULES.combat;
-                useStore.getState().setModule({
-                  title: m.title,
-                  premise: m.premise,
-                  startLocation: m.startLocation,
-                  goal: m.goal,
-                  stakes: m.stakes,
-                  urgency: m.urgency,
-                  truth: m.truth,
-                  locations: m.locations,
-                  mapNodes: cloneNodes(m),
-                  npcs: m.npcs.map((n) => ({ ...n })),
-                  clueChain: m.clueChain,
-                  acts: m.acts,
-                  endings: m.endings,
-                  scale: m.scale,
-                  items: m.items.map((i) => ({ ...i })),
-                  monsters: m.monsters.map((x) => ({ ...x })),
-                });
-              })
+              run('战斗向', () => switchScriptedModule(SCRIPTED_MODULES.combat))
             }
           >
             战斗向《货舱里的东西》
@@ -373,27 +406,7 @@ export function TestSandbox({ onClose }: { onClose: () => void }) {
           <button
             className={btn}
             onClick={() =>
-              run('长篇多日', () => {
-                const m = SCRIPTED_MODULES.long;
-                useStore.getState().setModule({
-                  title: m.title,
-                  premise: m.premise,
-                  startLocation: m.startLocation,
-                  goal: m.goal,
-                  stakes: m.stakes,
-                  urgency: m.urgency,
-                  truth: m.truth,
-                  locations: m.locations,
-                  mapNodes: cloneNodes(m),
-                  npcs: m.npcs.map((n) => ({ ...n })),
-                  clueChain: m.clueChain,
-                  acts: m.acts,
-                  endings: m.endings,
-                  scale: m.scale,
-                  items: m.items.map((i) => ({ ...i })),
-                  monsters: m.monsters.map((x) => ({ ...x })),
-                });
-              })
+              run('长篇多日', () => switchScriptedModule(SCRIPTED_MODULES.long))
             }
           >
             长篇《雨季结束之前》（分章、二十三天）

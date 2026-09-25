@@ -217,7 +217,16 @@ export function applyPreset(data: GenPreset): void {
         motive: n.motive ?? '',
         secret: n.secret ?? '',
       }));
-    s.setModule({
+    /*
+     * 走 `applyModule()`：应用整套预设＝**真的换了一个模组**，
+     * 撤旧模组的世界书、清旧模组的队友候选都在这里一并做了。
+     *
+     * 以前这里是"`setModule` + 单独的 `clearModuleDerived()`"两步，
+     * 然后第 4 步再整体替换世界书 —— 顺序上没问题，但**模组自带的世界书**
+     * （`module.worldbook`）没有落点，于是"预设模组的世界书不显示"。
+     * 现在模组自带的那份世界书如果预设里带了，也一起装上。
+     */
+    s.applyModule({
       title: m.title ?? '未命名模组',
       premise: m.premise ?? '',
       opening: m.opening ?? '',
@@ -237,8 +246,6 @@ export function applyPreset(data: GenPreset): void {
       notes: m.notes ?? '',
       sourceNote: m.source_note,
     });
-    // 整套预设里带的是**新模组**，清掉上一个模组的派生数据
-    s.clearModuleDerived();
   }
 
   // 4. 世界书（细节层）

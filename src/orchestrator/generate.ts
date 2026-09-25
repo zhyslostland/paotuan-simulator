@@ -6,12 +6,15 @@ import { chat, type ModelConfig } from '../providers/model.js';
 import type { Ruleset } from '../core/rulesets/types.js';
 import type { Genre } from '../core/genres.js';
 import { ACT_EXPAND_SPEC } from '../core/acts.js';
+import { characteristicBudget } from '../core/skills.js';
 
 /**
  * 模组篇幅。类型定义放在这里（而不是 ui/store），
  * 让 orchestrator 不反向依赖 UI 层——`ui/store` 从这里再导出一次即可。
  */
-export type ModuleScale = 'short' | 'medium' | 'long';
+/* 定义已搬到 core/types.ts（D 档批 0），这里只做转发 —— 老引用不用改 */
+import type { ModuleScale } from '../core/types.js';
+export type { ModuleScale };
 
 export const SCALE_LABEL: Record<ModuleScale, string> = {
   short: '短篇 · 一夜之间',
@@ -117,9 +120,29 @@ function vitalSpec(rs: Ruleset): string {
  * 二、角色 / 队友 / 世界书 / 模组 / 模组包
  * ============================================================ */
 
-/** 角色卡生成：题材 + 规则双驱动 */
-export function characterSystemPrompt(genre: Genre, rs: Ruleset): string {
+/**
+ * 角色卡生成：题材 + 规则 + **模组**三驱动。
+ *
+ * `mod` 是可空的最小结构（不引整个 `Module`，免得提示词层反向依赖一大坨状态）。
+ * 为什么要多喂一份模组：主人 2026-09-20 实测 —— 用「魔法少女」题材生成，
+ * 人设确实是魔法少女，但**属性技能跟人设对不上、跟模组也不搭**。
+ * 题材只决定"世界长什么样"，这张卡还得**在这个模组里活得下去**。
+ */
+export function characterSystemPrompt(
+  genre: Genre,
+  rs: Ruleset,
+  mod?: { title?: string; premise?: string }
+): string {
   const spec = characterNumericSpec(rs);
+  // 预算只有规则包真给了才算（COC 460；DnD 没有总额规矩 → 一句都不提，不替规则包编）
+  const budget = characteristicBudget(rs.id, {}).total;
+  const modSec = mod?.title?.trim()
+    ? `## 当前模组（这张卡必须在这个故事里活得下去）
+《${mod.title.trim()}》${mod.premise?.trim() ? `\n前言：${mod.premise.trim()}` : ''}
+如果前言已经交代了玩家是谁、如何被卷入，角色身份必须与之一致，不得另起设定。
+
+`
+    : '';
   return `你是 TRPG 角色卡生成助手，服务于《${rs.name}》。当前题材是 **${genre.name}**。
 
 根据玩家的描述生成一张玩家角色卡。**只输出 JSON，不要任何解释文字。**
@@ -127,9 +150,13 @@ export function characterSystemPrompt(genre: Genre, rs: Ruleset): string {
 ## 题材（世界观与舞台）
 ${genre.setting}
 
+## 这个世界的腔调
+${genre.tone}
+
 ## 这个世界里通常有哪些人
 ${genre.castHint}
 
+${modSec}
 格式：
 {"name":"姓名","gender":"男|女","description":"描述","personality":"性格","scenario":"开局处境","characteristics":${spec.attrExample},"skills":{"技能名":数值,...},"items":[{"name":"物品名","desc":"一句话说明它是什么、能干嘛","kind":"weapon|tool|clue|consumable|other","damage":"1d10","skill":"对应检定技能"}]}
 
@@ -140,6 +167,14 @@ ${genre.castHint}
 - personality 40-80 字：说话方式、性格弱点、在意什么。要具体到"能演出来"的程度。
 - scenario 30-60 字：开局时这个人身处何地、正在做什么。
 ${spec.rules}
+${
+  budget
+    ? `- **八项属性合计要落在 ${budget} 上下（常人水平）**：别把每项都拉满，也别全压到最低 —— 一张全 90 的卡等于没有性格。\n`
+    : ''
+}- **属性与技能必须自洽**：先想清楚"这个人在上面这个处境里靠什么吃饭"，把那 2-3 项给到最高；
+  一个手无缚鸡之力的学者不该有最高的力量，人人都能做的事不必占一条技能。
+  **与人设、题材、模组处境无关的技能一律不要给** —— 列一堆用不上的技能不是丰富，是噪声。
+- **技能要能解释得通**：每一项都能回答"他是在什么场合学会的"，写不出这句的就不该列。
 - items 3-6 项：这个人**随身携带**的物品（要写有用途的随身装备，不要写衣服这种理所当然的东西）。
   **每一项都必须给 desc**（20-35 字，说清"这是什么、能干嘛"）；是武器的还要给 kind:"weapon"、
   damage（伤害骰，如 "1d10"）、skill（对应检定技能）；消耗品给 kind:"consumable"；线索/信物给 kind:"clue"。
@@ -326,6 +361,10 @@ ${genre.castHint}
 }
 
 /** 世界书词条：只写客观事实 */
+/*
+ * ⚠️ 下面是**模板字符串**：正文里要写反引号必须转义成 \`（否则 TS1005），
+ * 而且注释写进去会变成给模型看的正文 —— 要注释就写在这儿。我刚踩了这两个坑各一次。
+ */
 export function worldbookSystemPrompt(genre: Genre): string {
   return `你是 TRPG 世界设定助手。当前题材：**${genre.name}**。
 ## 世界观
@@ -334,13 +373,18 @@ ${genre.setting}
 根据描述生成世界书条目。**只输出 JSON 数组，不要任何解释文字。**
 
 格式：
-[{"keys":["关键词1","关键词2"],"content":"设定正文","priority":数字}]
+[{"keys":["关键词1","关键词2"],"content":"设定正文","priority":数字,"constant":true或false,"budget":数字}]
 
 要求：
 - 每个条目只聚焦一个主题：地点、人物、组织、物品、或传说。
 - keys 3-6 个，必须包含简称、别称、可能的错误叫法，这样玩家怎么提都能命中。
 - content 100-250 字，**只写客观事实**（是什么、长什么样、有什么规矩），不要写剧情走向或"接下来会发生"。
 - priority：核心设定 80-100，次要 30-60，边缘 10-30。
+- **constant（要不要常驻）**：这条是不是"**不提也应该生效**"的世界底层——
+  这座城/这个组织的规矩、通行货币、这里的信仰与禁忌、主角身份这类 → true；
+  只在被提到时才需要的细节（某个具体人物、某件物品）→ false。
+  ⚠️ **最多 2-3 条 true**：常驻条目每一轮都会占上下文，给多了会把对话挤没。
+- **budget（字数上限）**：常驻的条目**必须**给一个（建议 150-250）；非常驻的写 0（不限制）。
 - 生成 3-6 个条目。全部中文，贴合上面的世界观。`;
 }
 
@@ -418,17 +462,37 @@ export function actExpandUserPrompt(
   ].join('\n\n');
 }
 
+/*
+ * P2-9（协作方第 24 版 · 主人定「大问题」）：**题材压不过描述与规则包名**。
+ *
+ * 根因是提示词里的权重错位：
+ *   ① 非原版时，user 消息就是描述原文（任务感最强、且位置最靠后）→ 描述成了唯一的"任务"；
+ *   ② system 开头「服务于《${rs.name}》」把**规则包名**摆成了"世界出处"
+ *      → 模型自述"结合 COC 规则与时代背景"，读的就是这句；
+ *   ③ :478 那句"严格贴合题材"躺在 system 里，被 user 的任务感盖过。
+ * → 权重变成「描述＞规则包名＞题材」，题材实际上没有说话的份。
+ *
+ * 修法：**题材升到 user（任务位）+ 规则包降为机制出处**。见下面两处。
+ */
 export function moduleSystemPrompt(genre: Genre, rs: Ruleset, scale: ModuleScale = 'short'): string {
-  return `你是 TRPG 模组（剧本）创作助手，服务于《${rs.name}》。当前题材是 **${genre.name}**。
+  /*
+   * ⚠️ 这一句以前写「服务于《${rs.name}》」，把**规则包**当成了世界的出处 ——
+   * 于是题材=赛博朋克、规则包=COC 时，模型会把世界拉回克苏鲁底色。
+   * 现在把它明确降为**只管判定与数值**，世界由题材决定。
+   */
+  return `你是 TRPG 模组（剧本）创作助手。当前题材是 **${genre.name}**。
 你要产出的**不是一份完整剧本，而是一份"故事骨架"** —— AI 守密人会据此即兴生成具体场景与对白。
 
-## 题材（世界观与舞台）
+【机制出处】判定与数值由规则包《${rs.name}》决定；**世界、时代、舞台、风格一律由题材决定**。
+《${rs.name}》只决定怎么掷骰、怎么算数值，**它不是这个世界的出处**，别把规则包的招牌当成世界底色。
+
+## 题材 ·【硬约束】（世界观与舞台）
 ${genre.setting}
 
-## 叙事风格（必须贯穿整份骨架）
+## 叙事风格 ·【硬约束】（必须贯穿整份骨架）
 ${genre.tone}
 
-## 这个世界里通常有哪些人
+## 这个世界里通常有哪些人 ·【硬约束】
 ${genre.castHint}
 
 ## 篇幅：**${SCALE_LABEL[scale]}**
@@ -472,10 +536,39 @@ ${SCALE_GUIDE[scale]}
  * 模组生成的用户侧提示词。
  * `canonical` = 用户给的是**已出版模组的名字**：让模型尽量按原版设定填卡。
  */
+/**
+ * 这个题材是不是「完全自由」—— 是的话**不设题材硬约束**，世界完全由玩家写的东西决定。
+ * （主人 2026-09-24 裁决：不加"原版优先"分支，改用这个题材给出出口。）
+ */
+export function isFreeGenre(genre?: Genre): boolean {
+  return genre?.id === 'free';
+}
+
 export function moduleUserPrompt(desc: string, canonical: boolean, genre?: Genre): string {
-  const base =
-    desc.trim() ||
-    `请自由创作一个适合「${genre?.name ?? '这个题材'}」的短模组。`;
+  /*
+   * P2-9：把**题材从 system 提到 user**，与描述并排，并写死裁决。
+   *
+   * 以前非原版时 user 只有描述原文 —— 描述是最后一个被读到的、任务感最强的东西，
+   * 于是"题材贴合"那句（躺在 system 里）根本压不住它。题材现在必须站在同一个位置。
+   */
+  const hasDesc = desc.trim() !== '';
+  // 「完全自由」题材：不设题材硬约束，玩家写什么世界就是什么
+  const free = isFreeGenre(genre);
+  const genreName = genre?.name ?? '这个题材';
+
+  const genreBlock = free
+    ? '【世界 · 完全自由】本题材不预设任何世界。**以你下面写的设想为准**——你写的时代、风格、世界就是这个世界，不要套用任何现成题材的刻板印象。'
+    : `【世界题材 · 硬约束】本模组的世界必须是「${genreName}」。`;
+
+  const base = hasDesc
+    ? `${genreBlock}
+【玩家想要的故事 · 元素必须全部保留】${desc.trim()}
+要求：上面设想里的每个人名 / 地名 / 组织 / 物件 / 事件都要出现在成品里（换个说法也算），
+并翻译进${free ? '你写出的这个世界' : `「${genreName}」的世界观`}；
+若设想的时代 / 风格 / 世界与${free ? '你的设想本身' : '题材'}冲突，以${free ? '设想' : '题材'}为准，且只改包装、不删元素。`
+    : // 空描述维持现状 —— 第 24 版 C 轮已证明它工作正常
+      `请自由创作一个适合「${genreName}」的短模组。`;
+
   if (!canonical) return base;
   return `${base}
 

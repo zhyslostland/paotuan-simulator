@@ -9,6 +9,11 @@ import {
   stripMeta,
   stripTravelEcho,
 } from '../src/orchestrator/prompt.js';
+import { coc7 } from '../src/core/rulesets/index.js';
+import { getRuleset } from '../src/core/rulesets/index.js';
+import { WORLD_FLAG_PREFIX } from '../src/core/campaign.js';
+import { characterSystemPrompt } from '../src/orchestrator/generate.js';
+import { GENRE_COC } from '../src/core/genres.js';
 
 describe('stripMeta 兜底过滤', () => {
   it('清掉"指令解析 / 系统 / 逻辑检查 / 叙事目标"这类过程性行', () => {
@@ -106,6 +111,7 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
   const buildPrompt = () =>
     buildSystemPrompt({
       rulesetName: 'COC 7th',
+      ruleset: coc7,
       genre: {
         id: 'coc',
         name: '经典克苏鲁',
@@ -151,6 +157,60 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
       chronicle: [],
     });
 
+  /** 带地图的版本：用来验证 `mapNodes` 真的进了提示词 */
+  const withMapNodes = () =>
+    buildSystemPrompt({
+      rulesetName: 'COC 7th',
+      ruleset: coc7,
+      genre: {
+        id: 'coc',
+        name: '经典克苏鲁',
+        blurb: '',
+        setting: '',
+        tone: '',
+        imageStyle: '',
+        castHint: '',
+      },
+      module: {
+        title: 't',
+        premise: '',
+        opening: '',
+        truth: '',
+        npcs: [],
+        locations: '铁砧镇\n沼地',
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+        mapNodes: [
+          { name: '铁砧镇', links: ['沼地'], note: '井台边围满了人' },
+          { name: '沼地', links: ['铁砧镇'] },
+        ],
+      },
+      character: {
+        name: '甲',
+        description: '',
+        personality: '',
+        mes_example: '',
+        characteristics: { str: 50 },
+        skills: { 侦查: 50 },
+      },
+      playerAddress: '甲先生',
+      gameState: {
+        vitals: { hp: 10 },
+        companions: [],
+        inventory: [],
+        flags: {},
+        clues: [],
+        threads: [],
+        location: '铁砧镇',
+        npcsAlive: [],
+        combat: { active: false, round: 0, foes: [] },
+      },
+      worldbook: [],
+      chronicle: [],
+    });
+
   it('combat.active / round / foes 都写在允许的 target 前缀里', () => {
     const prompt = buildPrompt();
     // 战斗规则让模型写 combat.*，白名单里就必须有，否则写多少被拒多少
@@ -171,9 +231,128 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
     expect(prompt).toContain('武器本身不是消耗品');
   });
 
+  /*
+   * 协作方第 19 / 20 版点名：**红线二之五的三例没进提示词**。
+   *
+   * 病灶：原来只写了「用掉的东西按数量扣一处 dec」这条通则，
+   * 但模型在三种相似场景里判得完全不一样（绷带止血该扣、撕衣服不该扣、
+   * 铺地上该扣），通则不足以让它分得清 —— 于是要么漏扣、要么凭空 add 一件衣服。
+   *
+   * 现在把三例逐条钉进提示词，并加一句「拿不准默认不扣」兜底。
+   * 这三条断言保证**三例与兜底句**一旦被谁删掉，测试立刻红。
+   */
+  it('红线二之五要含三个具体例子（拿出止血绷带→扣 / 撕衣服→不扣 / 铺地上→扣）', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('拿出止血绷带包扎伤口 → 扣');
+    expect(prompt).toContain('撕自己的衣服当布条 → 不扣');
+    expect(prompt).toContain('把止血绷带铺在地上当垫子 → 扣');
+  });
+
+  it('红线二之五要教"别凭空 add 衣服"与"拿不准默认不扣"', () => {
+    const prompt = buildPrompt();
+    // 反面：撕衣服不许顺手把一件"衣服"塞进背包（玩家穿的本来就不在背包里）
+    expect(prompt).toContain('凭空 add 一件等于作弊');
+    // 兜底：判不出来时宁可漏扣，也别吞玩家的东西
+    expect(prompt).toContain('拿不准时**默认不扣**');
+  });
+
   it('敌人必须有名字（"敌对生物没有命名"）', () => {
     const prompt = buildPrompt();
     expect(prompt).toContain('name 是必填的');
+  });
+
+  /*
+   * 用户 2026-09-17 报的「伤害加成与体格未生效」。
+   *
+   * 病灶：这两项**只画在界面上**，从来没进过提示词 —— 模型不知道它们存在，
+   * 于是 STR 90 的壮汉和 STR 30 的瘦子打出来一样疼。
+   * 现在要求它们出现在角色卡里，并且明说怎么用（加到近战伤害上、不比远程）。
+   */
+  it('伤害加成与体格要进提示词，并说清怎么用', () => {
+    const prompt = buildPrompt();
+    // 测试角色 STR 50 + SIZ 50 → COC 表查出来是 0 / 0，但字段本身必须在
+    expect(prompt).toContain('衍生：');
+    expect(prompt).toContain('伤害加成');
+    expect(prompt).toContain('体格');
+    // 关键说明：加在近战上、远程不加
+    expect(prompt).toContain('近身攻击的伤害要把「伤害加成」加到武器伤害上');
+    expect(prompt).toContain('远处的枪械不加');
+  });
+
+  /*
+   * 用户 2026-09-17 报的「属性技能与人设不匹配」的提示词侧：
+   * 属性要用规则包给的中文标签，不要把 str 直接大写印成 "STR 50"。
+   */
+  it('属性用规则包的中文标签，不是英文键的大写', () => {
+    const prompt = buildPrompt();
+    expect(prompt).toContain('力量 50');
+    expect(prompt).not.toContain('STR 50');
+  });
+
+  it('技能按规则包的量纲写（COC 百分比 / DnD 加值）', () => {
+    const prompt = buildPrompt();
+    // COC 是 1d100，技能写百分比
+    expect(prompt).toContain('侦查 50%');
+  });
+
+  /*
+   * DnD 那一侧：技能是**加值**不是百分比。
+   * 原来一律缀 `%`，会把"调查 +3"写成"调查 3%"——
+   * 模型读到会以为这人调查只有 3% 成功率，直接不敢让他掷。
+   */
+  it('DnD 的技能写成加值（+3），不写成百分比', () => {
+    const prompt = buildSystemPrompt({
+      rulesetName: 'D&D 5e',
+      ruleset: getRuleset('dnd5e'),
+      genre: {
+        id: 'fantasy',
+        name: '剑与魔法',
+        blurb: '',
+        setting: '',
+        tone: '',
+        imageStyle: '',
+        castHint: '',
+      },
+      module: {
+        title: 't',
+        premise: '',
+        opening: '',
+        truth: '',
+        npcs: [],
+        locations: '',
+        clueChain: '',
+        acts: '',
+        endings: '',
+        notes: '',
+      },
+      character: {
+        name: '凯尔',
+        description: '',
+        personality: '',
+        mes_example: '',
+        characteristics: { str: 14, dex: 12, con: 12, int: 10, wis: 10, cha: 10 },
+        skills: { 运动: 3, 隐匿: 2 },
+      },
+      playerAddress: '凯尔先生',
+      gameState: {
+        vitals: { hp: 10 },
+        companions: [],
+        inventory: [],
+        flags: {},
+        clues: [],
+        threads: [],
+        location: '酒馆',
+        npcsAlive: [],
+        combat: { active: false, round: 0, foes: [] },
+      },
+      worldbook: [],
+      chronicle: [],
+    });
+    expect(prompt).toContain('运动 +3');
+    expect(prompt).toContain('隐匿 +2');
+    expect(prompt).not.toContain('运动 3%');
+    // 属性用中文标签，DnD 那一套也要对
+    expect(prompt).toContain('力量 14');
   });
 
   it('剧透控制 G5：一次定好，全项目复用', () => {
@@ -195,6 +374,26 @@ describe('输出契约里的状态白名单不能和战斗规则自相矛盾', (
     const prompt = buildPrompt();
     expect(prompt).toContain('空间与位置');
     expect(prompt).toContain('移动必须走 location');
+  });
+
+  /*
+   * 用户 2026-09-17 报：「AI 自动生成地点，随时冒出些不相干的新地点」。
+   * 模组列了地点、也画了地图，但两样都没进提示词 ——
+   * 模型不知道边界在哪，当然就自己编。
+   */
+  it('地点与地图要进提示词，并框住"别凭空造新地点"', () => {
+    // 这一条要用**有地点**的那份上下文：`locations` 为空时整段本来就不出现
+    const prompt = withMapNodes();
+    expect(prompt).toContain('关键地点');
+    expect(prompt).toContain('不要凭空造无关的新地点');
+    // 地名要一致，否则地图会记成两个地方
+    expect(prompt).toContain('地名用模组里的叫法');
+  });
+
+  it('有地图时把地点关系也交给模型（不然玩家说不清自己在哪）', () => {
+    const prompt = withMapNodes();
+    expect(prompt).toContain('## 地图');
+    expect(prompt).toContain('可去：');
   });
 
   it('不得替玩家编造身体特征（"给我加了右腿有旧伤的设定"）', () => {
@@ -271,6 +470,7 @@ describe('敌对者表要告诉守密人"别提前讲"（R38 + G5）', () => {
   const buildWithMonsters = () =>
     buildSystemPrompt({
       rulesetName: 'COC 7th',
+      ruleset: coc7,
       genre: {
         id: 'coc',
         name: '经典克苏鲁',
@@ -446,5 +646,118 @@ describe('extractContract', () => {
     const raw = '正文。\n\n```json\n{"summary_delta":"一句话"}\n```';
     const { contract } = extractContract(raw);
     expect(contract?.ending).toBeUndefined();
+  });
+});
+
+/*
+ * ============================================================
+ * 世界层（Phase 2）：接上一次跑的时候，守密人得知道"这是在接着演"
+ *
+ * 不说这一句，模型会把它当全新的开场 —— 明明在场的人都认识他，
+ * 它却要重新自我介绍、重新写"你第一次踏上这条甲板"。
+ * ============================================================
+ */
+describe('世界延续：carriedFrom 要说给守密人听', () => {
+  /** 最小可用上下文；只关心提示词里说了什么 */
+  const build = (carriedFrom?: string) =>
+    buildSystemPrompt({
+      rulesetName: 'COC 7th',
+      ruleset: coc7,
+      genre: { id: 'coc', name: '经典克苏鲁', blurb: '', setting: '', tone: '', imageStyle: '', castHint: '' },
+      module: {
+        title: '雾港', premise: '', opening: '', truth: '',
+        npcs: [], locations: '', clueChain: '', acts: '', endings: '', notes: '',
+      },
+      character: {
+        name: '甲', description: '', personality: '', mes_example: '',
+        characteristics: { str: 50 }, skills: { 侦查: 50 },
+      },
+      playerAddress: '甲先生',
+      gameState: {
+        vitals: { hp: 10, san: 60, mp: 10 },
+        companions: [], inventory: [], flags: {}, clues: [], threads: [],
+        location: '老码头', npcsAlive: ['老杰克'],
+        combat: { active: false, round: 0, foes: [] },
+        carriedFrom,
+      },
+      worldbook: [],
+      chronicle: [],
+    });
+
+  it('有 carriedFrom → 点名世界，并明写"不要当作初次见面"', () => {
+    const p = build('雾港');
+    expect(p).toContain('这一局的由来');
+    expect(p).toContain('雾港');
+    expect(p).toContain('不要当作初次见面');
+  });
+
+  it('没有 carriedFrom → 一个字都不提（普通开局不受影响）', () => {
+    expect(build(undefined)).not.toContain('这一局的由来');
+  });
+
+  it('carriedFrom 是空白字符串也当作没有（不给模型一句半截话）', () => {
+    expect(build('   ')).not.toContain('这一局的由来');
+  });
+
+  /*
+   * 跨层钉针（机制 3 的第一类）：**引擎的白名单前缀必须和提示词说的一致**。
+   *
+   * 引擎侧 `carriedFlags` 只放行 `世界.` 前缀（`core/campaign.ts`）。
+   * 如果提示词没告诉守密人这件事，它写出来的标记会全被滤掉 ——
+   * 于是"世界记得上次的事"这个功能静默失效（玩家只会觉得"怎么什么都没记住"）。
+   * 这条断言把两处钉在一起：改任何一边，另一边会红。
+   */
+  it('提示词里教的前缀，必须跟引擎的白名单前缀是同一个（脱节防线）', () => {
+    const p = build('雾港');
+    expect(p).toContain(WORLD_FLAG_PREFIX);
+    expect(p).toContain('下一个模组还记得');
+  });
+});
+
+/*
+ * 角色卡生成提示词：题材 + 规则 + **模组**三驱动。
+ *
+ * 主人 2026-09-20 试玩：用「魔法少女」题材生成，人设确实写成了魔法少女，
+ * 但**属性与技能跟人设对不上、也不搭模组**。他的原话是
+ * 「自动生成出来的必须自洽、必须匹配模组风格」—— 所以这几条不是润色，是硬要求。
+ */
+describe('角色卡生成提示词（要把模组与自洽要求喂进去）', () => {
+  const rs = getRuleset('coc7');
+
+  it('题材的腔调要喂进去（以前只喂了 setting 与 castHint）', () => {
+    const p = characterSystemPrompt(GENRE_COC, rs);
+    expect(p).toContain(GENRE_COC.tone.slice(0, 8));
+  });
+
+  it('给了模组就把模组前言喂进去，让这张卡在那个处境里活下去', () => {
+    const p = characterSystemPrompt(GENRE_COC, rs, { title: '雾港失踪案', premise: '你是受委托的私家侦探' });
+    expect(p).toContain('雾港失踪案');
+    expect(p).toContain('受委托的私家侦探');
+  });
+
+  it('没给模组时不出现空的模组段（不拿空壳糊弄模型）', () => {
+    const p = characterSystemPrompt(GENRE_COC, rs);
+    expect(p).not.toContain('当前模组（这张卡必须在这个故事里活得下去）');
+  });
+
+  it('技能必须呼应人设与模组处境 —— 明确禁止列无关技能', () => {
+    const p = characterSystemPrompt(GENRE_COC, rs);
+    expect(p).toContain('靠什么吃饭');
+    expect(p).toContain('无关的技能一律不要给');
+  });
+
+  it('属性要自洽：COC 给总额预算 460', () => {
+    const p = characterSystemPrompt(GENRE_COC, getRuleset('coc7'));
+    expect(p).toContain('460');
+  });
+
+  it('DnD 没有总额规矩就一句都不提（规则包没给的不要编）', () => {
+    const p = characterSystemPrompt(GENRE_COC, getRuleset('dnd5e'));
+    expect(p).not.toContain('460');
+  });
+
+  it('物品描述仍是硬要求（每项都要 desc）', () => {
+    const p = characterSystemPrompt(GENRE_COC, rs);
+    expect(p).toContain('每一项都必须给 desc');
   });
 });

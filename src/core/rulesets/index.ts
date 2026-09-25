@@ -22,11 +22,33 @@ export function listRulesets(): Ruleset[] {
   return [...registry.values()];
 }
 
+/** 内置规则包：能选能换，**不能删** */
+const BUILTIN_RULESET_IDS: readonly string[] = [coc7.id, dnd5e.id];
+
+export function isBuiltinRuleset(id: string): boolean {
+  return BUILTIN_RULESET_IDS.includes(id);
+}
+
 /** 注册一个自定义规则包（第三方自由预设） */
 export function registerCustomRuleset(cfg: CustomRulesetConfig): Ruleset {
   const rs = createCustomRuleset(cfg);
   registry.set(rs.id, rs);
   return rs;
+}
+
+/**
+ * 注销一个自定义规则包 —— **能建就该能删**（协作方第 14 版 §1③）。
+ *
+ * 以前 `registerCustomRuleset` 是单向的：设置页里能建、能选，**删不掉**，
+ * 建错的规则包只能一直挂在列表里。这与"自建题材能删"是对称的两件事。
+ *
+ * 只动内存里的注册表：localStorage 那份由 UI 层自己写（core 不许有 IO）。
+ */
+export function unregisterCustomRuleset(id: string): boolean {
+  if (isBuiltinRuleset(id)) return false; // 内置的不许删
+  if (!registry.has(id)) return false;
+  registry.delete(id);
+  return true;
 }
 
 /** 把 localStorage 里存的自定义规则包都注册进来（浏览器端启动时调用一次） */
@@ -46,5 +68,10 @@ export function loadCustomRulesets(): void {
 
 export { coc7, rollPercentile, resolveCocCheck, type PercentileRoll } from './coc7.js';
 export { dnd5e, dndModifier, resolveDndCheck } from './dnd5e.js';
-export { createCustomRuleset, type CustomRulesetConfig } from './custom.js';
+export {
+  createCustomRuleset,
+  parseStatusLines,
+  parseWeaponLines,
+  type CustomRulesetConfig,
+} from './custom.js';
 export * from './types.js';

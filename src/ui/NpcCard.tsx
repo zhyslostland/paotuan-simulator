@@ -29,32 +29,14 @@ export interface NpcProfile {
   present: boolean;
 }
 
-/** 名字上常见的称呼后缀（"霍华德先生"）*/
-const NAME_SUFFIX_RE =
-  /(先生|女士|小姐|太太|夫人|老板|师傅|大叔|大婶|大妈|大爷|大娘|同学|老师|医生|探长|警长|队长|先生)$/;
-/** 名字上常见的亲昵前缀（"老霍华德""小王"）*/
-const NAME_PREFIX_RE = /^(老|小|阿)/;
-
-/**
- * 名字的"核心"，用来做宽松匹配。
+/*
+ * 名字匹配的两条规则住在 `core/npcNotes.ts`，**这里不另写一份**。
  *
- * 模型写人名很不统一：同一轮里可能一会儿"老霍华德"、一会儿"霍华德先生"。
- * 严格相等会让卡片经常查不到人（玩家点开一片空白，还以为功能坏了）。
- * 这里剥掉前后缀再比；核心太短（一两个字）时不比"包含"，避免"王"对上"汪三"。
+ * 为什么：档案容量淘汰（`pruneNpcNotes`）要用同一个"谁在场"的判据。
+ * 若两处各写一份宽松匹配，迟早出现"卡片认得老霍华德、淘汰逻辑不认"的分歧 ——
+ * 那样在场者的档案会被当成离场者丢掉，而"在场者永不淘汰"是用户拍板的硬规矩。
  */
-function nameKey(raw: string): string {
-  return raw.trim().replace(NAME_PREFIX_RE, '').replace(NAME_SUFFIX_RE, '').trim();
-}
-
-/** 两个名字指的是不是同一个人 */
-function sameName(a: string, b: string): boolean {
-  if (a === b) return true;
-  const ka = nameKey(a);
-  const kb = nameKey(b);
-  if (ka === kb) return true;
-  if (ka.length < 2 || kb.length < 2) return false;
-  return ka.includes(kb) || kb.includes(ka);
-}
+import { sameNpcName } from '../core/npcNotes.js';
 
 /**
  * 汇总一个人的档案。
@@ -71,12 +53,12 @@ export function npcProfileOf(
 
   // 档案：先精确，再退到宽松匹配（中文名常常只差一个称呼）
   const notes = gs.npcNotes ?? {};
-  const noteKey = Object.keys(notes).find((k) => sameName(k, target));
+  const noteKey = Object.keys(notes).find((k) => sameNpcName(k, target));
   const note = noteKey ? notes[noteKey] : undefined;
 
-  const modNpc = (mod?.npcs ?? []).find((n) => sameName(n.name, target));
+  const modNpc = (mod?.npcs ?? []).find((n) => sameNpcName(n.name, target));
 
-  const companion = (gs.companions ?? []).some((c) => sameName(c.name, target));
+  const companion = (gs.companions ?? []).some((c) => sameNpcName(c.name, target));
 
   return {
     name: target,
@@ -85,7 +67,7 @@ export function npcProfileOf(
     met: typeof note?.met === 'number' ? note.met : undefined,
     inModule: Boolean(modNpc),
     companion,
-    present: (gs.npcsAlive ?? []).includes(target),
+    present: (gs.npcsAlive ?? []).some((n) => sameNpcName(n, target)),
   };
 }
 

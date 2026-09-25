@@ -19,6 +19,7 @@
  * 用 class 写是因为 React 至今只有 class 组件能当错误边界（没有 hooks 版本）。
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { navigateFresh } from '../nav.js';
 
 interface Props {
   children: ReactNode;
@@ -67,7 +68,7 @@ export class ErrorBoundary extends Component<Props, State> {
             </button>
             <button
               type="button"
-              onClick={() => window.location.reload()}
+              onClick={() => navigateFresh()}
               className="rounded border border-ink-600 px-3 py-1.5 text-[12px] text-mist-300 hover:bg-ink-800"
             >
               重新载入

@@ -73,6 +73,46 @@ export interface SkillDef {
   desc?: string;
 }
 
+/* ============================================================
+ * 1.0 阶段 B：让规则包能"说清后果"。
+ *
+ * 以前 `Ruleset` 只能表达属性、技能表、数值派生与判定 ——
+ * 于是"我中毒了"只是 flags 里多一行字，**引擎不知道该扣什么、每回合扣多少**，
+ * 只能交给模型自觉（那等于放弃了「引擎权威」这条铁律）。
+ *
+ * 两张表只放**引擎要解释的字段**，原则来自协作方第 24 版 §4③：
+ * 「只放引擎要解释的（伤害、扣减、时长、解除）；中毒长什么样交给模型 / 世界书」，
+ * 每条 ≤6 字段 —— 别让它变成"规则书入库"（版权三层铁律）。
+ * ============================================================ */
+
+export interface WeaponDef {
+  name: string;
+  /** 伤害骰表达式（如 `1d10`、`1d8+2`），与 `core/dice/roll.ts` 同一套写法 */
+  damage: string;
+  /** 这把武器用哪个技能检定（如「格斗（斗殴）」「射击（手枪）」） */
+  skill: string;
+  /** 单手还是双手 */
+  hands?: 1 | 2;
+  /** 弹药：空 / 不填 = 近战或无限 */
+  ammo?: number;
+  /** 标签，便于界面分组与提示（如「近战」「枪械」） */
+  tags?: string[];
+}
+
+export interface StatusEffectDef {
+  name: string;
+  /**
+   * 每轮的后果。键是数值条 key（如 `hp` / `san`），值是**增量**（负数＝扣）或骰表达式。
+   */
+  perRound: Record<string, number | string>;
+  /** 持续轮数；0 = 直到被解除 */
+  duration: number;
+  /** 解除条件（一句人话，给界面和守密人看） */
+  cure: string;
+  /** 能不能叠（同一状态再来一次是叠加还是续期） */
+  stacks?: boolean;
+}
+
 export interface Ruleset {
   id: string;
   name: string;
@@ -115,4 +155,33 @@ export interface Ruleset {
   carryCapacity?(characteristics: Record<string, number>): number;
   resolveCheck(roll: number, target: number, difficulty?: Difficulty): CheckResult;
   tierLabel(tier: CheckTier): string;
+  /**
+   * 武器表（1.0 阶段 B）。**可选** —— 没填就走现状（伤害由模型申报）。
+   * 阶段 C 之前它只用于展示，不改变任何行为。
+   */
+  weaponTable?: WeaponDef[];
+  /**
+   * 状态效果表（1.0 阶段 B）。**可选** —— 没填就走现状（flags 只是自由文本）。
+   */
+  statusEffects?: StatusEffectDef[];
+}
+
+/** 按名字找一把武器；没有就返回 undefined（调用方自行走现状） */
+export function findWeapon(rs: Ruleset | undefined, name: string): WeaponDef | undefined {
+  const want = name.trim();
+  if (!want || !rs?.weaponTable?.length) return undefined;
+  return (
+    rs.weaponTable.find((w) => w.name === want) ??
+    rs.weaponTable.find((w) => want.includes(w.name) || w.name.includes(want))
+  );
+}
+
+/** 按名字找一个状态效果；没有就返回 undefined */
+export function findStatusEffect(rs: Ruleset | undefined, name: string): StatusEffectDef | undefined {
+  const want = name.trim();
+  if (!want || !rs?.statusEffects?.length) return undefined;
+  return (
+    rs.statusEffects.find((s) => s.name === want) ??
+    rs.statusEffects.find((s) => want.includes(s.name) || s.name.includes(want))
+  );
 }

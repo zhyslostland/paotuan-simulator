@@ -3,10 +3,15 @@ import {
   canonicalSkillName,
   deriveVitalsFor,
   deriveVitalsMax,
+  isLifeFull,
   resolveCheckTarget,
+  requiredWeaponFor,
+  weaponMissingFor,
   useStore,
 } from './store';
 import { encumbranceOf, itemWeight } from '../core/encumbrance.js';
+import { isHealOnlyConsumable } from '../core/items.js';
+import { INSANITY_TURNS_FLAG } from '../core/insanity.js';
 import { ImageLightbox } from './ImageLightbox';
 import {
   weighDescription,
@@ -110,16 +115,15 @@ export function CheckDialog({
    * 字数只在明显偏长且没有别的得分点时补一分——不再"凑够 45 字就满分"。
    * 题材极性 `rationalityBias` 由当前题材决定：克苏鲁里"用科学原理解题"是减分项。
    */
-  const needsWeapon =
-    skillDef && /射击|投掷|弓/.test(skillDef.name) ? skillDef.name : null;
+  const needsWeapon = skillDef ? requiredWeaponFor(skillDef.name) : null;
   /**
    * 需要武器但背包里没有对应武器。
    * 这一条是**硬闸门**：技能值不等于手里有东西，没有枪就不该掷这一枪
    * （用户 2026-09-16 实测：手枪被误扣后系统还在触发手枪检定）。
+   * 判据只有 `core/skills.ts` 的 `weaponMissingFor` 一份，这里不许再自己写正则。
    */
   const weaponMissing =
-    needsWeapon != null &&
-    !gameState.inventory.some((i) => i.kind === 'weapon' && i.skill?.trim() === needsWeapon);
+    skillDef != null && weaponMissingFor(skillDef.name, gameState.inventory);
   const weight = weighDescription(
     action,
     {
@@ -368,13 +372,23 @@ function ItemDialog({
   onClose,
   onAttack,
   onUse,
+  streaming,
+  healOnlyAtFull,
 }: {
   item?: InventoryItem;
   onClose: () => void;
-  /** 武器：走对应技能的检定 */
-  onAttack?: (skill: string) => void;
-  /** 消耗品/其它：本地扣 1，再把"使用意图"发给守密人演出效果 */
-  onUse?: (item: InventoryItem) => void;
+  /** 武器：走对应技能的检定。**必传**：唯一调用点（`ItemDialog` 在 `CharacterSheet` 内）两个都传，
+   *  留成可选＋`?.()` 会让"用此武器攻击"变成点了没反应的静默空操作。 */
+  onAttack: (skill: string) => void;
+  /**
+   * 消耗品/其它：只把"拿它干什么"**写进对话草稿**，由玩家补完再发（协作方第 17 版 A）。
+   * **本地不再预扣** —— 扣不扣看这一轮的契约。判据与理由见 `core/items.ts`。同上，必传。
+   */
+  onUse: (item: InventoryItem) => void;
+  /** 守密人还在写：这一轮的动作一律置灰（P1-1，状态可见） */
+  streaming: boolean;
+  /** 纯回血消耗品 + 当前满血 → 禁用、不扣、不发（主人 2026-09-20 拍板） */
+  healOnlyAtFull: boolean;
 }) {
   if (!item) return null;
   const KIND_LABEL: Record<string, string> = {
@@ -436,16 +450,17 @@ function ItemDialog({
 
         {item.note && <p className="mt-2 text-[11px] text-mist-500">{item.note}</p>}
 
-        {/* 用起来：武器走检定，消耗品本地扣 1 再交给守密人演效果 */}
+        {/* 用起来：武器走检定；消耗品把"拿它干什么"交给玩家写，本地不预扣 */}
         <div className="mt-3.5 flex flex-wrap gap-2">
           {item.kind === 'weapon' && (
             <button
               onClick={() => {
                 const skill = item.skill?.trim() || '格斗（斗殴）';
                 onClose();
-                onAttack?.(skill);
+                onAttack(skill);
               }}
-              className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+              disabled={streaming}
+              className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-mist-500"
             >
               用此武器攻击
             </button>
@@ -454,14 +469,27 @@ function ItemDialog({
             <button
               onClick={() => {
                 onClose();
-                onUse?.(item);
+                onUse(item);
               }}
-              className="rounded-lg border border-gold-600/60 px-3 py-1.5 text-[12px] text-gold-300 transition hover:border-gold-500 hover:text-gold-200"
+              disabled={streaming || healOnlyAtFull}
+              className="rounded-lg border border-gold-600/60 px-3 py-1.5 text-[12px] text-gold-300 transition hover:border-gold-500 hover:text-gold-200 disabled:cursor-not-allowed disabled:border-ink-600 disabled:text-mist-500"
             >
-              {item.kind === 'consumable' ? `使用（剩 ${item.qty}）` : '使用 / 交出去'}
+              {item.kind === 'consumable' ? `使用 · 还有 ${item.qty} 个` : '使用 / 交出去'}
             </button>
           )}
         </div>
+        {/*
+          两句话必须在按钮**下面**、且一直挂着：
+          掷骰与使用都可能在"刚好在流式"那一刻被点，玩家看到的不能是"点了没反应"。
+        */}
+        {streaming && (
+          <p className="mt-2 text-[11px] text-mist-500">守密人还在写 —— 等这一轮写完再动。</p>
+        )}
+        {!streaming && healOnlyAtFull && (
+          <p className="mt-2 text-[11px] text-mist-500">
+            你没受伤 —— 这类只能回血的消耗品，用不上就不扣。
+          </p>
+        )}
       </div>
     </div>
   );
@@ -469,16 +497,22 @@ function ItemDialog({
 
 export function CharacterSheet({
   onRequestCheck,
-  onUseItem,
+  onPromptUse,
 }: {
   onRequestCheck: (skill: string) => void;
-  /** 把"使用某件物品"的意图发给守密人（消耗品会先在本地扣数量） */
-  onUseItem?: (text: string) => void;
+  /** 把"使用某件物品"的意图写进对话草稿（不再直发、不再本地预扣 —— 见 `core/items.ts`） */
+  onPromptUse: (text: string) => void;
 }) {
   const character = useStore((s) => s.character);
   const gameState = useStore((s) => s.gameState);
   const rulesetId = useStore((s) => s.rulesetId);
   const streaming = useStore((s) => s.streaming);
+  /*
+   * 订阅的是**函数引用**（稳定），不是在选择器里调用它。
+   * 铁律：每次返回新对象的 store 方法绝不许进选择器（会无限重渲染）——
+   * `useStore((s) => s.insanity())` 是错的，`useStore((s) => s.insanity)` 是对的。
+   */
+  const insanity = useStore((s) => s.insanity);
   const [showFull, setShowFull] = useState(false);
   const [showAllSkills, setShowAllSkills] = useState(false);
   const [showLowSkills, setShowLowSkills] = useState(false);
@@ -680,15 +714,36 @@ export function CharacterSheet({
          * 引擎/守密人约定的几个重状态用告警色，其余的用中性色照常列出。
          */}
         {(() => {
+          /*
+           * H16：两条刻意的取舍 ——
+           * ① **滤掉 `疯狂轮数`**：那是引擎自己记的账，不是玩家的状态，
+           *    甩一句「疯狂轮数：2」等于让玩家自己拼"还剩几轮"。
+           * ② `临时疯狂` 那条显示引擎算好的 `label`（含剩余轮数），
+           *    而不是 `flags` 里那句原始描述（它会变成
+           *    「临时疯狂：理智骤降 6 点，陷入临时疯狂」这种复读）。
+           * 信息一直都在，只是没拼好。
+           */
+          const ins = insanity();
           const statusFlags = Object.entries(gameState.flags).filter(
-            ([k, v]) => /[\u4e00-\u9fa5]/.test(k) && v !== false && v !== '' && v !== 0 && v != null
+            ([k, v]) =>
+              /[\u4e00-\u9fa5]/.test(k) &&
+              v !== false &&
+              v !== '' &&
+              v !== 0 &&
+              v != null &&
+              k !== INSANITY_TURNS_FLAG
           );
           if (statusFlags.length === 0) return null;
           return (
             <div className="flex flex-wrap gap-1.5">
               {statusFlags.map(([key, value]) => {
                 const tone = SEVERE_FLAG_TONE[key];
-                const text = value === true ? key : `${key}：${String(value)}`;
+                const text =
+                  key === '临时疯狂' && ins.active
+                    ? ins.label
+                    : value === true
+                      ? key
+                      : `${key}：${String(value)}`;
                 return (
                   <span
                     key={key}
@@ -795,11 +850,7 @@ export function CharacterSheet({
               (s) => s.name === skill || s.name === canonicalSkillName(skill, rs)
             );
             const weaponMissing =
-              needWeapon != null &&
-              /射击|投掷|弓/.test(needWeapon.name) &&
-              !gameState.inventory.some(
-                (i) => i.kind === 'weapon' && i.skill?.trim() === needWeapon.name
-              );
+              needWeapon != null && weaponMissingFor(needWeapon.name, gameState.inventory);
             const untrainedSkill = character.skills[skill] == null;
             return (
               <button
@@ -971,20 +1022,22 @@ export function CharacterSheet({
           item={gameState.inventory.find((i) => i.id === openItem)}
           onClose={() => setOpenItem(null)}
           onAttack={(skill) => onRequestCheck(skill)}
+          streaming={streaming}
+          healOnlyAtFull={(() => {
+            const it = gameState.inventory.find((i) => i.id === openItem);
+            // 「满血」的真源在 store 的 isLifeFull（与界面上那根血条同一份判据）
+            return isHealOnlyConsumable(it) && isLifeFull(gameState, character, rulesetId);
+          })()}
           onUse={(it) => {
             /*
-             * 消耗品：**本地先扣 1**（引擎权威），再把"使用意图"发给守密人演出效果。
-             * 只发意图不扣数量，就是玩家报的"东西永远用不完"；只扣数量不告诉守密人，
-             * 就是"我用了绷带但它没反应"。两件事都要做。
+             * 点「使用」**不再直发**无主语的「（使用：××）」，也不再本地预扣。
+             *
+             * 主人 2026-09-20 拍板：实物（绷带、绳子…）能干什么靠玩家想象 ——
+             *「拿出背包里的绷带止血」要扣，「撕破衣服止血」不扣背包，「把绷带铺在地上」也要扣
+             * （点了名字＝这件被用掉）。引擎猜不出这些，所以改成：
+             * 把意图写进**对话草稿**，玩家补完一句再发；扣不扣交给这一轮的契约。
              */
-            if (it.kind === 'consumable') {
-              useStore
-                .getState()
-                .applyModelDeltas([
-                  { target: 'inventory', op: 'dec', value: it.name, amount: 1 },
-                ] as never);
-            }
-            onUseItem?.(`（使用：${it.name}）`);
+            onPromptUse(`用「${it.name}」：`);
           }}
         />
       )}

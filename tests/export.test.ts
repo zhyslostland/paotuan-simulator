@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildArchiveMarkdown,
+  buildIllustratedReportHtml,
   buildJourneyMarkdown,
   buildResultMarkdown,
+  playerLinesByRound,
+  roundPlayerLines,
   safeFilename,
   type ExportInput,
 } from '../src/ui/exportGame.js';
@@ -176,5 +179,356 @@ describe('文件名', () => {
 
   it('空名字有兜底', () => {
     expect(safeFilename('')).toBe('跑团');
+  });
+});
+
+/**
+ * P2-4（协作方第 20 版）：**「整体流程」与「完整留档」要读 `messages`，不能再只读 `chronicle`。**
+ *
+ * ## 病灶
+ * `chronicle` 是引擎侧的**一句话提要**（"你锯断了锁扣，上了甲板。"）。玩家自己写的行动原话、
+ * 骰点明细、守密人的正文**都不在里面**。标题写着「完整经过」，打开却只有提要 ——
+ * 玩家想复盘"我当时到底怎么说的""那一把掷了多少"，一条都找不到。
+ *
+ * ## 这一刀的范围（原文明确划了）
+ * **只改「整体流程」+「完整留档」**。结算分享 / 带图战报 / 结档页回目是**下一刀**。
+ * 真相分层（`module.truth` 只进完整留档）**不动**。
+ */
+describe('按回目渲染 messages（P2-4）', () => {
+  /** 一份带对话的输入：3 回，其中第 2 回带两个检定（单掷 + 一次多掷） */
+  const withMessages = (): ExportInput => ({
+    ...makeInput(),
+    messages: [
+      { role: 'gm', content: '你在货舱里醒来，手边有积水。', checks: [] },
+      { role: 'player', content: '我摸黑去摸舱门。', checks: [] },
+      {
+        role: 'gm',
+        content: '锁是从外面扣上的，铁扣锈得很厉害。',
+        checks: [
+          { skill: '侦查', target: 60, roll: 22, label: '成功', tier: '成功', success: true },
+        ],
+      },
+      { role: 'player', content: '我用锯条锯那个锁扣。', checks: [] },
+      {
+        role: 'gm',
+        content: '金属发出刺耳的呻吟，然后断了。',
+        checks: [
+          { skill: '力量', target: 45, roll: 71, label: '失败', tier: '失败', success: false },
+          { skill: '幸运', target: 50, roll: 12, label: '成功', tier: '成功', success: true },
+        ],
+      },
+    ],
+  });
+
+  it('整体流程里出现玩家原话（引用块），不只是提要', () => {
+    const md = buildJourneyMarkdown(withMessages());
+    expect(md).toContain('> 我摸黑去摸舱门。');
+    expect(md).toContain('> 我用锯条锯那个锁扣。');
+  });
+
+  it('GM 正文进导出（提要里根本没有这些句子）', () => {
+    const md = buildJourneyMarkdown(withMessages());
+    expect(md).toContain('锁是从外面扣上的，铁扣锈得很厉害。');
+    expect(md).toContain('金属发出刺耳的呻吟，然后断了。');
+  });
+
+  it('检定带骰点明细：掷了多少 / 目标多少 / 结果', () => {
+    const md = buildJourneyMarkdown(withMessages());
+    expect(md).toContain('侦查');
+    expect(md).toContain('掷 22');
+    expect(md).toContain('目标 60');
+    expect(md).toContain('失败');
+    expect(md).toContain('掷 71');
+    expect(md).toContain('目标 45');
+  });
+
+  it('一次多掷的两个检定都要出现（checksOf 是唯一真源）', () => {
+    const md = buildJourneyMarkdown(withMessages());
+    // 同一条消息上的 check 与 checks 都不能漏
+    expect(md).toContain('力量');
+    expect(md).toContain('幸运');
+    expect(md).toContain('掷 12');
+  });
+
+  it('按回目切：第 1 回是开场，第 2 回起一玩家一答复', () => {
+    const md = buildJourneyMarkdown(withMessages());
+    expect(md).toContain('### 第 1 回');
+    expect(md).toContain('### 第 2 回');
+    expect(md).toContain('### 第 3 回');
+  });
+
+  it('编年史提要**照样留着**（玩家可能就想扫一眼骨架）', () => {
+    const md = buildJourneyMarkdown(withMessages());
+    expect(md).toContain('## 故事梗概');
+    expect(md).toContain('你锯断了锁扣，上了甲板。');
+  });
+
+  it('没给 messages 时退回旧渲染，行为不变（老调用处不炸）', () => {
+    const md = buildJourneyMarkdown(makeInput()); // makeInput 没有 messages
+    expect(md).toContain('你锯断了锁扣，上了甲板。');
+    expect(md).not.toContain('## 逐回经过');
+  });
+
+  it('messages 里只有开场白（玩家还没说话）时，也能出来，不返回空', () => {
+    const md = buildJourneyMarkdown({
+      ...makeInput(),
+      messages: [{ role: 'gm', content: '故事从这里开始。', checks: [] }],
+    });
+    expect(md).toContain('## 逐回经过');
+    expect(md).toContain('故事从这里开始。');
+  });
+
+  it('system 消息不进回目（它不是故事的一部分）', () => {
+    const md = buildJourneyMarkdown({
+      ...makeInput(),
+      messages: [
+        { role: 'system', content: '这是一条系统提示，不该出现在故事里。', checks: [] },
+        { role: 'player', content: '我往前走。', checks: [] },
+      ],
+    });
+    expect(md).not.toContain('不该出现在故事里');
+    expect(md).toContain('我往前走。');
+  });
+
+  it('契约块（```json）不会漏进导出正文', () => {
+    const md = buildJourneyMarkdown({
+      ...makeInput(),
+      messages: [
+        {
+          role: 'gm',
+          content: '门开了。\n```json\n{"state_delta":[]}\n```',
+          checks: [],
+        },
+      ],
+    });
+    expect(md).toContain('门开了。');
+    expect(md).not.toContain('state_delta');
+  });
+
+  it('🔴 完整留档带真相 —— 但**只带真相，不带别的**（分层不能被这次改动破坏）', () => {
+    const input = { ...withMessages(), module: { ...withMessages().module, truth: '舱里运的是走私的活体。' } };
+    const archive = buildArchiveMarkdown(input);
+    expect(archive).toContain('走私的活体');
+    // 分享版依然不含真相
+    expect(buildJourneyMarkdown(input)).not.toContain('走私的活体');
+  });
+
+  it('🔴 加了 messages 之后，分享版**仍然不含** truth（这是最要紧的一条）', () => {
+    const input = {
+      ...withMessages(),
+      module: { ...withMessages().module, truth: '绝不能外泄的那句话。' },
+      messages: [
+        { role: 'player', content: '我搜他的口袋。', checks: [] },
+        { role: 'gm', content: '你摸到一张票根。', checks: [] },
+      ],
+    };
+    const md = buildJourneyMarkdown(input);
+    expect(md).toContain('你摸到一张票根。'); // 正文照常进来
+    expect(md).not.toContain('绝不能外泄的那句话。'); // 真相一步都没跟出来
+  });
+});
+
+/*
+ * §6.3（协作方第 21 版 · 报告 §6 采纳后拆刀）：把玩家的行动还给**剩下的三处**。
+ * 上一刀（P2-4）只做了整体流程 + 完整留档，这一刀是 a/b/c。
+ * 仍是纯渲染改动：不升 `SAVE_VERSION`、不动 `prompt.ts:474` 红线。
+ */
+describe('§6.3 把玩家行动还给其余三处', () => {
+  const MSGS: ExportInput['messages'] = [
+    { role: 'gm', content: '你在货舱里醒来。', checks: [] },
+    { role: 'player', content: '我摸黑去摸舱门，看锁是不是从外面扣上的。', checks: [] },
+    {
+      role: 'gm',
+      content: '锁是从外面扣上的。',
+      checks: [{ skill: '侦查', target: 60, roll: 22, label: '成功', tier: '成功', success: true }],
+    },
+    { role: 'player', content: '我用锯条锯那个锁扣。', checks: [] },
+    { role: 'gm', content: '金属断了。', checks: [] },
+  ];
+
+  // ---- a. 结算分享 ----
+
+  it('a·结算分享有「关键行动」，且是**全文**不是 16 字截断', () => {
+    const md = buildResultMarkdown({
+      ...makeInput(),
+      messages: MSGS,
+      anchors: [
+        {
+          label: '第1回 · 我摸黑去摸舱门 · 新线索',
+          text: '我摸黑去摸舱门，看锁是不是从外面扣上的。',
+        },
+      ],
+    });
+    expect(md).toContain('关键行动');
+    // 全文 —— 被截成 16 字的话这句不会完整出现
+    expect(md).toContain('我摸黑去摸舱门，看锁是不是从外面扣上的。');
+  });
+
+  it('a·关键行动带上关键检定的掷出与结果', () => {
+    const md = buildResultMarkdown({
+      ...makeInput(),
+      messages: MSGS,
+      anchors: [
+        {
+          label: '第1回 · 摸舱门 · 新线索',
+          text: '我摸黑去摸舱门。',
+          checks: [
+            { skill: '侦查', target: 60, roll: 98, label: '失败', tier: '失败', success: false },
+          ],
+        },
+      ],
+    });
+    expect(md).toContain('侦查');
+    expect(md).toContain('掷 98');
+    expect(md).toContain('目标 60');
+    expect(md).toContain('失败');
+  });
+
+  it('a·只列锚点那几条，不把整局行动都塞进来（长度仍要短）', () => {
+    const md = buildResultMarkdown({
+      ...makeInput(),
+      messages: MSGS,
+      anchors: [{ label: '第1回 · 摸舱门 · 新线索', text: '我摸黑去摸舱门。' }],
+    });
+    // 没被标成锚点的那一句不该出现
+    expect(md).not.toContain('我用锯条锯那个锁扣。');
+    // 也不该出现「逐回经过」那种整局回放
+    expect(md).not.toContain('### 第 1 回');
+  });
+
+  it('a·锚点没有正文也没有检定时，不空挂一个「关键行动」标题', () => {
+    const md = buildResultMarkdown({ ...makeInput(), messages: MSGS });
+    expect(md).not.toContain('关键行动');
+  });
+
+  // ---- b. 带图战报 ----
+
+  it('b·画面下挂上「当时我说」那句话（`player` 由调用方按回目挂上）', () => {
+    const html = buildIllustratedReportHtml({
+      ...makeInput(),
+      messages: MSGS,
+      scenes: [
+        {
+          label: '第 1 个画面',
+          text: '锁是从外面扣上的。',
+          image: 'data:image/png;base64,AAA',
+          player: '我摸黑去摸舱门，看锁是不是从外面扣上的。',
+        },
+      ],
+    });
+    expect(html).toContain('我摸黑去摸舱门，看锁是不是从外面扣上的。');
+    expect(html).toContain('锁是从外面扣上的。');
+    expect(html).toContain('当时我说');
+  });
+
+  it('b·两个画面各挂各的那一句，顺序不串', () => {
+    const html = buildIllustratedReportHtml({
+      ...makeInput(),
+      messages: MSGS,
+      scenes: [
+        {
+          label: '画面一',
+          text: '锁是从外面扣上的。',
+          image: 'data:image/png;base64,AAA',
+          player: '我摸黑去摸舱门。',
+        },
+        {
+          label: '画面二',
+          text: '金属断了。',
+          image: 'data:image/png;base64,BBB',
+          player: '我用锯条锯那个锁扣。',
+        },
+      ],
+    });
+    expect(html.indexOf('我摸黑去摸舱门')).toBeLessThan(html.indexOf('我用锯条锯那个锁扣'));
+  });
+
+  it('b·画面没配到玩家那句时，不空挂一个引用块', () => {
+    const html = buildIllustratedReportHtml({
+      ...makeInput(),
+      messages: MSGS,
+      scenes: [{ label: '画面', text: '开场。', image: 'data:image/png;base64,AAA' }],
+    });
+    expect(html).not.toContain('当时我说');
+  });
+
+  it('🔴 b·玩家原话在自包含 HTML 里**必须转义**（战报是单文件，注入就是事故）', () => {
+    const html = buildIllustratedReportHtml({
+      ...makeInput(),
+      scenes: [
+        {
+          label: '画面',
+          text: '没人回应。',
+          image: 'data:image/png;base64,AAA',
+          player: '我喊：<script>alert(1)</script>',
+        },
+      ],
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+
+  // ---- c. 编年史（世界页「每一回」）----
+
+  it('c·编年史按回目顺序对齐玩家那句（第 n 条 ↔ 第 n 条玩家消息）', () => {
+    const lines = playerLinesByRound(MSGS!);
+    expect(lines).toEqual([
+      '我摸黑去摸舱门，看锁是不是从外面扣上的。',
+      '我用锯条锯那个锁扣。',
+    ]);
+  });
+
+  it('c·开场白那一回没有玩家发言 → 不占位、不下移（下移会让后面全错一格）', () => {
+    const lines = playerLinesByRound([
+      { role: 'gm', content: '故事开始。', checks: [] },
+      { role: 'player', content: '我往前走。', checks: [] },
+    ]);
+    expect(lines).toEqual(['我往前走。']);
+  });
+
+  it('c·system 消息不参与对齐（它不是一回）', () => {
+    const lines = playerLinesByRound([
+      { role: 'system', content: '系统提示。', checks: [] },
+      { role: 'player', content: '我往前走。', checks: [] },
+    ]);
+    expect(lines).toEqual(['我往前走。']);
+  });
+
+  it('§6.4：检定带上"由何而来"（reason），不再只剩一行数字', () => {
+    const md = buildJourneyMarkdown({
+      ...makeInput(),
+      messages: [
+        { role: 'player', content: '我贴着门听。', checks: [] },
+        {
+          role: 'gm',
+          content: '门后传来缓慢的呼吸声。',
+          checks: [
+            {
+              skill: '侦查',
+              target: 60,
+              roll: 22,
+              label: '成功',
+              tier: '成功',
+              success: true,
+              reason: '门后有响动，先听听是什么',
+            },
+          ],
+        },
+      ],
+    });
+    expect(md).toContain('门后有响动，先听听是什么');
+    // 数字部分照样在 —— 加了理由不代表把骰点挤掉
+    expect(md).toContain('掷 22');
+  });
+
+  it('c·单条消息维度的取值（`roundPlayerLines`）与上面同一条判据', () => {
+    const per = roundPlayerLines(MSGS!);
+    // 开场白那一条还没有玩家
+    expect(per[0]).toBeUndefined();
+    // 之后每条都属于最近的那条玩家消息所在的回目
+    expect(per[1]).toBe('我摸黑去摸舱门，看锁是不是从外面扣上的。');
+    expect(per[2]).toBe('我摸黑去摸舱门，看锁是不是从外面扣上的。');
+    expect(per[3]).toBe('我用锯条锯那个锁扣。');
+    expect(per[4]).toBe('我用锯条锯那个锁扣。');
   });
 });

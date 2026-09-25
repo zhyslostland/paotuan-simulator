@@ -39,11 +39,52 @@ vi.stubGlobal('indexedDB', undefined);
 // 必须在 import store 之前把桩装好（store 模块加载时就会读盘）
 const { useStore } = await import('../src/ui/store.js');
 const { flushSaves } = await import('../src/ui/store.js');
+const { loadJson, consumeLoadError } = await import('../src/ui/state/loaders.js');
 
 const readMessages = (): unknown[] => {
   const raw = mem.getItem('trpg.messages');
   return raw ? (JSON.parse(raw) as unknown[]) : [];
 };
+
+/*
+ * P2-8（协作方第 22 版）：**坏档静默回退**。
+ *
+ * `trpg.gameState` 写成坏 JSON 时，界面一切正常、内容却退回新局
+ * （背包 6→3、地点和时间都变了），而坏串**还留在 localStorage 里**
+ * → 每次刷新再退一次。玩家永远不知道发生了什么。
+ *
+ * 修法两条：① 坏串搬到 `trpg.broken.<原键>` 留底并清掉原键（别反复作祟）；
+ * ② 留一句话给界面说（`consumeLoadError` 取走）。
+ */
+describe('P2-8：坏档要说实话，坏串不许原地作祟', () => {
+  it('读不出来的串 → 搬到 trpg.broken.* 留底，并清掉原键', () => {
+    mem.setItem('trpg.badtest', '{这不是合法JSON');
+    const got = loadJson('trpg.badtest', 'FALLBACK');
+
+    expect(got).toBe('FALLBACK');
+    // 原键清掉了 —— 否则每次刷新再坏一次
+    expect(mem.getItem('trpg.badtest')).toBeNull();
+    // 坏串留了底，玩家想捞还能捞回来
+    expect(mem.getItem('trpg.broken.trpg.badtest')).toBe('{这不是合法JSON');
+  });
+
+  it('坏档会留一句话（取完即清，不会重复弹）', () => {
+    mem.setItem('trpg.badtest2', '{{{');
+    loadJson('trpg.badtest2', null);
+
+    const msg = consumeLoadError();
+    expect(msg).toBeTruthy();
+    expect(msg).toContain('读不出来');
+    // 取完即清 —— 刷新不会重复弹同一句
+    expect(consumeLoadError()).toBeNull();
+  });
+
+  it('好档**不会**误报（没有坏串就不许说话）', () => {
+    mem.setItem('trpg.oktest', '{"a":1}');
+    expect(loadJson('trpg.oktest', null)).toEqual({ a: 1 });
+    expect(consumeLoadError()).toBeNull();
+  });
+});
 
 describe('落盘节流：同一 key 窗口内只落最后一次', () => {
   beforeEach(() => {

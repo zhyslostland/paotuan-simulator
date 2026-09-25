@@ -4,6 +4,7 @@ import {
   createInitialState,
   detectStatusEvents,
   DYING_FREEZE_REASON,
+  UNNAMED_FOE,
   type GameState,
 } from '../src/core/state/gameState.js';
 import { coc7 } from '../src/core/rulesets/index.js';
@@ -78,7 +79,17 @@ describe('非法变更一律拒绝，不抛异常', () => {
       { target: '__proto__.x', op: 'set', value: 1 },
     ]);
     expect(rejected).toHaveLength(2);
-    expect(state).toEqual(base());
+    /*
+     * 被拒之后状态**实质**不变。
+     *
+     * 注意不能拿整个对象去比 `base()` —— `applyDeltas` 会给时钟补初值
+     * （`clock` 原先没有，进来后被填成"第 1 天 09:00"）。
+     * 那是**约定的补齐**，不是"被拒绝的 delta 生效了"，
+     * 所以这里只比那些可能被篡改的字段。
+     */
+    const b = base();
+    expect(state).toEqual({ ...b, clock: state.clock });
+    expect(state.clock).toEqual({ day: 1, minute: 9 * 60 });
   });
 
   it('拒绝数值条上的非法操作', () => {
@@ -377,6 +388,162 @@ describe('战斗敌人（foes）', () => {
       { target: 'combat.foes', op: 'dec', value: '不存在的', amount: 3 },
     ]);
     expect(r.rejected).toHaveLength(1);
+  });
+
+  /*
+   * 用户 2026-09-16 实测：「敌对者没有命名」。
+   *
+   * 模型的固定行为是：正文里把那只东西描述得清清楚楚，
+   * `combat.foes add` 的 `name` 却空着 —— 因为它把这条 delta
+   * 当成"记一笔血量"。原来引擎直接 reject，于是玩家**对着空气打**。
+   *
+   * 判据：**模型漏一个字段，代价不该由玩家承担**。
+   * 缺名字也要让它进列表，能被打、有血条。
+   */
+  it('模型忘了写 name —— 照样进列表，不许拒绝（退到占位名）', () => {
+    const r = applyDeltas(base(), [
+      { target: 'combat.foes', op: 'add', value: { hp: 12, max: 12 } as never },
+    ]);
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.combat.foes).toHaveLength(1);
+    expect(r.state.combat.foes[0]!.name).toBe(UNNAMED_FOE);
+    expect(r.state.combat.foes[0]!.hp).toBe(12);
+    // 图鉴台账也要照记 —— 玩家确实见到了它
+    expect(r.state.encountered).toContain(UNNAMED_FOE);
+  });
+
+  it('name 是空白串也按缺名字处理', () => {
+    const r = applyDeltas(base(), [
+      { target: 'combat.foes', op: 'add', value: { name: '   ', hp: 5, max: 5 } as never },
+    ]);
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.combat.foes[0]!.name).toBe(UNNAMED_FOE);
+  });
+
+  it('value 整个不是对象时也不崩，照样兜住', () => {
+    const r = applyDeltas(base(), [
+      { target: 'combat.foes', op: 'add', value: undefined as never },
+    ]);
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.combat.foes[0]!.name).toBe(UNNAMED_FOE);
+    // 没给血量 → 缺省 10
+    expect(r.state.combat.foes[0]!.hp).toBe(10);
+  });
+
+  it('占位名接得住后续的扣血与移除（能开打，不是死路）', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { hp: 8, max: 8 } as never },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: UNNAMED_FOE, amount: 3 },
+    ]));
+    expect(s.combat.foes[0]!.hp).toBe(5);
+    // 扣血 = 交手过，弱点该解锁了
+    expect(s.fought).toContain(UNNAMED_FOE);
+
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'remove', value: UNNAMED_FOE },
+    ]));
+    expect(s.combat.foes).toHaveLength(0);
+  });
+
+  it('模型写了 name 的一律尊重，不会被占位名覆盖', () => {
+    const r = applyDeltas(base(), [
+      { target: 'combat.foes', op: 'add', value: { name: '井底的东西', hp: 20, max: 20 } },
+    ]);
+    expect(r.state.combat.foes[0]!.name).toBe('井底的东西');
+  });
+
+  it('同一轮里两次无名的 add 会合并成同一只（都叫占位名）', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { hp: 10, max: 10 } as never },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { hp: 6, max: 6 } as never },
+    ]));
+    // 同名走"已存在"分支，只更新数值，不会堆出两只无名的东西
+    expect(s.combat.foes).toHaveLength(1);
+    expect(s.combat.foes[0]!.hp).toBe(6);
+  });
+
+  /*
+   * 用户拍板 · 协作方第 21 版 P2-7：敌人静默回满血。
+   *
+   * 模型最常见的写法是**每轮都把场上的敌人再 add 一遍**（它只是想确认"它还在"）。
+   * 以前这条直接覆盖 hp/max，叠加 `fillFoeNumbers` 按模组表补数值，
+   * 结果就是玩家打掉的伤害被悄悄还回去（状态变化卡一个字不提）＋ 战斗永远打不完。
+   *
+   * 判据：**同名 add 只收窄，绝不覆盖** —— hp 取小、max 取大、没申报的不动。
+   */
+  it('同名重复 add 绝不回血（打掉的伤害不会被还回来）', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '货舱里的东西', hp: 14, max: 14 } },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: '货舱里的东西', amount: 11 },
+    ]));
+    expect(s.combat.foes[0]!.hp).toBe(3);
+    // 下一轮模型又 add 了同一只，还照模组表写了满值
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '货舱里的东西', hp: 14, max: 14 } },
+    ]));
+    expect(s.combat.foes).toHaveLength(1);
+    expect(s.combat.foes[0]!.hp).toBe(3);
+  });
+
+  it('同名 add 不会把 max 往小改（上限只许放宽，不许缩）', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '巨影', hp: 20, max: 20 } },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '巨影', hp: 2, max: 2 } },
+    ]));
+    expect(s.combat.foes[0]!.max).toBe(20);
+    // hp 取小，所以这条确实生效了
+    expect(s.combat.foes[0]!.hp).toBe(2);
+  });
+
+  it('第一次 add 才是新建（满血进场）', () => {
+    const r = applyDeltas(base(), [
+      { target: 'combat.foes', op: 'add', value: { name: '井底的东西', hp: 14, max: 14 } },
+    ]);
+    expect(r.state.combat.foes[0]).toMatchObject({ name: '井底的东西', hp: 14, max: 14 });
+  });
+
+  it('remove 之后重新 add 是新建，此时才是满血', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '巨影', hp: 20, max: 20 } },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: '巨影', amount: 18 },
+    ]));
+    ({ state: s } = applyDeltas(s, [{ target: 'combat.foes', op: 'remove', value: '巨影' }]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '巨影', hp: 20, max: 20 } },
+    ]));
+    expect(s.combat.foes).toHaveLength(1);
+    expect(s.combat.foes[0]!.hp).toBe(20);
+  });
+
+  it('没申报的字段一个字都不动', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '巨影', hp: 20, max: 20 } },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: '巨影', amount: 7 },
+    ]));
+    // 只给了 name，没给 hp / max
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '巨影' } as never },
+    ]));
+    expect(s.combat.foes[0]!.hp).toBe(13);
+    expect(s.combat.foes[0]!.max).toBe(20);
   });
 });
 

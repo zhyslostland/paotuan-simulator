@@ -224,6 +224,27 @@ export const coc7: Ruleset = {
   carryCapacity(ch) {
     return Math.max(10, Math.round((g(ch, 'str') + g(ch, 'siz')) / 2));
   },
+  /*
+   * 1.0 阶段 B：**只声明，不改行为**（真正生效在阶段 C）。
+   *
+   * 原则（协作方第 24 版 §4③）：**只放引擎要解释的字段**（伤害、扣减、时长、解除）；
+   * 「中毒长什么样」交给模型与世界书 —— 一旦往里写症状描述，就变成规则书入库了（版权三层铁律）。
+   */
+  weaponTable: [
+    { name: '拳头', damage: '1d3', skill: '格斗（斗殴）', hands: 1, tags: ['近战'] },
+    { name: '小刀', damage: '1d4', skill: '格斗（斗殴）', hands: 1, tags: ['近战'] },
+    { name: '手枪', damage: '1d10', skill: '射击（手枪）', hands: 1, ammo: 7, tags: ['枪械'] },
+    { name: '霰弹枪', damage: '4d6', skill: '射击（霰弹枪）', hands: 2, ammo: 2, tags: ['枪械'] },
+    { name: '步枪', damage: '2d6+4', skill: '射击（步枪）', hands: 2, ammo: 5, tags: ['枪械'] },
+    { name: '撬棍', damage: '1d6', skill: '格斗（斗殴）', hands: 1, tags: ['近战'] },
+    { name: '斧头', damage: '1d8', skill: '格斗（斗殴）', hands: 1, tags: ['近战'] },
+  ],
+  statusEffects: [
+    { name: '中毒', perRound: { hp: -1 }, duration: 3, cure: '找到解毒剂，或撑过三轮自己缓过来' },
+    { name: '昏迷', perRound: {}, duration: 0, cure: '被摇醒，或一次成功的急救' },
+    { name: '重伤', perRound: { hp: -1 }, duration: 0, cure: '包扎或接受急救（成功一次即止住）' },
+    { name: '恐惧', perRound: { san: -1 }, duration: 2, cure: '离开让你害怕的东西，或撑过两轮' },
+  ],
 };
 
 /** 取属性值，缺省回退 50（未填的属性按常人水平处理） */

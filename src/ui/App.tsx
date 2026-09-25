@@ -1,11 +1,43 @@
-import { useEffect, useRef, useState } from 'react';
-import { useStore, addressOf, resolveCheckTarget, checkTargetText } from './store';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import {
+  useStore,
+  addressOf,
+  resolveCheckTarget,
+  checkTargetText,
+  currentWorldName,
+  isLifeFull,
+} from './store';
+import { findWorld } from '../core/campaign.js';
+import { chronicleKeepFrom, shouldFold } from '../core/chronicle.js';
+import { consumeLoadError } from './state/loaders.js';
+import { statusNote as statusEffectsNote } from '../core/statusEffects.js';
 import { Chat } from './Chat';
+import { ImageJobsBadge } from './ImageJobsBadge';
 import { CharacterSheet, CheckDialog, type Difficulty } from './CharacterSheet';
 import { WorldPanel } from './WorldPanel';
-import { Settings } from './Settings';
-import { Preparation } from './Preparation';
 import { ConfirmDialog } from './ConfirmDialog';
+/*
+ * 三个最大的弹层改成**按需加载**（`React.lazy`）。
+ *
+ * 为什么：主包 700KB，`Preparation` 88KB / `Settings` 66KB / `TestSandbox` 22KB
+ * 全都打在里面，而它们**不是首屏必需的**（有进行中的局时准备页根本不打开、
+ * 测试沙盒只有开发者模式才用）。拆出去后首屏要解析的 JS 少四分之一。
+ *
+ * 两条边界（别顺手扩大范围）：
+ *   1. **帮助 / 更新日志 / 结档页不拆** —— 帮助是首次进入就要显示的，
+ *      结档页是"故事收束"那一屏，让它们等一次网络请求是拿体验换字节数。
+ *   2. `Settings` 仍然是**打开过就保持挂载**（下面 `settingsMounted`），
+ *      不然每次打开都跳回顶部、正在生成的图片也会丢（协作方 R40）。
+ */
+const Settings = lazy(() => import('./Settings').then((m) => ({ default: m.Settings })));
+const Preparation = lazy(() => import('./Preparation').then((m) => ({ default: m.Preparation })));
+const TestSandbox = lazy(() => import('./TestSandbox').then((m) => ({ default: m.TestSandbox })));
+/** 分包还在路上时的占位 —— 一行字就够，别为它做动画 */
+const ChunkLoading = () => (
+  <div className="fixed inset-0 z-[80] flex items-center justify-center bg-ink-950/60 text-[12px] text-mist-400">
+    载入中…
+  </div>
+);
 import {
   buildSystemPrompt,
   buildMessages,
@@ -34,9 +66,7 @@ import {
   actionImagePrompt,
   endingSystemPrompt,
 } from '../orchestrator/generate.js';
-import { generateImage } from '../providers/model.js';
 import { EndingScreen } from './EndingScreen';
-import { TestSandbox } from './TestSandbox';
 import { applyUpdate, checkForUpdate, watchForUpdates } from '../update.js';
 import { anchorReasons } from './anchorReasons.js';
 import { parseActs, normalizeActIndex } from '../core/acts.js';
@@ -46,6 +76,7 @@ import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 import type { Ending } from '../core/state/gameState.js';
 import { encumbranceNote } from '../core/encumbrance.js';
+import { isHealOnlyConsumable, itemsMentionedIn } from '../core/items.js';
 
 type Panel = 'chat' | 'character' | 'world';
 
@@ -68,11 +99,14 @@ const FALLBACK_ENDING: Record<string, string> = {
   other: '事情告一段落。留下来的东西比带走的要多。',
 };
 
-/** 事件日志超过这个条数就把早期的折进摘要 */
-const CHRONICLE_FOLD_AT = 50;
-/** 折叠后保留的近期明细条数 */
-const CHRONICLE_KEEP = 20;
-
+/**
+ * 编年史折叠阈值（P2-6＝P3-5，协作方第 20 版）。
+ *
+ * 旧判据是**条数**（`CHRONICLE_FOLD_AT = 50` / `CHRONICLE_KEEP = 20`），原文裁定
+ * 「正常玩不到」—— 一条编年史短则十几个字、长则几百字，按条数算既可能白折、
+ * 也可能早就撑爆提示词。现在**按字符**：合计 ≥ 4000 字折一次，保留近 2000 字。
+ * 判据本体在 `core/chronicle.ts`（纯函数，可单测）。
+ */
 export default function App() {
   const {
     messages,
@@ -98,12 +132,27 @@ export default function App() {
   } = useStore();
 
   const [showSettings, setShowSettings] = useState(false);
+  /** 设置页是不是已经加载过（加载过就一直挂着，见文件头那两条边界） */
+  const [settingsMounted, setSettingsMounted] = useState(false);
+  useEffect(() => {
+    if (showSettings) setSettingsMounted(true);
+  }, [showSettings]);
   const [showPrep, setShowPrep] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<Panel>('chat');
   const [draft, setDraft] = useState('');
   const [checkSkill, setCheckSkill] = useState<string | null>(null);
   const [pendingStart, setPendingStart] = useState(false);
   const [toast, setToast] = useState('');
+  /**
+   * 统一的浮字。**每条都要自己收**（`setTimeout` 清掉），
+   * 免得出现一个永远挂在屏幕上方的提示 —— 那种东西玩家最后会当成装饰。
+   */
+  const toastFor = (text: string, ms = 2400) => {
+    setToast(text);
+    setTimeout(() => setToast(''), ms);
+  };
+  /** 每次 +1 = 请故事页的输入框聚焦（点背包「使用」时用；不开新弹层，复用草稿） */
+  const [chatFocus, setChatFocus] = useState(0);
   const [updateReady, setUpdateReady] = useState(false);
   const [autoUpdating, setAutoUpdating] = useState(false);
   const [showEnding, setShowEnding] = useState(false);
@@ -122,6 +171,23 @@ export default function App() {
   );
   const [welcome, setWelcome] = useState(() => !localStorage.getItem('trpg.welcomed'));
   const abortRef = useRef<AbortController | null>(null);
+  /*
+   * P3-2：没填 Key 时**自动弹设置页**，整个会话只许弹一次。
+   *
+   * 病灶：`sendToGm` 里一句 `setShowSettings(true)`，而它有几个来路 ——
+   * 玩家点发送、点「一次全掷」、点地图移步、点使用道具（`handleSend`）。
+   * 于是"没配 Key"时，随便点什么都会**把设置页糊到脸上**：
+   * 刚掷出的点数还没看清就被盖住，撞的就是本项目那条铁律「状态可见」。
+   *
+   * 现在分两档：
+   *   - **玩家明确点发送** → 弹设置（他就是要说话，正需要知道为什么发不出去）；
+   *   - 其余来路（全掷 / 移步 / 用药） → **只给一句提示**，不抢屏幕。
+   * 且**每会话一次**：弹过一次之后就只提示，不再反复糊。
+   *
+   * 为什么用 ref 不用 state：它只影响"要不要弹"，不需要触发重渲染；
+   * 也刻意**不进存档**——刷新一次重来一遍是合理的（那时玩家确实该去配了）。
+   */
+  const settingsAutoOpenedRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -133,6 +199,33 @@ export default function App() {
     const sync = () => setInstallable(canInstall());
     sync();
     return onInstallAvailable(sync);
+  }, []);
+
+  /*
+   * 后台留的提示（P2-3）。
+   *
+   * 生图是**后台任务**：它可能在玩家正翻着设置页时落盘，
+   * 组件里那句 `setToast` 不在场 —— 所以 store 自己留一句话，这里取走并弹出。
+   * 取完即清（`takeNotice`），刷新不会重复弹。
+   */
+  const uiNotice = useStore((s) => s.uiNotice);
+  useEffect(() => {
+    if (!uiNotice) return;
+    toastFor(uiNotice, 6000);
+    useStore.getState().takeNotice();
+  }, [uiNotice]);
+
+  /*
+   * 坏档提示（P2-8）。
+   *
+   * 存档读不出来时，界面以前是**一切正常、内容却悄悄退回新局** ——
+   * 玩家发现背包少了东西、地点和时间都变了，却完全不知道为什么。
+   * 现在启动后立刻说一句实话（坏串已经由 `loadJson` 搬到 `trpg.broken.*` 留底了）。
+   * 取完即清，刷新不会重复弹。
+   */
+  useEffect(() => {
+    const msg = consumeLoadError();
+    if (msg) toastFor(msg, 8000);
   }, []);
 
   /* 状态变化提示：自动收起（玩家也可以手动关） */
@@ -156,6 +249,11 @@ export default function App() {
    * 只看 `text` 有值的：空 text 表示"结论已定但守密人还没写结局"，那还是留在故事页。
    */
   const endedText = gameState.ending?.text ?? '';
+  /**
+   * 这一局已经结档（正文可能还没写完）。
+   * 交给 `Chat` 去禁用输入框并写明原因（P3-4）——以前结档后还能打字、按回车什么都不发生。
+   */
+  const ended = Boolean(gameState.ending);
   useEffect(() => {
     if (endedText) setShowEnding(true);
   }, [endedText]);
@@ -297,13 +395,22 @@ export default function App() {
     });
   };
 
-  /** 事件日志超过阈值时，把早期的折进摘要层，只留近期明细 */
+  /**
+   * 编年史累计到阈值时，把早期的折进摘要层，只留近期明细。
+   *
+   * P2-6＝P3-5（协作方第 20 版）：判据从**条数**改成**字符**（见 `core/chronicle.ts`），
+   * 并且**成功失败都要让玩家知道** —— 以前失败只 `console.warn`，玩家眼前什么都不发生，
+   * 于是提示词越撑越满也没人察觉。
+   */
   const foldChronicleIfNeeded = async () => {
     const s = useStore.getState();
-    const total = s.chronicle.length;
-    if (total < CHRONICLE_FOLD_AT) return;
-    const foldCount = total - CHRONICLE_KEEP;
-    const head = s.chronicle.slice(0, foldCount);
+    /*
+     * `shouldFold` 同时挡住两种「其实没得折」的情形：没到阈值、以及最新那条自己就够长
+     * （折了它玩家眼前的事会凭空消失）。这两种都**不发请求、不 toast**。
+     */
+    if (!shouldFold(s.chronicle)) return;
+    const keepFrom = chronicleKeepFrom(s.chronicle);
+    const head = s.chronicle.slice(0, keepFrom);
     const events = head.map((c) => `${c.turn}. ${c.text}`).join('\n');
     try {
       const merged = await chat(
@@ -316,10 +423,15 @@ export default function App() {
         ],
         { ...s.config, maxTokens: 1024, temperature: 0.4 }
       );
-      if (merged.trim()) useStore.getState().foldChronicle(foldCount, merged.trim());
+      if (merged.trim()) {
+        useStore.getState().foldChronicle(keepFrom, merged.trim());
+        toastFor('前情已折进摘要', 2600);
+      }
     } catch (e) {
-      // 压缩失败不是致命问题：日志还在，下次会重试
+      // 压缩失败不是致命问题：日志还在，下次会重试。但**必须告诉玩家** ——
+      // 静默失败会让提示词一路撑到被砍序裁掉（P2-6 原文：「压缩失败静默」）。
       console.warn('[跑团] 摘要压缩失败，保留完整日志', e);
+      toastFor('摘要没折成，完整日志还留着', 3200);
     }
   };
 
@@ -345,7 +457,13 @@ export default function App() {
     return true;
   };
 
-  const sendToGm = async (engineNote?: string) => {
+  /**
+   * 发一轮给守密人。
+   *
+   * `opts.playerInitiated` ＝ 这一轮是**玩家明确点了发送**（而不是全掷 / 移步 / 用药触发的）。
+   * 只有它是 true 时，缺 Key 才会自动弹设置页 —— 见 `settingsAutoOpenedRef` 那段注释（P3-2）。
+   */
+  const sendToGm = async (engineNote?: string, opts?: { playerInitiated?: boolean }) => {
     if (streaming) return;
     if (blockedByEnding()) return;
     if (!config.apiKey) {
@@ -353,7 +471,17 @@ export default function App() {
         role: 'system',
         content: '请先在设置里填写 API Key',
       });
-      setShowSettings(true);
+      /*
+       * P3-2：**只有玩家自己点发送**、且这个会话还没弹过，才把设置页推上来。
+       * 其余来路只留一句提示 —— 别去盖住他刚掷出的点数 / 刚看到的画面。
+       */
+      if (opts?.playerInitiated && !settingsAutoOpenedRef.current) {
+        settingsAutoOpenedRef.current = true;
+        setShowSettings(true);
+      } else {
+        setToast('还没配 API Key —— 去「设置」里填一下');
+        setTimeout(() => setToast(''), 3000);
+      }
       return;
     }
 
@@ -362,6 +490,19 @@ export default function App() {
     // 回合开始：拍下状态快照，供「回溯 / 重掷」恢复
     const lastPlayer = [...snapshot].reverse().find((m) => m.role === 'player');
     if (lastPlayer) useStore.getState().snapshotTurn(lastPlayer.id);
+    /*
+     * 第 17 版 D：玩家这一句点名了哪些背包物品。
+     *
+     * 在这一层算（而不是在 `handleSend` 里顺着参数传一路）：
+     * `handleSend` 那条路只覆盖"玩家打字"，而地图移步、全掷走的是别的入口 ——
+     * 它们同样会写一条 player 消息。从**消息本身上**读，所有来路一网打尽。
+     *
+     * 它的唯一用途是"模型忘了扣就说一声"（见 `applyModelDeltas` 里的反馈）；
+     * **不会**据此替玩家扣东西。
+     */
+    const mentionedItems = lastPlayer
+      ? itemsMentionedIn(lastPlayer.content, useStore.getState().gameState.inventory)
+      : [];
     /*
      * 濒死引导：**一次性**，取走即清。
      * 上一轮结束时引擎把玩家标成了濒死并冻结了生命，这一轮要守密人给出施救的路，
@@ -385,7 +526,17 @@ export default function App() {
      * 否则玩家只会看到"目标值怎么莫名低了"。
      */
     const madNote = useStore.getState().insanity().note;
-    const notes = [engineNote, dyingNote, loadNote, woundNote, madNote].filter(Boolean) as string[];
+    /*
+     * 状态效果提示（1.0 阶段 C）：**每轮都跟着**，而且是**防双计的关键一环**。
+     *
+     * 中毒 / 燃烧这些后果现在是引擎扣的 —— 如果不同时告诉守密人"这一刀已经算过"，
+     * 它会在正文里再写一遍"你又吐了一口血"，玩家就被扣了两次。
+     * 协作方第 24 版把这条点名了：C 的风险不在掷骰，在双计。
+     */
+    const statusNote = statusEffectsNote(rs, useStore.getState().gameState.flags);
+    const notes = [engineNote, dyingNote, loadNote, woundNote, madNote, statusNote].filter(
+      Boolean
+    ) as string[];
     const finalNote = notes.length ? notes.join('\n\n') : undefined;
     // 世界书只注入命中关键词的条目，全量塞进去会撑爆上下文
     const context = snapshot.slice(-4).map((m) => m.content);
@@ -393,6 +544,8 @@ export default function App() {
 
     const systemPrompt = buildSystemPrompt({
       rulesetName: rs.name,
+      // 规则包本体（属性标签/技能量纲/派生值都要按它分岔，光有名字不够）
+      ruleset: rs,
       genre: getGenre(useStore.getState().genreId, useStore.getState().customGenres),
       // 守密人口吻（R8）：只改"怎么说"，不改任何规则；没选过就是默认那一个
       gmVoice: useStore.getState().gmVoice,
@@ -560,24 +713,22 @@ export default function App() {
              * - **失败静默**：没配生图模型 / 接口报错都只是少一张图，绝不弹错打断回合。
              */
             if (useStore.getState().autoIllustrate) {
-              const cfg = useStore.getState().config;
-              if (cfg.imageModel?.trim()) {
-                void (async () => {
-                  try {
-                    const url = await generateImage(
-                      actionImagePrompt(
-                        finalBody,
-                        { gender: character.gender, description: character.description },
-                        getGenre(useStore.getState().genreId, useStore.getState().customGenres)
-                      ),
-                      { ...cfg, model: cfg.imageModel!.trim(), size: cfg.imageSize || '1024x1024' }
-                    );
-                    if (url) useStore.getState().setMessageSceneImage(gmId, url);
-                  } catch {
-                    /* 少一张图而已，不打扰玩家 */
-                  }
-                })();
-              }
+              /*
+               * 走**生图队列**（R40），不再在这里 await 一次网络请求。
+               * 以前这段是就地 await：一张在飞的图完全不可见，切页签回来也不知道画没画完；
+               * 现在它进队列 → 右上角角标转圈 → 画好了自动落到那条消息上。
+               * 没配生图模型时 `queueImage` 返回 null，这里当无事发生（少一张图而已）。
+               */
+              useStore.getState().queueImage({
+                kind: 'action',
+                target: gmId,
+                label: `第 ${Math.max(1, useStore.getState().chronicle.length)} 回的分镜`,
+                prompt: actionImagePrompt(
+                  finalBody,
+                  { gender: character.gender, description: character.description },
+                  getGenre(useStore.getState().genreId, useStore.getState().customGenres)
+                ),
+              });
             }
           }
         }
@@ -609,7 +760,32 @@ export default function App() {
          * 读档、回溯、测试沙盒灌数据时不该响音效。
          */
         const before = useStore.getState().gameState;
-        if (contract.state_delta?.length) applyModelDeltas(contract.state_delta as never);
+        /*
+         * 故事时钟：把守密人这一轮申报的"过了多久"交给引擎折算。
+         *
+         * 只在这里的第一条调用里传（`applyModelDeltas` 自己会去重窗口内的重复），
+         * 因为 `state_delta` 与 `location` 是分开两条调的，传两遍时间就翻倍。
+         * 契约里的 `deadline_days` 是**修正**用的，单独走 `setDeadlineDays`。
+         */
+        if (contract.deadline_days !== undefined) {
+          useStore.getState().setDeadlineDays(contract.deadline_days);
+        }
+        if (contract.state_delta?.length) {
+          applyModelDeltas(contract.state_delta as never, {
+            elapsed: contract.elapsed,
+            mentionedItems,
+          });
+        } else if (contract.elapsed) {
+          // 这一轮没有状态变更，但时间照样在走 —— 空数组也能推进时钟
+          applyModelDeltas([], { elapsed: contract.elapsed, mentionedItems });
+        } else if (mentionedItems.length > 0) {
+          /*
+           * 既没 elapsed 也没 state_delta，但玩家确实点名了东西 ——
+           * 还是要走一次（空数组），好让"「××」还在背包里"那句提示出得来。
+           * 少了这一支，最常见的"我看看绷带"就永远等不到那句确认。
+           */
+          applyModelDeltas([], { mentionedItems });
+        }
         if (contract.location && contract.location !== gameState.location) {
           applyModelDeltas([
             { target: 'location', op: 'set', value: contract.location },
@@ -770,6 +946,23 @@ export default function App() {
   }, [endingAt, endingText, endingKind]);
 
   const handleSend = async (text: string) => {
+    /*
+     * P1-1（🔴 协作方第 18 版裁「修。P1」）：流式期间的**静默吞掉**。
+     *
+     * 以前这里没有这道闸：`addMessage` 先把玩家这句话写进对话，
+     * 隔几行的 `sendToGm` 首行再 `if (streaming) return` 把它扔掉 ——
+     * 玩家看到自己说了话，守密人永远不回。点「使用道具」更狠：
+     * 道具**已经扣了**（`CharacterSheet` 那条路径），这一轮却没发出去。
+     * 契约窗口 14–90 秒，撞上的概率很高。
+     *
+     * 现在三道一起：**不写消息、不清草稿、给一句人话**。
+     * 界面侧的置灰在 `Chat` / `CharacterSheet` / 地图上（同一刀）。
+     */
+    if (streaming) {
+      setToast('守密人还在写 —— 等这一轮写完再动');
+      setTimeout(() => setToast(''), 2400);
+      return;
+    }
     // 先拦，避免留下一条永远等不到回应的玩家消息
     if (blockedByEnding()) return;
     /*
@@ -783,8 +976,46 @@ export default function App() {
       setPendingSuicide(text);
       return;
     }
+    /*
+     * 自由行动里**点到了**背包物品（协作方第 17 版 C）。
+     *
+     * 判据是"这句话里出现了这件东西的全名"，**刻意不做动词表**（拿出/铺开/交给…）：
+     * 「看看绷带上的字」不能扣，「把绷带铺在地上」要扣——枚举不完。
+     * 所以引擎只报名单 + 一条判据，扣不扣交给守密人；引擎自己只做**一件**事，
+     * 就是纯回血药在**已经满血**时别扣（主人拍板：「没掉血就不能用，数量不减」）。
+     *
+     * 为什么和 A+B 同一刀（协作方原本把它排在后面的第 4 刀）：
+     * A+B 撤掉了"点使用就本地预扣"，实物（绷带）从此**只能靠这一轮的契约扣**。
+     * 少了这条名单，就会出现"东西永远用不完"——那是比白扣更老的 bug。两者必须一起上。
+     */
+    const snap = useStore.getState();
+    const mentioned = itemsMentionedIn(text, snap.gameState.inventory);
+    let itemNote = '';
+    if (mentioned.length > 0) {
+      const isHealOnly = (n: string) =>
+        isHealOnlyConsumable(snap.gameState.inventory.find((i) => i.name === n));
+      const healOnly = mentioned.filter(isHealOnly);
+      const lifeFull = isLifeFull(snap.gameState, snap.character, snap.rulesetId);
+      if (healOnly.length > 0 && !lifeFull) {
+        snap.applyModelDeltas(
+          healOnly.map((n) => ({
+            target: 'inventory',
+            op: 'dec',
+            value: n,
+            amount: 1,
+          })) as never
+        );
+      }
+      itemNote =
+        `【引擎核对】这句话点到了背包里的：${mentioned.join('、')}。` +
+        '被用掉 / 拆开 / 铺开 / 交出去 → 必须 `inventory dec`；只是看一眼 → 不要扣。' +
+        '没有的东西（比如衣服不在背包里）不要编进背包。' +
+        (healOnly.length > 0 && lifeFull
+          ? `（其中 ${healOnly.join('、')} 只能回血，此刻他没有受伤 —— 本轮不要扣它。）`
+          : '');
+    }
     addMessage({ role: 'player', content: text });
-    await sendToGm();
+    await sendToGm(itemNote || undefined, { playerInitiated: true });
   };
 
   const handleCheck = async (
@@ -792,11 +1023,17 @@ export default function App() {
     difficulty: Difficulty,
     target = '',
     action = '',
-    bonus = 0
+    bonus = 0,
+    reason = ''
   ) => {
     if (streaming) return;
     if (blockedByEnding()) return;
     const badge = skillCheck(skill, difficulty, bonus);
+    /*
+     * §6.4：守密人给这次检定的理由跟着卡片一起落库。
+     * 它此前只活在"待掷"那张卡片上，掷完就丢 —— 记录层里只剩冷冰冰的数字。
+     */
+    if (reason.trim()) badge.reason = reason.trim();
     // 判定音效：只在大成功 / 大失败这两个"值得记住的瞬间"响
     const audioCfg = useStore.getState().audio;
     if (audioCfg.enabled) {
@@ -834,8 +1071,10 @@ export default function App() {
    * `index` 是它在待掷队列里的位置——掷掉它，后面的继续排队。
    */
   const quickCheck = async (skill: string, difficulty?: string, index = 0) => {
+    // 先把理由取出来再出队 —— 出队后那张卡片就没了，理由也就跟着丢了（§6.4）
+    const reason = useStore.getState().pendingChecks[index]?.reason ?? '';
     useStore.getState().removePendingCheck(index);
-    await handleCheck(skill, (difficulty as Difficulty) ?? 'regular', '', '');
+    await handleCheck(skill, (difficulty as Difficulty) ?? 'regular', '', '', 0, reason);
   };
 
   /**
@@ -848,9 +1087,12 @@ export default function App() {
     const list = [...store.pendingChecks];
     if (list.length === 0) return;
     store.clearPendingChecks();
-    const badges = list.map((pc) =>
-      useStore.getState().skillCheck(pc.skill, (pc.difficulty as Difficulty) ?? 'regular')
-    );
+    // 理由跟着卡片走（§6.4）—— `list` 是出队前的快照，这里还拿得到
+    const badges = list.map((pc) => {
+      const b = useStore.getState().skillCheck(pc.skill, (pc.difficulty as Difficulty) ?? 'regular');
+      if (pc.reason?.trim()) b.reason = pc.reason.trim();
+      return b;
+    });
     addMessage({ role: 'player', content: `（连续检定：${badges.map((b) => b.skill).join('、')}）`, checks: badges });
     const lines = badges
       .map((b) => `${b.skill}：${checkTargetText(b)}，掷出 ${b.roll}，结果 ${b.label}`)
@@ -879,6 +1121,15 @@ export default function App() {
   };
 
   const doStartNew = () => {
+    /*
+     * 世界层（Phase 2）：开团前先看清"会不会接上上次的事" ——
+     * 这句话要写给玩家看（状态可见），别让他事后自己猜为什么开场多了几个人。
+     */
+    const before = useStore.getState();
+    const carriedWorld = before.carryWorld
+      ? findWorld(Object.values(before.worlds), currentWorldName(before))
+      : undefined;
+    const willCarry = Boolean(carriedWorld?.snapshot);
     useStore.getState().startNewGame();
     /*
      * R14：开新团就把**第一幕**的导演稿展开（长篇尤其需要）。
@@ -892,7 +1143,9 @@ export default function App() {
     setShowEnding(false);
     setMobilePanel('chat');
     setDraft('');
-    setToast('已开新团，按模组开场');
+    setToast(
+      willCarry ? `已开新团 · 接上了《${carriedWorld!.name}》上次的事` : '已开新团，按模组开场'
+    );
     setTimeout(() => setToast(''), 2200);
     // 开团音：翻开了第一页
     const a = useStore.getState().audio;
@@ -976,6 +1229,20 @@ export default function App() {
   };
 
   /**
+   * 点背包里的「使用」：把**意图**写进对话草稿，切回故事页并聚焦（协作方第 17 版 A）。
+   *
+   * 复用对话草稿，**不开新弹层**（抄的是上面那个 `promptCompanion`）。
+   * 以前是直接发一句无主语的「（使用：××）」——守密人只能猜玩家要拿它干什么，
+   * 而"拿它干什么"恰恰是这件东西的全部乐趣（主人拍板：实物有自由度，
+   * 「拿出绷带止血」要扣、「撕破衣服止血」不扣）。
+   */
+  const promptUse = (text: string) => {
+    setDraft((d) => (d.trim() ? d : text));
+    setMobilePanel('chat');
+    setChatFocus((c) => c + 1);
+  };
+
+  /**
    * 点地图上的地点：发出的是**意图**，不是"已经到达"。
    *
    * 为什么改：以前直接写成「我前往X」，等于替玩家落定了行程，
@@ -984,7 +1251,12 @@ export default function App() {
    * 路封了、天黑了、有人拦着、他根本不知道路，都可以用剧情里的理由挡下来。
    */
   const travelTo = (location: string) => {
-    if (streaming) return;
+    // 流式期间点地图：以前是"点了毫无变化"，现在是置灰 + 一句人话（P1-1）
+    if (streaming) {
+      setToast('守密人还在写 —— 等这一轮写完再动');
+      setTimeout(() => setToast(''), 2400);
+      return;
+    }
     setMobilePanel('chat');
     /*
      * 只发**最简意图**。
@@ -1107,7 +1379,7 @@ export default function App() {
         <aside className="hidden w-64 shrink-0 overflow-y-auto border-r border-ink-700 bg-ink-900 lg:block xl:w-72">
           <CharacterSheet
             onRequestCheck={setCheckSkill}
-            onUseItem={(text) => void handleSend(text)}
+            onPromptUse={promptUse}
           />
         </aside>
 
@@ -1122,13 +1394,15 @@ export default function App() {
               onReroll={rerollLast}
               onQuickCheck={quickCheck}
               onRollAll={rollAllChecks}
+              ended={ended}
+              focusSignal={chatFocus}
             />
           </div>
           <div className={mobilePanel === 'character' ? 'h-full lg:hidden' : 'hidden'}>
             <div className="h-full overflow-y-auto">
               <CharacterSheet
                 onRequestCheck={setCheckSkill}
-                onUseItem={(text) => void handleSend(text)}
+                onPromptUse={promptUse}
               />
             </div>
           </div>
@@ -1161,11 +1435,20 @@ export default function App() {
       {/*
        * 设置**保持挂载**、用 hidden 切换：设置项很多，每次打开都跳回顶部很烦，
        * 而且挂载着才能保住"正在生成图片"这类进行中的状态（协作方 R40）。
+       * `settingsMounted` 只决定"要不要**第一次**加载它" —— 打开过一次之后就不再卸载。
        */}
-      <div className={showSettings ? '' : 'hidden'} aria-hidden={!showSettings}>
-        <Settings onClose={() => setShowSettings(false)} />
-      </div>
-      {showPrep && <Preparation onClose={() => setShowPrep(false)} onStartNew={startNew} />}
+      {settingsMounted && (
+        <div className={showSettings ? '' : 'hidden'} aria-hidden={!showSettings}>
+          <Suspense fallback={<ChunkLoading />}>
+            <Settings onClose={() => setShowSettings(false)} />
+          </Suspense>
+        </div>
+      )}
+      {showPrep && (
+        <Suspense fallback={<ChunkLoading />}>
+          <Preparation onClose={() => setShowPrep(false)} onStartNew={startNew} />
+        </Suspense>
+      )}
       {pendingStart && (
         <ConfirmDialog
           title={gameModule.title ? `开新团 · ${gameModule.title}` : '开新团'}
@@ -1320,7 +1603,11 @@ export default function App() {
        * 结档页：死亡 / 理智归零 = 这段故事结束。
        * 它不是"你死了，请重来"的弹窗，而是一屏收束叙事 + 回溯入口。
        */}
-      {showSandbox && <TestSandbox onClose={() => setShowSandbox(false)} />}
+      {showSandbox && (
+        <Suspense fallback={<ChunkLoading />}>
+          <TestSandbox onClose={() => setShowSandbox(false)} />
+        </Suspense>
+      )}
       {showChangelog && (
         <ChangelogDialog
           onClose={() => {
@@ -1339,6 +1626,11 @@ export default function App() {
           }}
         />
       )}
+      {/*
+        生图进度角标（R40）：放在**所有弹层之后**渲染，z-index 也高过弹层 ——
+        在准备页生成立绘时切去看聊天，进度照样看得见。
+      */}
+      <ImageJobsBadge />
     </div>
   );
 }

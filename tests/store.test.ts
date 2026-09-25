@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRuleset } from '../src/core/rulesets/index.js';
+import { getGenre, type Genre } from '../src/core/genres.js';
 
 /**
  * 回溯/重掷依赖 localStorage。node 环境没有它，这里放一个最小桩，
@@ -50,10 +51,17 @@ let canonicalSkillName: typeof import('../src/ui/store.js').canonicalSkillName;
 let migrateSave: typeof import('../src/ui/store.js').migrateSave;
 let SAVE_VERSION: typeof import('../src/ui/store.js').SAVE_VERSION;
 let defaultCharacteristics: typeof import('../src/ui/store.js').defaultCharacteristics;
+let openingText: typeof import('../src/ui/store.js').openingText;
+let starterSkillsFor: typeof import('../src/ui/store.js').starterSkillsFor;
+let characteristicBudget: typeof import('../src/ui/store.js').characteristicBudget;
+let loadGameState: typeof import('../src/ui/state/loaders.js').loadGameState;
+let INSANITY_TURNS_FLAG: typeof import('../src/core/insanity.js').INSANITY_TURNS_FLAG;
 
 beforeAll(async () => {
   vi.stubGlobal('localStorage', new MemStorage());
   const mod = await import('../src/ui/store.js');
+  loadGameState = (await import('../src/ui/state/loaders.js')).loadGameState;
+  INSANITY_TURNS_FLAG = (await import('../src/core/insanity.js')).INSANITY_TURNS_FLAG;
   store = mod.useStore;
   deriveAddress = mod.deriveAddress;
   addressOf = mod.addressOf;
@@ -77,6 +85,9 @@ beforeAll(async () => {
   migrateSave = mod.migrateSave;
   SAVE_VERSION = mod.SAVE_VERSION;
   defaultCharacteristics = mod.defaultCharacteristics;
+  openingText = mod.openingText;
+  starterSkillsFor = mod.starterSkillsFor;
+  characteristicBudget = mod.characteristicBudget;
 });
 
 beforeEach(() => {
@@ -181,25 +192,79 @@ describe('开场白跟随角色姓名与称呼', () => {
     expect(deriveAddress('艾琳·布莱克', '女')).toBe('布莱克女士');
   });
 
-  it('改角色名会按新名字重推导称呼，写进开场白', () => {
+  /*
+   * ⚠️ 这两条测的是**旧设计**（开场白里永远有玩家称呼），2026-09-17 改了口径：
+   *
+   * 主人报的 bug ①「开场白串味」—— 测试模组没写开场白时，
+   * 开局居然显示的是**默认模组**（霍尔特侦探事务所）的开场白。
+   * 修法是让开场白**属于模组**：模组自己写了就用它的，没写就用
+   * **它自己的** premise + 起始地点拼，都不够才退到"只有场景没有情节"的题材兜底。
+   *
+   * 于是"开场白里必然出现玩家称呼"这个前提不再成立 ——
+   * 没写 `{{称呼}}` 的开场白就是没有称呼，这是**对的**。
+   * 但**占位符替换本身**必须照旧生效，所以这两条改成测替换。
+   */
+  it('开场白里的 {{称呼}} 会按新名字重推导', () => {
     store.setState({
-      messages: [{ id: 'welcome', role: 'gm', content: '老的开场白，称呼是霍尔特。', ts: 0 }],
+      messages: [
+        { id: 'welcome', role: 'gm', content: '开场白，称呼是霍尔特。', ts: 0 },
+      ],
+      module: { ...store.getState().module, opening: '「{{称呼}}，你总算来了。」' },
     });
 
     store.getState().setCharacter({ name: '卢卡斯' });
 
     expect(store.getState().messages[0]!.content).toContain('卢卡斯先生');
-    expect(store.getState().messages[0]!.content).not.toContain('霍尔特');
+    expect(store.getState().messages[0]!.content).not.toContain('{{');
   });
 
   it('手填的称呼优先于推导值', () => {
     store.setState({
       messages: [{ id: 'welcome', role: 'gm', content: '开场白。', ts: 0 }],
+      module: { ...store.getState().module, opening: '「{{称呼}}。」' },
     });
 
     store.getState().setCharacter({ address: '陈小姐' });
 
     expect(store.getState().messages[0]!.content).toContain('陈小姐');
+  });
+
+  /*
+   * bug ① 的回归测试：没写开场白的模组**绝不许**套用默认模组那段。
+   * 判据是"出现默认模组的独有内容"——「霍尔特的侦探事务所」「玛乔丽」都是。
+   */
+  it('没写开场白的模组不会套用默认模组的开场白（防串味）', () => {
+    const s = store.getState();
+    const bare = {
+      ...s.module,
+      opening: '',
+      premise: '',
+      startLocation: '',
+      locations: '',
+      goal: '',
+      stakes: '',
+      urgency: '',
+    };
+    const text = openingText(store.getState().character, bare, 'coc');
+    expect(text).not.toContain('霍尔特');
+    expect(text).not.toContain('玛乔丽');
+    expect(text).not.toContain('侦探事务所');
+  });
+
+  it('没写开场白但有自己的前提时，用前提拼（不串到别的模组）', () => {
+    const s = store.getState();
+    const m = {
+      ...s.module,
+      opening: '',
+      premise: '雨已经下了十九天。',
+      // `startLocation` 优先于 `locations`，这里两个都给上同一个地方
+      startLocation: '山城旅店',
+      locations: '山城旅店',
+    };
+    const text = openingText(store.getState().character, m, 'coc');
+    expect(text).toContain('雨已经下了十九天');
+    expect(text).toContain('山城旅店');
+    expect(text).not.toContain('霍尔特');
   });
 
   it('旧存档缺 address 字段时按姓名推导，不会套用默认的"霍尔特先生"', () => {
@@ -284,6 +349,47 @@ describe('属性默认值要有起伏（用户："默认属性太平均了"）',
       expect(ch[def.key]).toBeGreaterThanOrEqual(def.min);
       expect(ch[def.key]).toBeLessThanOrEqual(def.max);
     }
+  });
+});
+
+/*
+ * 用户 2026-09-17 报「属性上限/总额设定」。
+ * 原来一排数字没有任何总额概念，玩家把每项都拉到 90 也不知道自己超了规则。
+ */
+describe('属性点预算（COC 八项共 460）', () => {
+  it('COC 给出总额 460，并正确算出已用与剩余', () => {
+    const ch = { str: 60, con: 60, siz: 60, dex: 60, app: 60, int: 60, pow: 60, edu: 60 };
+    const b = characteristicBudget('coc7', ch);
+    expect(b.total).toBe(460);
+    expect(b.spent).toBe(480);
+    expect(b.remaining).toBe(-20);
+  });
+
+  it('默认属性**不超预算**（不然一开局就是违规角色）', () => {
+    const b = characteristicBudget('coc7', defaultCharacteristics('coc7'));
+    expect(b.remaining).toBeGreaterThanOrEqual(0);
+  });
+
+  it('DnD 不给总额约束（460 对 3-18 的量纲毫无意义）', () => {
+    const b = characteristicBudget('dnd5e', { str: 14, dex: 12, con: 12, int: 10, wis: 10, cha: 10 });
+    expect(b.total).toBeNull();
+    expect(b.remaining).toBeNull();
+    // 但单项范围照旧给
+    expect(b.min).toBe(3);
+    expect(b.max).toBe(18);
+  });
+
+  it('缺键按 0 计，不会算出 NaN', () => {
+    const b = characteristicBudget('coc7', { str: 50 });
+    expect(Number.isFinite(b.spent)).toBe(true);
+    expect(b.spent).toBe(50);
+  });
+
+  it('非 1d100 量纲的规则包不给总额（460 只适用于 COC 那一套）', () => {
+    // DnD 用的是 d20，属性 3-18 —— 总额约束按量纲关掉
+    const b = characteristicBudget('dnd5e', { str: 18, dex: 18, con: 18, int: 18, wis: 18, cha: 18 });
+    expect(b.total).toBeNull();
+    expect(b.spent).toBe(108);
   });
 });
 
@@ -627,6 +733,74 @@ describe('示例角色', () => {
 
   it('没有示例角色的题材返回 undefined（界面不显示按钮）', () => {
     expect(starterCharacterOf('not-a-genre')).toBeUndefined();
+  });
+});
+
+/*
+ * 用户 2026-09-17 报「属性技能与人设不匹配」。
+ *
+ * 病灶：套用示例角色时技能一律取 `rs.starterSkills`（规则包通用 8 项），
+ * 于是流浪剑客的技能表里是「侦查 / 图书馆使用 / 聆听」—— 人设直接塌掉。
+ * 修法：技能跟着**人设**走，只把名字适配到当前规则包的词汇表上。
+ */
+describe('示例角色的技能要跟人设对得上', () => {
+  it('奇幻剑客拿到的是打斗与野外那一套，不是调查员的技能', () => {
+    const skills = starterSkillsFor('fantasy', 'coc7');
+    // 人设是"前王国斥候 / 流浪剑客" → 必须有战斗与潜行
+    expect(skills).toHaveProperty('格斗（斗殴）');
+    expect(skills).toHaveProperty('潜行');
+    expect(skills).toHaveProperty('追踪');
+    // 但不该有"图书馆使用"这种调查员专属技能
+    expect(skills).not.toHaveProperty('图书馆使用');
+  });
+
+  it('私家侦探拿到的是查案那一套', () => {
+    const skills = starterSkillsFor('coc', 'coc7');
+    expect(skills).toHaveProperty('侦查');
+    expect(skills).toHaveProperty('心理学');
+    expect(skills).toHaveProperty('图书馆使用');
+  });
+
+  it('技能名必须是当前规则包技能表上的（不然掷不出来）', () => {
+    const rs = getRuleset('coc7');
+    const known = new Set(rs.skillCatalog.map((s) => s.name));
+    for (const genre of ['coc', 'tokyo', 'acg', 'urban', 'fantasy']) {
+      const skills = starterSkillsFor(genre, 'coc7');
+      for (const name of Object.keys(skills)) {
+        expect(known.has(name), `${genre} 的技能「${name}」不在 COC 技能表上`).toBe(true);
+      }
+    }
+  });
+
+  it('题材没有对应配方时退回规则包通用起始项（宁可不合身，不能坏掉）', () => {
+    const skills = starterSkillsFor('not-a-genre', 'coc7');
+    const rs = getRuleset('coc7');
+    for (const s of rs.starterSkills ?? []) {
+      expect(skills[s.name]).toBe(s.value);
+    }
+  });
+
+  it('没配 DnD 那一套的题材，退回 DnD 规则包的通用项', () => {
+    const skills = starterSkillsFor('coc', 'dnd5e');
+    const rs = getRuleset('dnd5e');
+    for (const s of rs.starterSkills ?? []) {
+      expect(skills[s.name]).toBe(s.value);
+    }
+  });
+
+  it('奇幻配 DnD 时给的是加值那一套，且不带 COC 百分比名', () => {
+    const skills = starterSkillsFor('fantasy', 'dnd5e');
+    expect(skills).toHaveProperty('运动');
+    expect(skills).toHaveProperty('隐匿');
+    // COC 的括号式技能名不属于 DnD 词汇表，一个都不许出现
+    expect(Object.keys(skills).some((k) => k.includes('（'))).toBe(false);
+    // DnD 是加值不是百分比：都在个位数
+    expect(Math.max(...Object.values(skills))).toBeLessThan(10);
+  });
+
+  it('COC 的数值是百分比尺度（几十），不是 DnD 的个位数', () => {
+    const skills = starterSkillsFor('fantasy', 'coc7');
+    expect(Math.max(...Object.values(skills))).toBeGreaterThanOrEqual(50);
   });
 });
 
@@ -1484,6 +1658,92 @@ describe('存档迁移（旧档必须能读）', () => {
     expect(data.version).toBe(SAVE_VERSION);
   });
 
+  /*
+   * P2-5 边界（协作方第 21 版）：第 5 轮真机看到「期限： · 还剩 21 天」。
+   * 那不是"没修"—— label 回落只在**设新期限**时跑，读档这条路从来没走，
+   * 于是旧档那个空 label 永远补不上。这里钉的是**读入之后** label 非空。
+   * `remain` 必须原样保留（补 label 不该动倒计时）。
+   */
+  it('旧档 deadline 的 label 为空 → 读档时回落到模组 urgency（remain 不动）', () => {
+    const data = migrateSave({
+      module: { urgency: '雨季还有二十三天结束，之后谁都走不了' } as never,
+      gameState: {
+        vitals: { hp: 5 },
+        deadline: { remain: 21 * 24 * 60, label: '' },
+      },
+    });
+    expect(data.gameState!.deadline!.label).toBe('雨季还有二十三天结束，之后谁都走不了');
+    expect(data.gameState!.deadline!.remain).toBe(21 * 24 * 60);
+    // 可选字段补值不是结构变 —— 版本不许被推高
+    expect(data.version).toBe(SAVE_VERSION);
+  });
+
+  it('模组里也推不出 urgency 时，label 至少给「期限」而不是空', () => {
+    const data = migrateSave({
+      module: {} as never,
+      gameState: { vitals: { hp: 5 }, deadline: { remain: 60, label: '   ' } },
+    });
+    expect(data.gameState!.deadline!.label).toBe('期限');
+  });
+
+  it('已有的 label 不会被覆盖（只补不删）', () => {
+    const data = migrateSave({
+      module: { urgency: '雨季还有二十三天结束' } as never,
+      gameState: { vitals: { hp: 5 }, deadline: { remain: 60, label: '我自己的期限' } },
+    });
+    expect(data.gameState!.deadline!.label).toBe('我自己的期限');
+  });
+
+  /*
+   * P2-5·边界（协作方第 22 版**重开**）：v0.10.6 我把 label 回落只挂在 `migrateSave`
+   * （导入存档那条腿），而玩家**正常刷新**走的是 `loadGameState` ——
+   * 于是空 label 永远补不上。这两条钉的是"两条腿都得走"。
+   */
+  it('空 label 在**启动**这条腿上也要补上（loadGameState）', () => {
+    const orig = globalThis.localStorage;
+    const mem = new MemStorage();
+    mem.setItem(
+      'trpg.gameState',
+      JSON.stringify({
+        vitals: { hp: 8, san: 60, mp: 10 },
+        deadline: { remain: 21 * 24 * 60, label: '' },
+      })
+    );
+    mem.setItem('trpg.module', JSON.stringify({ urgency: '雨季还有二十三天结束' }));
+    vi.stubGlobal('localStorage', mem);
+    try {
+      const gs = loadGameState();
+      expect(gs.deadline!.label).toBe('雨季还有二十三天结束');
+      // 倒计时本身一点都不许动 —— 补 label 不是重设期限
+      expect(gs.deadline!.remain).toBe(21 * 24 * 60);
+    } finally {
+      vi.stubGlobal('localStorage', orig);
+    }
+  });
+
+  it('已有 label 的档，启动时**不许**被覆盖（只补不删）', () => {
+    const orig = globalThis.localStorage;
+    const mem = new MemStorage();
+    mem.setItem(
+      'trpg.gameState',
+      JSON.stringify({
+        vitals: { hp: 8, san: 60, mp: 10 },
+        deadline: { remain: 60, label: '我自己的期限' },
+      })
+    );
+    mem.setItem('trpg.module', JSON.stringify({ urgency: '雨季还有二十三天结束' }));
+    vi.stubGlobal('localStorage', mem);
+    try {
+      expect(loadGameState().deadline!.label).toBe('我自己的期限');
+    } finally {
+      vi.stubGlobal('localStorage', orig);
+    }
+  });
+
+  it('H16：`疯狂轮数` 常量与引擎写入的键名一致（状态栏靠它过滤）', () => {
+    expect(INSANITY_TURNS_FLAG).toBe('疯狂轮数');
+  });
+
   it('已有的图鉴台账不会被迁移清掉（只补不删）', () => {
     const data = migrateSave({
       gameState: { vitals: { hp: 5 }, encountered: ['雾中的巨影'], fought: ['雾中的巨影'] },
@@ -1797,5 +2057,348 @@ describe('状态变化提示永远都在（不许再被"优化"掉）', () => {
     ] as never);
     // 未知字段一律忽略 —— 它**不是**"别提示"的开关
     expect(texts().some((t) => t.includes('铜钥匙'))).toBe(true);
+  });
+});
+
+/*
+ * ============================================================
+ * 第 17 版 D：**模型忘了扣，也要说一声**。
+ *
+ * 玩家写了「把绷带铺在地上」，引擎把"点到了止血绷带"报给守密人（红线二之五），
+ * 但契约里忘了写 `inventory dec`。引擎**不替他扣**（A+B 撤掉了本地预扣，
+ * 实物的用法引擎猜不出来），但也不能一声不吭 —— 那样玩家会以为这东西是无限的。
+ *
+ * 判据来源是 `opts.mentionedItems`（`App.sendToGm` 从玩家消息本身算出来的），
+ * 所以这几条断言同时钉住了"算没算"和"说没说"两侧。
+ * ============================================================
+ */
+describe('点了名却没扣 → 说一句「还在背包里」（第 17 版 D）', () => {
+  const clean = (items: { id: string; name: string; qty: number }[]) =>
+    store.setState({
+      gameState: {
+        ...createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+        inventory: items,
+      },
+      lastChanges: null,
+    });
+  const texts = () => (store.getState().lastChanges?.lines ?? []).map((l) => l.text);
+  const BANDAGE = { id: 'b1', name: '止血绷带', qty: 3 };
+  const POTION = { id: 'p1', name: '治疗药剂', qty: 2 };
+
+  it('点了名、契约没 dec → 出一句「「止血绷带」还在背包里」', () => {
+    clean([BANDAGE]);
+    store.getState().applyModelDeltas([], { mentionedItems: ['止血绷带'] });
+    expect(texts()).toContain('「止血绷带」还在背包里');
+  });
+
+  it('契约真的 dec 了 → **不**说那句（免得玩家以为没扣）', () => {
+    clean([BANDAGE]);
+    store.getState().applyModelDeltas(
+      [{ target: 'inventory', op: 'dec', value: '止血绷带', amount: 1 }] as never,
+      { mentionedItems: ['止血绷带'] }
+    );
+    expect(texts()).not.toContain('「止血绷带」还在背包里');
+  });
+
+  it('没点名 → 一句话都不多说（不许无中生有）', () => {
+    clean([BANDAGE, POTION]);
+    store.getState().applyModelDeltas([], { mentionedItems: [] });
+    expect(texts().some((t) => t.includes('还在背包里'))).toBe(false);
+  });
+
+  it('点了两样、只扣了一样 → 只对没扣的那样说', () => {
+    clean([BANDAGE, POTION]);
+    store.getState().applyModelDeltas(
+      [{ target: 'inventory', op: 'dec', value: '止血绷带', amount: 1 }] as never,
+      { mentionedItems: ['止血绷带', '治疗药剂'] }
+    );
+    expect(texts()).toContain('「治疗药剂」还在背包里');
+    expect(texts()).not.toContain('「止血绷带」还在背包里');
+  });
+
+  it('**绝不**替玩家扣（点名不给 dec，物品数量分毫不动）', () => {
+    clean([BANDAGE]);
+    store.getState().applyModelDeltas([], { mentionedItems: ['止血绷带'] });
+    const it = store.getState().gameState.inventory.find((i) => i.name === '止血绷带');
+    expect(it?.qty).toBe(3); // 还是 3，没被"顺手"扣掉
+  });
+});
+
+/*
+ * ============================================================
+ * 世界层（Phase 2）：走 store 的真实通道验证 —— 不是只测纯函数
+ *
+ * 这里要证明的是那三条铁律在**串起来之后**还成立：
+ * 结档能把这一局收回去、开团能把上一个故事带过来、
+ * 而"每局账"（伤口/疯狂）永远不过去。
+ * ============================================================
+ */
+describe('世界层：结档收回去，开团带过来', () => {
+  const END = '2026-09-17T12:00:00.000Z';
+
+  const worldSnapshot = {
+    location: '货船甲板',
+    npcsAlive: ['老杰克'],
+    threads: [{ name: '查清船长的账', status: '还在查' }],
+    flags: { '世界.门开了': true, 伤口: '上一局的伤' },
+  };
+
+  const seedWorld = () =>
+    store.setState({
+      worldName: '雾港',
+      worlds: {
+        雾港: {
+          id: '雾港',
+          name: '雾港',
+          updatedAt: END,
+          runs: [],
+          modules: ['雾港'],
+          snapshot: worldSnapshot,
+        },
+      },
+    });
+
+  it('结档把这一局收回世界：四样都记上，每局账滤掉', () => {
+    store.setState({
+      worlds: {},
+      worldName: '雾港',
+      messages: [],
+      chronicle: [],
+      gameState: createInitialState({
+        vitals: { hp: 10, san: 60, mp: 10 },
+        location: '货船甲板',
+        npcsAlive: ['老杰克'],
+        threads: [{ name: '查清船长的账', status: '还在查' }],
+        flags: { '世界.门开了': true, 伤口: '左臂被划开', 疯狂轮数: 2 },
+        ending: { kind: 'success', text: '你划着小艇离开了。', at: END },
+      }),
+    });
+    store.getState().recordCurrentRun();
+
+    const w = store.getState().worlds['雾港'];
+    expect(w).toBeDefined();
+    expect(w!.runs.length).toBe(1);
+    expect(w!.snapshot!.location).toBe('货船甲板');
+    expect(w!.snapshot!.npcsAlive).toEqual(['老杰克']);
+    expect(w!.snapshot!.threads.map((t) => t.name)).toEqual(['查清船长的账']);
+    // 伤口与疯狂轮数**不许**进留档 —— 带进新团就是开局流血
+    expect(w!.snapshot!.flags).toEqual({ '世界.门开了': true });
+  });
+
+  it('没有结局就不收（跑了一半的状态不该被当成世界的现状）', () => {
+    store.setState({
+      worlds: {},
+      worldName: '雾港',
+      gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 }, location: '货船甲板' }),
+    });
+    store.getState().recordCurrentRun();
+    expect(Object.keys(store.getState().worlds)).toEqual([]);
+  });
+
+  it('开新团接着上次跑：地点、人、未结的支线都带过来', () => {
+    seedWorld();
+    store.setState({ carryWorld: true });
+    store.getState().startNewGame();
+
+    const gs = store.getState().gameState;
+    expect(gs.location).toBe('货船甲板');
+    expect(gs.npcsAlive).toContain('老杰克');
+    expect(gs.threads.map((t) => t.name)).toEqual(['查清船长的账']);
+    expect(gs.flags['世界.门开了']).toBe(true);
+    // 开局不该带着上一局的伤
+    expect(gs.flags['伤口']).toBeUndefined();
+    // 无前缀的标记一律不带过局（模型发明的状态词也漏不过去）
+    expect(gs.flags['中毒']).toBeUndefined();
+    // 剧情是清的 —— 只有"世界记得的东西"被带过来
+    expect(store.getState().chronicle).toEqual([]);
+  });
+
+  it('关掉开关就不带，但留档**不会被删**（玩家可能只是想重跑一遍）', () => {
+    seedWorld();
+    store.setState({ carryWorld: false });
+    store.getState().startNewGame();
+
+    expect(store.getState().gameState.location).not.toBe('货船甲板');
+    expect(store.getState().worlds['雾港']!.snapshot!.location).toBe('货船甲板');
+  });
+
+  it('忘掉一个世界：留档与履历一起没，别的世界不受影响', () => {
+    seedWorld();
+    store.setState((s) => ({
+      worlds: {
+        ...s.worlds,
+        孤岛: { id: '孤岛', name: '孤岛', updatedAt: END, runs: [], modules: [] },
+      },
+    }));
+    store.getState().forgetWorld('雾港');
+    expect(store.getState().worlds['雾港']).toBeUndefined();
+    expect(store.getState().worlds['孤岛']).toBeDefined();
+  });
+
+  it('世界名留空时跟着模组名走（"不填"永远是合理的默认）', async () => {
+    const { currentWorldName } = await import('../src/ui/store.js');
+    expect(currentWorldName({ worldName: '', module: { title: '雾港' } })).toBe('雾港');
+    expect(currentWorldName({ worldName: ' 我的世界 ', module: { title: '雾港' } })).toBe('我的世界');
+    expect(currentWorldName({ worldName: '', module: { title: '' } })).toBe('未命名的世界');
+  });
+});
+
+describe('角色档案库：走 store 通道存取一张卡', () => {
+  it('存下当前这张 → 列表里有它；再取用 → 当前角色卡换成它', () => {
+    const before = store.getState().character;
+    const { entry } = store.getState().archiveCurrentCharacter();
+    expect(store.getState().characterArchive.some((c) => c.id === entry.id)).toBe(true);
+
+    // 把当前卡改成别人，再从档案库取回来
+    store.getState().setCharacter({ name: '临时改的名字' });
+    expect(store.getState().character.name).toBe('临时改的名字');
+    expect(store.getState().useArchivedCharacter(entry.id)).toBe(true);
+    expect(store.getState().character.name).toBe(before.name);
+  });
+
+  it('取一张不存在的卡：返回 false，绝不把当前角色卡改坏', () => {
+    store.getState().setCharacter({ name: '还在的人' });
+    expect(store.getState().useArchivedCharacter('查无此人')).toBe(false);
+    expect(store.getState().character.name).toBe('还在的人');
+  });
+
+  it('删掉一张卡之后就取不到了', () => {
+    store.getState().setCharacter({ name: '要被删的人' });
+    const { entry } = store.getState().archiveCurrentCharacter();
+    expect(store.getState().useArchivedCharacter(entry.id)).toBe(true);
+    store.getState().deleteArchivedCharacter(entry.id);
+    expect(store.getState().useArchivedCharacter(entry.id)).toBe(false);
+  });
+});
+
+/*
+ * 自定义题材的删除。
+ * 以前删题材**没有任何入口**（`removeCustomGenre` 写了但没人调）—— 能自建、能选中，就是删不掉。
+ * 2026-09-20 在设置页补上按钮后，这里钉住最容易出事的一处：
+ * 删掉的**正是当前选中的**那一件时，`genreId` 还指着它 —— 那个 id 已经不存在了，
+ * 界面会取到一个谁都不认识的题材。必须退回内置。
+ */
+describe('自定义题材的删除', () => {
+  const custom: Genre = {
+    id: 'my-genre',
+    name: '我的题材',
+    blurb: '一句话简介',
+    setting: '某个舞台',
+    tone: '某种腔调',
+    imageStyle: '某种画风',
+    castHint: '某种同伴',
+  };
+
+  it('删的不是当前选中的：题材名单里没了，当前选择不受影响', () => {
+    const s = () => store.getState();
+    s().saveCustomGenre(custom);
+    s().setGenre('coc');
+    s().removeCustomGenre(custom.id);
+    expect(s().customGenres.some((g) => g.id === custom.id)).toBe(false);
+    expect(s().genreId).toBe('coc');
+  });
+
+  it('删的正是当前选中的：退回内置题材，不留空指向', () => {
+    const s = () => store.getState();
+    s().saveCustomGenre(custom);
+    s().setGenre(custom.id);
+    expect(s().genreId).toBe(custom.id);
+    s().removeCustomGenre(custom.id);
+    expect(s().customGenres.some((g) => g.id === custom.id)).toBe(false);
+    // 退回的那一个必须能真的取回一个题材，而不是留个谁都不认识的 id
+    expect(s().genreId).toBe('coc');
+    expect(getGenre(s().genreId, s().customGenres).id).toBe('coc');
+  });
+});
+
+/**
+ * P2-5（协作方第 20 版）：**期限是引擎的，不是模型的**。
+ *
+ * 病灶：`setDeadlineDays` 以前无条件接受契约里的 `deadline_days` —— 模型每轮随口报
+ * 「还剩 21 天」，玩家就永远卡在 21 天（时钟走了、期限不走；实测 4 轮 09:00→09:03
+ * 而期限一步没动）。同时 label 用 `?? ''`，一空永空，界面只能显示
+ * 「期限：这件事 · 还剩 21 天」。
+ *
+ * 新判据两条：① **已经有一个期限对象在**（哪怕已归零）→ 申报**整条忽略**；
+ * ② 还没期限 → 才用申报当初值。
+ */
+describe('期限归引擎：模型只许定初值，不许改现值（P2-5）', () => {
+  /** 把期限摆成一个已知状态（绕开模组抽取，直接设） */
+  const putDeadline = (remain: number | null, label = '雨季') =>
+    store.getState().setDeadline(remain === null ? null : { remain, label });
+
+  // 这个 describe 里会改 module.urgency，写完复位，免得污染后面的用例
+  beforeEach(() => {
+    store.getState().setDeadline(null);
+  });
+
+  it('已有剩余天数时，模型申报的 deadline_days 一律不改 remain（时钟走、期限走）', () => {
+    putDeadline(10 * 24 * 60); // 还剩 10 天
+    store.getState().setDeadlineDays(21); // 模型喊"还剩 21 天"
+    expect(store.getState().gameState.deadline!.remain).toBe(10 * 24 * 60);
+    // 报个更大的也不行
+    store.getState().setDeadlineDays(99);
+    expect(store.getState().gameState.deadline!.remain).toBe(10 * 24 * 60);
+    // 报个更小的同样不行（模型无权缩，只能等引擎按 elapsed 扣）
+    store.getState().setDeadlineDays(1);
+    expect(store.getState().gameState.deadline!.remain).toBe(10 * 24 * 60);
+  });
+
+  it('已有期限时，申报连 label 都改不动', () => {
+    putDeadline(5 * 24 * 60, '雨季结束');
+    store.getState().setDeadlineDays(30);
+    expect(store.getState().gameState.deadline!.label).toBe('雨季结束');
+  });
+
+  it('反向：还没有期限时，申报**能**当初值（别修死）', () => {
+    putDeadline(null);
+    store.getState().setDeadlineDays(3);
+    const d = store.getState().gameState.deadline;
+    expect(d).not.toBeNull();
+    expect(d!.remain).toBe(3 * 24 * 60);
+  });
+
+  it('无期限时申报的 label 回落模组 urgency 首句，不留空串（不再是 `?? 空`）', () => {
+    store.getState().setModule({ urgency: '雨季还有二十三天结束。之后路就断了。' });
+    putDeadline(null);
+    store.getState().setDeadlineDays(23);
+    const d = store.getState().gameState.deadline!;
+    expect(d.label).toBe('雨季还有二十三天结束');
+    expect(d.label).not.toBe('');
+  });
+
+  it('无期限、模组也推不出 label 时，兜底写「期限」而不是空串', () => {
+    store.getState().setModule({ urgency: '' });
+    putDeadline(null);
+    store.getState().setDeadlineDays(7);
+    expect(store.getState().gameState.deadline!.label).toBe('期限');
+  });
+
+  it('期限已经走到 0（到点了）时，模型申报仍改不动它 —— 不许续命', () => {
+    putDeadline(0);
+    store.getState().setDeadlineDays(21);
+    // remain 仍是 0 —— 到点了就走模组的「结局与失败条件」，模型一句"还剩 21 天"不能续回来
+    expect(store.getState().gameState.deadline!.remain).toBe(0);
+  });
+
+  it('已有期限时，模型传非正数也清不掉它（要清得走引擎侧的 setDeadline）', () => {
+    putDeadline(5 * 24 * 60);
+    store.getState().setDeadlineDays(0);
+    expect(store.getState().gameState.deadline!.remain).toBe(5 * 24 * 60);
+    store.getState().setDeadlineDays(undefined);
+    expect(store.getState().gameState.deadline!.remain).toBe(5 * 24 * 60);
+    // 引擎侧的口子照常有效
+    store.getState().setDeadline(null);
+    expect(store.getState().gameState.deadline).toBeNull();
+  });
+
+  it('还没有期限时，传非正数 / 非有限数 ＝ 保持无期限', () => {
+    putDeadline(null);
+    store.getState().setDeadlineDays(0);
+    expect(store.getState().gameState.deadline).toBeNull();
+    store.getState().setDeadlineDays(Number.NaN);
+    expect(store.getState().gameState.deadline).toBeNull();
+    store.getState().setDeadlineDays(undefined);
+    expect(store.getState().gameState.deadline).toBeNull();
   });
 });

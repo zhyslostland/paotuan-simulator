@@ -9,7 +9,7 @@ import {
   type NpcLine,
   type Typography,
 } from './store';
-import { generateImage, ModelError } from '../providers/model.js';
+import { jobAt } from './imageJobs';
 import { actionImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
 import { ImageLightbox } from './ImageLightbox';
@@ -122,23 +122,35 @@ function GhostBtn({
   onClick,
   title,
   children,
+  disabled,
 }: {
   onClick: () => void;
   title?: string;
   children: React.ReactNode;
+  /** 流式/结档期间置灰。**默认 undefined＝保持原样**，老调用处一行都不用改 */
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
-      className="rounded-md border border-ink-700 bg-ink-900/60 px-2 py-0.5 text-[11px] text-mist-500 transition hover:border-gold-600/50 hover:text-gold-400"
+      disabled={disabled}
+      className="rounded-md border border-ink-700 bg-ink-900/60 px-2 py-0.5 text-[11px] text-mist-500 transition hover:border-gold-600/50 hover:text-gold-400 disabled:cursor-not-allowed disabled:border-ink-800 disabled:text-mist-600 disabled:opacity-50 disabled:hover:border-ink-800 disabled:hover:text-mist-600"
     >
       {children}
     </button>
   );
 }
 
-/** 正文里的"动作场景小图"：给某段 GM 回复配一张第三视角插画 */
+/**
+ * 正文里的"动作场景小图"：给某段 GM 回复配一张第三视角插画。
+ *
+ * ## R40 起它不再自己 await
+ * 以前是**这个按钮**去发请求、自己转圈：一翻页签、一换面板，组件卸载了，
+ * 那个请求就跟界面没关系了 —— 画没画完、画到哪儿去了，玩家都看不见。
+ * 现在它只做一件事：**把任务排进 store 的队列**，剩下的交给右上角的进度角标。
+ * 所以这里的"生成中"是从队列读出来的（切走再回来，它照样显示"正在画"）。
+ */
 function InlineSceneImage({
   msgId,
   content,
@@ -148,44 +160,29 @@ function InlineSceneImage({
   content: string;
   value?: string;
 }) {
-  const config = useStore((s) => s.config);
   const character = useStore((s) => s.character);
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
-  const setMessageSceneImage = useStore((s) => s.setMessageSceneImage);
-  const [busy, setBusy] = useState(false);
+  const queueImage = useStore((s) => s.queueImage);
+  // 选的是数组里的**元素**（稳定引用），不是新造的对象 —— 不会踩无限重渲染那个坑
+  const job = useStore((s) => jobAt(s.imageJobs, 'action', msgId));
   const [err, setErr] = useState('');
+  const busy = job?.status === 'running';
+  const queued = job?.status === 'queued';
 
-  const run = async () => {
-    if (!config.apiKey) {
-      setErr('请先在设置里填 API Key');
-      return;
-    }
-    if (!config.imageModel?.trim()) {
-      setErr('请先在设置里填「生图模型」');
-      return;
-    }
-    setBusy(true);
-    setErr('');
-    try {
-      const url = await generateImage(
-        actionImagePrompt(
-          content,
-          {
-            gender: character.gender,
-            description: character.description,
-          },
-          getGenre(genreId, customGenres)
-        ),
-        { ...config, model: config.imageModel.trim(), size: config.imageSize || '1024x1024' }
-      );
-      if (url) setMessageSceneImage(msgId, url);
-      else setErr('生图接口没有返回图片');
-    } catch (e) {
-      setErr(e instanceof ModelError ? e.message : `生图失败：${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
+  const run = () => {
+    const j = queueImage({
+      kind: 'action',
+      target: msgId,
+      label: '这一段的插画',
+      prompt: actionImagePrompt(
+        content,
+        { gender: character.gender, description: character.description },
+        getGenre(genreId, customGenres)
+      ),
+    });
+    // 没配 Key / 生图模型时 store 不排空任务，这里给出原因（比排一条注定失败的强）
+    setErr(j ? '' : '请先在设置里填好 API Key 与「生图模型」');
   };
 
   return (
@@ -201,16 +198,16 @@ function InlineSceneImage({
           </ImageLightbox>
           <div className="flex gap-2">
             <GhostBtn onClick={run} title="重新生成这张图">
-              {busy ? '生成中…' : '重配'}
+              {busy ? '生成中…' : queued ? '排队中…' : '重配'}
             </GhostBtn>
-            <GhostBtn onClick={() => setMessageSceneImage(msgId, '')} title="移除这张图">
+            <GhostBtn onClick={() => useStore.getState().setMessageSceneImage(msgId, '')} title="移除这张图">
               移除
             </GhostBtn>
           </div>
         </div>
       ) : (
         <GhostBtn onClick={run} title="为这一段配一张第三视角插画">
-          {busy ? '生成中…' : '🎨 配图'}
+          {busy ? '生成中…' : queued ? '排队中…' : '🎨 配图'}
         </GhostBtn>
       )}
       {err && <p className="mt-1 text-[10px] text-blood-400">{err}</p>}
@@ -338,6 +335,8 @@ export function Chat({
   onReroll,
   onQuickCheck,
   onRollAll,
+  ended,
+  focusSignal,
 }: {
   onSend: (text: string) => void;
   onAbort: () => void;
@@ -348,6 +347,17 @@ export function Chat({
   onQuickCheck: (skill: string, difficulty?: string, index?: number) => void;
   /** 把待掷队列里的检定一次全部掷掉（只发一轮 GM） */
   onRollAll: () => void;
+  /**
+   * 这一局已经结档：输入框**禁用**并写明原因（P3-4）。
+   * 以前是"能打字、能按回车、什么也没发生，只弹 2 秒提示"——玩家以为卡了。
+   * 想继续玩，出口在结档页上（回溯 / 再开一局），这里只负责把话说清楚。
+   */
+  ended: boolean;
+  /**
+   * 每次变化就聚焦输入框。点背包「使用」时上层会给它 +1 ——
+   * 玩家点了东西，光标就该在那儿等他补一句"拿它干什么"。
+   */
+  focusSignal: number;
 }) {
   const messages = useStore((s) => s.messages);
   const streaming = useStore((s) => s.streaming);
@@ -385,9 +395,15 @@ export function Chat({
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [messages.length, lastContent, streaming]);
 
+  // 上层点背包「使用」时把光标送到输入框（focusSignal 每次 +1）
+  useEffect(() => {
+    if (focusSignal > 0) taRef.current?.focus();
+  }, [focusSignal]);
+
   const submit = () => {
     const text = draft.trim();
-    if (!text || streaming) return;
+    // 结档 / 流式期间都不发，但**不清草稿**：清掉＝把玩家刚写的东西悄悄拿走
+    if (!text || streaming || ended) return;
     setDraft('');
     if (taRef.current) taRef.current.style.height = 'auto';
     onSend(text);
@@ -483,7 +499,12 @@ export function Chat({
         </div>
       )}
 
-      {pendingChecks.length > 0 && !streaming && (
+      {/*
+        H2：守密人还在写的时候，这张卡**不再整块消失**。
+        以前 `!streaming` 一挡，玩家以为"这轮不用掷"；其实是牌还在手里。
+        现在留着卡、按钮置灰、写一句为什么（状态可见）。
+      */}
+      {pendingChecks.length > 0 && (
         <div className="shrink-0 border-t border-gold-600/30 bg-gold-500/5 px-4 py-2.5 sm:px-8">
           <div className="mx-auto max-w-3xl space-y-2">
             {pendingChecks.length > 1 && (
@@ -495,18 +516,27 @@ export function Chat({
                   {/* 一次全掷：连续检定不用来回点，结果合成一条消息只让 GM 回一轮 */}
                   <button
                     onClick={onRollAll}
-                    className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+                    disabled={streaming || ended}
+                    className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-mist-500"
                   >
                     一次全掷
                   </button>
                   <GhostBtn
                     onClick={() => useStore.getState().clearPendingChecks()}
-                    title="把这一轮要求的所有检定都忽略"
+                    disabled={streaming || ended}
+                    title={
+                      streaming ? '守密人还在写 —— 写完了再定' : '把这一轮要求的所有检定都忽略'
+                    }
                   >
                     全部忽略
                   </GhostBtn>
                 </span>
               </div>
+            )}
+            {streaming && (
+              <p className="text-[11px] text-gold-500/80">
+                守密人还在写 —— 写完了这些检定才能掷。
+              </p>
             )}
             {pendingChecks.map((pc, i) => (
               <div key={`${pc.skill}-${i}`} className="flex items-center justify-between gap-3">
@@ -524,13 +554,15 @@ export function Chat({
                 <div className="flex shrink-0 gap-2">
                   <button
                     onClick={() => onQuickCheck(pc.skill, pc.difficulty, i)}
-                    className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400"
+                    disabled={streaming || ended}
+                    className="rounded-lg bg-gold-500 px-3 py-1.5 text-[12px] font-medium text-ink-950 transition hover:bg-gold-400 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-mist-500"
                   >
                     掷骰
                   </button>
                   <GhostBtn
                     onClick={() => useStore.getState().removePendingCheck(i)}
-                    title="忽略这一次检定"
+                    disabled={streaming || ended}
+                    title={streaming ? '守密人还在写 —— 写完了再定' : '忽略这一次检定'}
                   >
                     忽略
                   </GhostBtn>
@@ -576,8 +608,13 @@ export function Chat({
                 }
               }}
               rows={1}
-              placeholder="你要做什么，或直接说你角色的话（Enter 发送 · Shift+Enter 换行 · ↑ 取回上一条）"
-              className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] text-mist-100 outline-none placeholder:text-mist-500"
+              disabled={ended}
+              placeholder={
+                ended
+                  ? '这一局已经结档 —— 想继续玩，用结档页上的「回溯」或「再开一局」'
+                  : '你要做什么，或直接说你角色的话（Enter 发送 · Shift+Enter 换行 · ↑ 取回上一条）'
+              }
+              className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] text-mist-100 outline-none placeholder:text-mist-500 disabled:cursor-not-allowed"
             />
             {streaming ? (
               <button
@@ -589,13 +626,22 @@ export function Chat({
             ) : (
               <button
                 onClick={submit}
-                disabled={!draft.trim()}
+                disabled={!draft.trim() || ended}
                 className="shrink-0 rounded-lg bg-gold-500 px-5 py-2 text-[14px] font-medium text-ink-950 transition hover:bg-gold-400 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-mist-500"
               >
                 行动
               </button>
             )}
           </div>
+          {/*
+            流式期间的**可见回执**：以前按回车什么都不会发生（草稿还在，但玩家不知道），
+            看起来就是"卡了"（P1-1）。这里把原因写在输入框下面，一句话，一直挂着。
+          */}
+          {!ended && streaming && (
+            <p className="mt-1.5 text-[11px] text-mist-500">
+              守密人还在写 —— 这一轮写完再发。（草稿会留着，不会丢）
+            </p>
+          )}
         </div>
       </div>
     </div>

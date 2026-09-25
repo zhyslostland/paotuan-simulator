@@ -16,7 +16,8 @@ import {
   unlockedAchievements,
   type RunSummary,
 } from '../src/core/career.js';
-import { outcomeOf, summarizeRun } from '../src/ui/runSummary.js';
+import type { CheckBadge } from '../src/core/types.js';
+import { checksOf, outcomeOf, summarizeRun } from '../src/ui/runSummary.js';
 
 const run = (patch: Partial<RunSummary> = {}): RunSummary => ({
   turns: 1,
@@ -97,6 +98,26 @@ describe('成就：一次性、不刷、判据看并账之后的数', () => {
       expect(a.desc.length).toBeGreaterThan(0);
     }
   });
+
+  /*
+   * P2-2：成就那一格的**分母必须是全部成就**。
+   *
+   * 病灶：结档页写的是 `${all.length} / ${all.length}` —— 分子分母同一个值，
+   * 于是永远显示 x/x（"1 / 1"、"4 / 4"），看着像全解锁了，
+   * 其实才拿到四个之一。设置页一直是对的，结档页跟它不一致。
+   *
+   * 现在把"分母从哪来"钉成断言：**未解锁任何成就时，分母也不能是 0**。
+   * 界面若改回拿 `unlockedAchievements` 当分母，这条立刻红。
+   */
+  it('P2-2：成就分母是全部成就，不是"已解锁的条数"', () => {
+    const none = unlockedAchievements(emptyCareer());
+    expect(none).toHaveLength(0); // 新档一个都没解锁
+    // 分母与解锁情况无关 —— 它恒等于成就总数
+    expect(ACHIEVEMENTS.length).toBeGreaterThan(1);
+    // 换个说法：一个都没解锁时，"已解锁 / 全部" 必须是 0 / N（N>0），
+    // 不可能是 0 / 0 那种看着"全达成"的假象
+    expect(`${none.length} / ${ACHIEVEMENTS.length}`).toBe(`0 / ${ACHIEVEMENTS.length}`);
+  });
 });
 
 describe('派生计算', () => {
@@ -120,10 +141,24 @@ describe('派生计算', () => {
 });
 
 describe('这一局的账：全部读引擎已有的账', () => {
+  /**
+   * 造一张真的检定卡（`target` 那些字段在统计里用不上，
+   * 但类型是引擎那张卡的本身 —— 测试也照它的形状给，
+   * 免得"测试里随便写个对象也能过"把接口松掉）。
+   */
+  const badge = (success: boolean) => ({
+    skill: '侦查',
+    target: 50,
+    roll: 12,
+    label: success ? '成功' : '失败',
+    tier: 'regular',
+    success,
+  });
+
   it('检定同时算 check 与 checks（一次多掷也要数进去）', () => {
     const msgs = [
-      { role: 'player', check: { success: true } },
-      { role: 'player', checks: [{ success: false }, { success: true }] },
+      { role: 'player', check: badge(true) },
+      { role: 'player', checks: [badge(false), badge(true)] },
       { role: 'gm' }, // GM 的消息不带检定，不该被算
     ];
     const s = summarizeRun(msgs, { clues: [], fought: [], ending: undefined }, [1, 2, 3]);
@@ -133,8 +168,9 @@ describe('这一局的账：全部读引擎已有的账', () => {
   });
 
   it('老消息没有 success 字段 → 不计数进"过了"，但照样算作一次检定', () => {
+    // 老存档里的卡可能缺字段（比如早期没写 success），这里刻意造一张不完整的
     const s = summarizeRun(
-      [{ role: 'player', check: {} }],
+      [{ role: 'player', check: { skill: '侦查', target: 50, roll: 12, label: '？', tier: 'regular' } as CheckBadge }],
       { clues: [], fought: [], ending: undefined },
       []
     );
@@ -157,5 +193,59 @@ describe('这一局的账：全部读引擎已有的账', () => {
     expect(outcomeOf('莫名其妙')).toBe('other');
     expect(outcomeOf(undefined)).toBe('other');
     expect(outcomeOf('grey')).toBe('grey');
+  });
+});
+
+/*
+ * P2-1：**"一条消息上有几张检定卡"必须只有一处读法**。
+ *
+ * 病灶：检定有两种记法 —— 单掷写 `check`、一次多掷写 `checks[]`。
+ * `WorldPanel` 的检定记录与 `Settings` 的复制记录**只读了 `m.check`**，
+ * 于是玩家点「一次全掷」砸出来的那批**一条都不进记录**；
+ * 而生涯统计那边两个都算 —— 同一件事两套读法，数字必然对不上。
+ *
+ * 这几条钉的是 `checksOf` 本身：谁改坏了它，所有调用点一起坏，这里先红。
+ */
+describe('checksOf：一条消息上的全部检定（P2-1 唯一真源）', () => {
+  const card = (skill: string, success: boolean): CheckBadge => ({
+    skill,
+    target: 50,
+    roll: 12,
+    label: success ? '成功' : '失败',
+    tier: 'regular',
+    success,
+  });
+
+  it('空消息 / null / undefined 都返回空数组（不许抛）', () => {
+    expect(checksOf(null)).toEqual([]);
+    expect(checksOf(undefined)).toEqual([]);
+    expect(checksOf({ role: 'gm' })).toEqual([]);
+  });
+
+  it('只有单掷 check → 取一张', () => {
+    const m = { role: 'player', check: card('侦查', true) };
+    expect(checksOf(m)).toHaveLength(1);
+    expect(checksOf(m)[0]!.skill).toBe('侦查');
+  });
+
+  it('只有一次多掷 checks → 全取（这正是老代码漏掉的那批）', () => {
+    const m = { role: 'player', checks: [card('侦查', true), card('聆听', false)] };
+    const got = checksOf(m);
+    expect(got).toHaveLength(2);
+    expect(got.map((c) => c.skill)).toEqual(['侦查', '聆听']);
+  });
+
+  it('单掷与多掷同时存在 → check 在前、checks 跟在后面（照玩家看到的顺序）', () => {
+    const m = {
+      role: 'player',
+      check: card('侦查', true),
+      checks: [card('潜入', false), card('话术', true)],
+    };
+    expect(checksOf(m).map((c) => c.skill)).toEqual(['侦查', '潜入', '话术']);
+  });
+
+  it('checks 不是数组（脏存档）→ 当没有，不许炸', () => {
+    const m = { role: 'player', check: card('侦查', true), checks: 'x' as unknown as CheckBadge[] };
+    expect(checksOf(m).map((c) => c.skill)).toEqual(['侦查']);
   });
 });

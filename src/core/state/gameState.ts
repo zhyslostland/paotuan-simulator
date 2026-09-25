@@ -6,12 +6,14 @@
  */
 
 import { roll, type Rng } from '../dice/index.js';
-import { isLifeVital, type Ruleset } from '../rulesets/types.js';
+import { findWeapon, isLifeVital, type Ruleset } from '../rulesets/types.js';
 import { type Wound } from '../wounds.js';
 import { type BestiaryEntry } from '../bestiary.js';
+import { type Deadline, type StoryClock, normalizeClock, tickClock, clockLabel } from '../clock.js';
 
 export type { Wound };
 export type { BestiaryEntry };
+export type { StoryClock, Deadline };
 
 /**
  * 濒死冻结时被拒的理由文案。
@@ -106,6 +108,18 @@ export interface Foe {
 }
 
 /**
+ * 模型写了 `combat.foes add` 却没写 `name` 时的兜底名字。
+ *
+ * 刻意选一个**明显是占位**的说法，而不是编一个像样的名字：
+ * "黑暗中的东西"这种名字读起来像作者起的，玩家会以为这就是它的名字；
+ * "不明的东西"一眼就知道"引擎也不知道这是什么"，
+ * 反倒诚实——而且模型下一轮描述里出现真名时，改起来没有歧义。
+ *
+ * 导出是为了让测试与 UI 共用同一个字符串，别到处各写一份。
+ */
+export const UNNAMED_FOE = '不明的东西';
+
+/**
  * 一条支线（story thread）。
  *
  * 回答"网状叙事会不会超出 AI 能力"：**全开放网状会**（线一多就忘、前后矛盾），
@@ -129,6 +143,13 @@ export interface NpcNote {
   note?: string;
   /** 第几回合首次照面（用于卡片上显示"第 N 回认识"） */
   met?: number;
+  /**
+   * **最后一次接触**的回合（引擎写，模型不写）。
+   *
+   * 用途只有一处：档案超上限时判断"谁最久没接触"（见 `core/npcNotes.ts`）。
+   * 可选新增字段 —— 旧档没有它时退回 `met`，**不升 `SAVE_VERSION`**。
+   */
+  seen?: number;
 }
 
 /**
@@ -242,6 +263,40 @@ export interface GameState {
    * （里面写着这一幕谁会先动手、要露哪些线索）—— UI 必须遮罩，与「真相」同一档。
    */
   actDetails?: Record<string, string>;
+  /**
+   * 这一局是**接在哪个世界后面**（世界层 Phase 2）。
+   *
+   * 可选：没有它就是"从头开的一局"。有值时，守密人要按"接着上次"来写
+   * （别把在场的人当陌生人、别重演已经发生过的事）——
+   * 真源只有一个：**开新团那一刻由引擎写死**，模型不可改、也不进 `ALLOWED_ROOTS`。
+   *
+   * 与 `actIndex` / `actDetails` 同一判据：可选新增字段，**不升 `SAVE_VERSION`**。
+   */
+  carriedFrom?: string;
+  /**
+   * 故事时钟 —— **引擎权威的"现在是什么时候"**。
+   *
+   * 可选新增字段（旧档没有就按 `DEFAULT_CLOCK` 起步），**不升 `SAVE_VERSION`**。
+   *
+   * 为什么它必须在状态里、而不是靠模型记：
+   * 模组的 `urgency` 写着"雨季还有二十三天结束"，但那只是一句形容词，
+   * 没有任何东西在数它。玩家睡一觉、走三小时山道、在茶棚坐到天黑，
+   * 系统全都不知道 —— 长篇跑到中段倒计时还是"二十三天"（主人 2026-09-17 报的
+   * "没有时间表/时钟""系统似乎没有时间概念"）。
+   *
+   * **模型不许改它**（不进 `ALLOWED_ROOTS`）：它只能在契约里写 `elapsed`
+   * （"三个小时""一整夜"），由引擎折算后推进。与骰子同一条分工：
+   * 模型报剧情里的量，数数的是引擎。
+   */
+  clock?: StoryClock;
+  /**
+   * 期限倒计时（`urgency` 的数字版）。
+   *
+   * 为什么单独存一个、不从 `urgency` 文本解析：「雨季还有二十三天结束」
+   * 用正则猜日期**一定会错**；让守密人显式声明 `deadline_days`，
+   * 引擎每轮按实际推进量减。减到 0 就是"期限到了"。
+   */
+  deadline?: Deadline | null;
   /** 战斗轮状态 */
   combat: CombatState;
 }
@@ -258,6 +313,14 @@ export interface StateDelta {
   value?: unknown;
   /** 变更理由，写进事件日志，便于回溯 */
   reason?: string;
+  /**
+   * 这一击用的是哪把武器（1.0 阶段 C，**可选**）。
+   *
+   * 模型在 `combat.foes dec` 上写了它，引擎就**按规则包的武器表掷伤害**
+   * （模型给的 `amount` 会被忽略）—— 伤害不再由模型随口报。
+   * **不写就完全走现状**，老契约一行都不用改。
+   */
+  weapon?: string;
   /*
    * ⚠️ 这里曾经有过一个 `announce?: boolean`（意为"我在正文里写过了，别弹提示"），
    * **2026-09-17 已删除**。理由见 `store.ts` 的 `describeChanges()`：
@@ -352,7 +415,6 @@ export function createInitialState(overrides: Partial<GameState> = {}): GameStat
       ...overrides,
     };
 }
-
 function deepClone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;
 }
@@ -382,17 +444,33 @@ function clamp(n: number, min: number, max: number): number {
 /**
  * 应用一批 delta。不会抛异常 —— 非法变更一律进 rejected，
  * 保证一轮对话不会因为模型输出一个离谱字段就整个崩掉。
+ *
+ * `ctx.elapsed` 是这一轮**剧情里过去了多久**（守密人申报的自然语言量，
+ * 如"三个小时""一整夜"）。它不进 delta 白名单，而是由引擎折算后推时钟——
+ * 详见 `core/clock.ts`。不传就是"时间原地不动"（回溯、读档、测试灌数据都走这条）。
  */
 export function applyDeltas(
   state: GameState,
   deltas: StateDelta[],
-  ctx: { rng?: Rng; ruleset?: Ruleset; vitalsMax?: Record<string, number> } = {}
+  ctx: {
+    rng?: Rng;
+    ruleset?: Ruleset;
+    vitalsMax?: Record<string, number>;
+    elapsed?: string;
+  } = {}
 ): ApplyReport {
   const next = deepClone(state);
   // 兼容旧存档：早期保存的状态没有 combat / threads 字段，这里补默认值
   if (!next.combat) next.combat = { active: false, round: 0, foes: [] };
   if (!Array.isArray(next.combat.foes)) next.combat.foes = [];
   if (!Array.isArray(next.threads)) next.threads = [];
+  /*
+   * 故事时钟与倒计时也是后加的（可选字段，不升 SAVE_VERSION）。
+   * 旧档没有就按"第 1 天上午九点"起步 —— 这里只做类型兜底，
+   * 真正的推进在函数的最后（`tickClock`）。
+   */
+  if (!next.clock) next.clock = { day: 1, minute: 9 * 60 };
+  else next.clock = normalizeClock(next.clock);
   const applied: AppliedDelta[] = [];
   const rejected: RejectedDelta[] = [];
   const rolls: { expression: string; total: number }[] = [];
@@ -835,23 +913,53 @@ export function applyDeltas(
         };
 
         if (delta.op === 'add') {
-          const f = delta.value as Partial<Foe>;
-          if (!f?.name) {
-            rejected.push({ delta, reason: 'combat.foes add 需要 name' });
-            continue;
-          }
-          const existing = next.combat.foes.find((x) => x.name === f.name);
+          // `value` 可能压根不是对象（模型写了个字符串、或整个忘了）
+          // —— 一律当作"什么都没给"，走占位名 + 缺省血量，不许崩。
+          const f = (delta.value && typeof delta.value === 'object' ? delta.value : {}) as Partial<Foe>;
+          /*
+           * 模型忘了起名字怎么办 —— **不许拒绝**。
+           *
+           * 原来这里直接 reject，后果是：模型正文里写"阴影里扑出一只东西"、
+           * delta 里却忘了填 `name`，于是敌人根本没进列表，玩家**对着空气打**
+           * （用户 2026-09-16 实测报过）。
+           * 对一个把"接得住合理行动"当北极星的项目来说，这是最不该出现的一类失败：
+           * 模型漏一个字段，代价不该由玩家承担。
+           *
+           * 所以退到「不明的东西」：它照样进列表、照样能被打、血条照样显示。
+           * 名字丑一点无所谓 —— **玩家能开打** 远比名字好听重要。
+           * 模型下一轮想给它起名，用 add 同名/改名的路径即可，不会卡死。
+           */
+          const rawName = String(f?.name ?? '').trim();
+          const name = rawName || UNNAMED_FOE;
+          const existing = next.combat.foes.find((x) => x.name === name);
           if (existing) {
-            existing.hp = typeof f.hp === 'number' ? f.hp : existing.hp;
-            existing.max = typeof f.max === 'number' ? f.max : existing.max;
+            /*
+             * 🔴 同名已存在 → **只收窄，绝不覆盖**（用户拍板 · 协作方第 21 版 P2-7）。
+             *
+             * 以前这里是直接覆盖 `hp` / `max`，于是模型**每轮重复 add 同一个敌人**
+             * （非常常见的写法：它只是想确认"它还在场上"）就等于悄悄回满血。
+             * 叠加 `fillFoeNumbers` 按模组表补数值，伤害被打回去、战斗永远打不完，
+             * 而"状态变化"卡一个字都不提 —— 正踩「引擎权威」与「状态可见」两条。
+             *
+             * 现在的方向只有一边：
+             *   - `hp` 取**小**：新申报的只能把它往下压，永远不能往上抬（绝不回血）；
+             *   - `max` 取**大**：上限只许放宽，不许缩（缩上限等于凭空判它更脆）。
+             * 字段没申报 → 一个字都不动。
+             *
+             * 想要一个满血的新敌人，正确路径是先 `remove` 再 `add`（那时的确是新建）。
+             */
+            if (typeof f.hp === 'number') existing.hp = Math.min(existing.hp, f.hp);
+            if (typeof f.max === 'number') existing.max = Math.max(existing.max, f.max);
+            // 上限放宽后，当前血量仍不许越过它
+            if (existing.hp > existing.max) existing.hp = existing.max;
           } else {
             next.combat.foes.push({
-              name: f.name,
+              name,
               hp: typeof f.hp === 'number' ? f.hp : 10,
               max: typeof f.max === 'number' ? f.max : (typeof f.hp === 'number' ? f.hp : 10),
             });
           }
-          markSeen(f.name);
+          markSeen(name);
           applied.push({ delta, before: null, after: deepClone(next.combat.foes) });
           continue;
         }
@@ -879,14 +987,31 @@ export function applyDeltas(
             rejected.push({ delta, reason: `战斗中不存在敌人「${name}」` });
             continue;
           }
+          /*
+           * 1.0 阶段 C：**伤害由引擎按武器表掷**。
+           *
+           * 以前伤害是模型申报的（模型说扣 7 就扣 7）—— 权威在模型手里，
+           * 而「引擎权威」是本项目第一条铁律。现在只要在 delta 上写了 `weapon`，
+           * 引擎就查规则包的武器表、按那把武器的伤害骰掷一个出来。
+           *
+           * ⚠️ 两点刻意的取舍：
+           *   ① **渐进增强**：没写 `weapon`（老契约、自定义包没填武器表）→ 完全走现状，一行不变；
+           *   ② 认不出这把武器 → **照旧用模型给的 amount**，不 reject（模型漏字段不该由玩家承担）。
+           */
           let amount: number;
-          if (typeof delta.amount === 'number') amount = delta.amount;
-          else if (typeof delta.amount === 'string') {
+          const wd = delta.weapon?.trim() ? findWeapon(ctx.ruleset, delta.weapon) : undefined;
+          if (wd) {
+            const outcome = roll(wd.damage, rng);
+            rolls.push({ expression: outcome.expression, total: outcome.total });
+            amount = outcome.total;
+          } else if (typeof delta.amount === 'number') {
+            amount = delta.amount;
+          } else if (typeof delta.amount === 'string') {
             const outcome = roll(delta.amount, rng);
             rolls.push({ expression: outcome.expression, total: outcome.total });
             amount = outcome.total;
           } else {
-            rejected.push({ delta, reason: 'combat.foes dec 缺少 amount' });
+            rejected.push({ delta, reason: 'combat.foes dec 缺少 amount 或 weapon' });
             continue;
           }
           const before = foe.hp;
@@ -936,6 +1061,42 @@ export function applyDeltas(
     const before = getPath(next, delta.target);
     setPath(next as unknown as Record<string, unknown>, delta.target, delta.value);
     applied.push({ delta, before, after: delta.value });
+  }
+
+  /*
+   * ── 故事时钟推进（引擎侧，最后统一做一次）────────────────────
+   *
+   * 为什么放在最后、而不是当成一条 delta：时间**不是**模型能直接改的字段
+   * （`clock` 不进 `ALLOWED_ROOTS`）。它只能申报"过了多久"，
+   * 由这里折算并推进 —— 与骰子同一条分工：模型报量，引擎数数。
+   *
+   * 时钟真的动了的话，**记一条 applied**：界面上的"状态变化"提示、
+   * 以及编年史都靠它才知道"这一轮时间过去了"（状态可见属于框架，不是特效）。
+   */
+  if (ctx.elapsed !== undefined) {
+    const beforeClock = next.clock;
+    const tick = tickClock(beforeClock, next.deadline, ctx.elapsed);
+    if (tick.elapsedMinutes > 0) {
+      next.clock = tick.clock;
+      next.deadline = tick.deadline;
+      /*
+       * 只有"值得说一声"的推进才记账（跨天 / 换了时段）。
+       * 理由：每一轮都推个十分钟是正常的，每轮都弹一条"时间过去了十分钟"
+       * 就成了噪声；而跨天、入夜是**玩家真的会关心**的变化。
+       */
+      if (tick.noteworthy) {
+        applied.push({
+          delta: {
+            target: 'clock',
+            op: 'set',
+            value: clockLabel(tick.clock),
+            reason: '时间推进',
+          },
+          before: clockLabel(beforeClock),
+          after: clockLabel(tick.clock),
+        });
+      }
+    }
   }
 
   return { state: next, applied, rejected, rolls };

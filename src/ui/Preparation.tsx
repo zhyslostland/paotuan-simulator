@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
-import { useStore, deriveAddress, addressOf, defaultCharacteristics, skillBudget, BUILTIN_MODULES, starterCharacterOf, type CharacterProfile, type Companion, type ModuleItem, type ModuleMonster, type ModuleNpc, type WorldbookEntry } from './store';
+import { useEffect, useMemo, useState } from 'react';
+import { useStore, deriveAddress, addressOf, defaultCharacteristics, characteristicBudget, skillBudget, BUILTIN_MODULES, starterCharacterOf, starterSkillsFor, type CharacterProfile, type Companion, type ModuleItem, type ModuleMonster, type ModuleNpc, type WorldbookEntry } from './store';
 import { getRuleset } from '../core/rulesets/index.js';
 import type { Ruleset } from '../core/rulesets/types.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
+import { stripModuleWorldbook } from '../core/worldbook.js';
 import { ImageField } from './ImageField';
 import {
   characterSystemPrompt,
@@ -22,6 +23,14 @@ import {
 } from '../orchestrator/generate.js';
 import { ModelError } from '../providers/model.js';
 import { extractCharacterCard } from './charCard.js';
+import {
+  carryPreview,
+  defaultWorldName,
+  findWorld,
+  listWorlds,
+  runLabel,
+} from '../core/campaign.js';
+import { archiveBlurb, listArchive, matchesRuleset } from './archive.js';
 
 /** 当前题材（内置或自建） */
 function useGenre(): { genre: Genre; all: Genre[] } {
@@ -305,6 +314,11 @@ function CharacterTab() {
   const rs = getRuleset(rulesetId);
   const { genre } = useGenre();
   const starter = starterCharacterOf(genre.id);
+  // 属性点预算（COC 八项共 460）：规则包没给总额就是 null，界面不显示
+  const budget = useMemo(
+    () => characteristicBudget(rulesetId, character.characteristics),
+    [rulesetId, character.characteristics]
+  );
   const [showPicker, setShowPicker] = useState(false);
   const [growth, setGrowth] = useState(false);
   const [importMsg, setImportMsg] = useState('');
@@ -401,15 +415,21 @@ function CharacterTab() {
         {starter && (
           <button
             onClick={() => {
-              const skills = Object.fromEntries(
-                (rs.starterSkills ?? []).map((sk) => [sk.name, sk.value])
-              );
               setCharacter({
                 ...starter,
                 address: undefined,
                 // 数值层按当前规则包重建，别沿用别的规则的数字
                 characteristics: defaultCharacteristics(rulesetId),
-                skills,
+                /*
+                 * 技能跟着**人设**走，不跟着规则包走。
+                 *
+                 * 原来这里取 `rs.starterSkills`（规则包通用 8 项），
+                 * 于是"流浪剑客"的技能表里是侦查 / 图书馆使用 —— 人设直接塌掉
+                 * （用户 2026-09-17 报「属性技能与人设不匹配」）。
+                 * `starterSkillsFor` 会把题材配方适配到当前规则包的词汇表上，
+                 * 名不合法就退回通用项（见函数头注释）。
+                 */
+                skills: starterSkillsFor(genre.id, rulesetId),
                 /*
                  * 随身物品**保留示例角色自带的**。
                  * 早期这里显式清成空数组，于是"套用示例角色"之后背包永远是空的——
@@ -483,13 +503,13 @@ function CharacterTab() {
         />
       </label>
 
-      <ImageField
-        label="角色立绘"
-        prompt={characterImagePrompt(character, genre)}
-        value={character.portrait}
-        onSave={(url) => setCharacter({ portrait: url })}
-        onClear={() => setCharacter({ portrait: '' })}
-      />
+              <ImageField
+                label="角色立绘"
+                prompt={characterImagePrompt(character, genre)}
+                value={character.portrait}
+                job={{ kind: 'portrait', target: 'character' }}
+                onClear={() => setCharacter({ portrait: '' })}
+              />
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
@@ -517,43 +537,71 @@ function CharacterTab() {
       </label>
 
       <div>
-        <div className="mb-1.5 flex items-center justify-between">
+        <div className="mb-1.5 flex items-center justify-between gap-2">
           <span className="text-[11px] text-mist-400">
             属性 <span className="text-mist-500/70">（由规则包「{rs.name}」定义）</span>
           </span>
-          <button
-            onClick={() => setCharacter({ characteristics: defaultCharacteristics(rulesetId) })}
-            className="text-[11px] text-gold-400 hover:text-gold-500"
-          >
-            重置
-          </button>
+          <div className="flex shrink-0 items-center gap-3">
+            {/*
+              点预算：规则包给了才显示（COC＝八项共 460）。
+              用户 2026-09-17 报「属性上限/总额设定」—— 原来一排数字没有任何总额概念，
+              玩家把每项都拉到 90 也不知道自己超了规则。
+            */}
+            {budget.total !== null && (
+              <span
+                className={`text-[11px] ${
+                  (budget.remaining ?? 0) < 0 ? 'text-ember-400' : 'text-mist-500'
+                }`}
+                title={`规则包「${rs.name}」的属性总额是 ${budget.total} 点`}
+              >
+                总计 <b className="text-mist-200">{budget.spent}</b>
+                <span className="text-mist-500/70"> / {budget.total}</span>
+                {(budget.remaining ?? 0) < 0 && (
+                  <span className="ml-1">超 {Math.abs(budget.remaining!)}</span>
+                )}
+              </span>
+            )}
+            {(budget.total === null || budget.spent !== budget.total) && (
+              <button
+                onClick={() => setCharacter({ characteristics: defaultCharacteristics(rulesetId) })}
+                className="text-[11px] text-gold-400 hover:text-gold-500"
+              >
+                重置
+              </button>
+            )}
+          </div>
         </div>
         <div className="grid grid-cols-4 gap-2">
-          {rs.characteristicDefs.map((d) => (
-            <label key={d.key} className="block">
-              <span className="mb-0.5 block text-[10px] text-mist-500">
-                {d.label} <span className="font-mono">{d.key.toUpperCase()}</span>
-              </span>
-              <input
-                className={`${inputCls} text-center`}
-                type="number"
-                min={d.min}
-                max={d.max}
-                step={1}
-                value={character.characteristics[d.key] ?? d.default}
-                onChange={(e) =>
-                  setCharacter({
-                    characteristics: {
-                      ...character.characteristics,
-                      // 清空时回落到默认值；store 里还会再按 min/max 夹一次
-                      [d.key]: e.target.value === '' ? d.default : Number(e.target.value),
-                    },
-                  })
-                }
-                title={`范围 ${d.min}–${d.max}`}
-              />
-            </label>
-          ))}
+          {rs.characteristicDefs.map((d) => {
+            const v = character.characteristics[d.key] ?? d.default;
+            return (
+              <label key={d.key} className="block">
+                <span className="mb-0.5 block text-[10px] text-mist-500">
+                  {d.label} <span className="font-mono">{d.key.toUpperCase()}</span>
+                </span>
+                <input
+                  className={`${inputCls} text-center`}
+                  type="number"
+                  min={d.min}
+                  max={d.max}
+                  step={1}
+                  value={v}
+                  onChange={(e) =>
+                    setCharacter({
+                      characteristics: {
+                        ...character.characteristics,
+                        // 清空时回落到默认值；store 里还会再按 min/max 夹一次
+                        [d.key]: e.target.value === '' ? d.default : Number(e.target.value),
+                      },
+                    })
+                  }
+                  title={`范围 ${d.min}–${d.max}${
+                    budget.total !== null ? `，八项总计 ${budget.total}` : ''
+                  }`}
+                />
+              </label>
+            );
+          })}
         </div>
         {/* 派生数值：属性一变，血/蓝/理智/伤害加成自动跟着算 */}
         <DerivedPreview characteristics={character.characteristics} rs={rs} />
@@ -646,7 +694,11 @@ function CharacterTab() {
               | { name?: string; desc?: string; kind?: string; damage?: string; skill?: string }
             )[];
           }>(
-            characterSystemPrompt(genre, rs),
+            // 把当前模组一起喂进去：题材决定"世界长什么样"，模组决定"这张卡要在什么处境里活下去"
+            characterSystemPrompt(genre, rs, {
+              title: gameModule.title,
+              premise: gameModule.premise,
+            }),
             desc ||
               `请自由创作一名贴合「${genre.name}」题材的角色。` +
                 (gameModule.title
@@ -660,24 +712,32 @@ function CharacterTab() {
             }
           );
           if (!data) throw new Error('模型没有返回合法 JSON，请重试或换个描述');
-          // 物品：兼容"字符串数组"（旧格式/模型偷懒）与"对象数组"（带简介与武器属性）
+          /*
+           * 物品：兼容"字符串数组"（旧格式 / 模型偷懒）与"对象数组"（带简介与武器属性）。
+           *
+           * 以前 `itemDetails` 只在**对象数组**那一条路上生成，模型一旦偷懒只给名字，
+           * 详情就是空的，于是走 `?? character.itemDetails` **把上一张角色卡的物品说明原样接过来** ——
+           * 名字是新的、说明是旧的，玩家看到的就是"一件只有名字的东西"
+           * （主人 2026-09-20 报的"生成角色卡后物品没有描述"）。
+           *
+           * 现在：字符串也建一条详情（名字有、说明可能没有），
+           * 并且**两条路都不再回退到旧卡** —— 缺说明是这一轮没生成好，串味才是真错。
+           */
           const rawItems = data.items ?? [];
-          const items = rawItems
-            .map((it) => (typeof it === 'string' ? it.trim() : (it?.name ?? '').trim()))
-            .filter(Boolean);
           const itemDetails = rawItems
-            .filter(
-              (it): it is { name?: string; desc?: string; kind?: string; damage?: string; skill?: string } =>
-                typeof it === 'object' && it !== null
+            .map((it) =>
+              typeof it === 'string'
+                ? { name: it.trim(), desc: undefined, kind: undefined, damage: undefined, skill: undefined }
+                : {
+                    name: (it?.name ?? '').trim(),
+                    desc: it?.desc?.trim(),
+                    kind: it?.kind?.trim(),
+                    damage: it?.damage?.trim(),
+                    skill: it?.skill?.trim(),
+                  }
             )
-            .map((it) => ({
-              name: (it.name ?? '').trim(),
-              desc: it.desc?.trim(),
-              kind: it.kind?.trim(),
-              damage: it.damage?.trim(),
-              skill: it.skill?.trim(),
-            }))
             .filter((d) => d.name);
+          const items = itemDetails.map((d) => d.name);
           setCharacter({
             name: data.name ?? character.name,
             gender: data.gender ?? character.gender,
@@ -691,8 +751,9 @@ function CharacterTab() {
               ...(data.characteristics ?? {}),
             },
             skills: data.skills ?? character.skills,
-            items: items.length ? items : character.items,
-            itemDetails: itemDetails.length ? itemDetails : character.itemDetails,
+            // 两张表都只认这一轮生成的（名字与详情一一对应，不会串到上一张卡）
+            items,
+            itemDetails,
           });
         }}
       />
@@ -850,7 +911,7 @@ function CompanionsTab() {
                   genre
                 )}
                 value={c.portrait}
-                onSave={(url) => patch(c, { portrait: url })}
+                job={{ kind: 'portrait', target: c.id }}
                 onClear={() => patch(c, { portrait: '' })}
               />
               <div className="flex items-center gap-2">
@@ -1040,6 +1101,67 @@ function WorldbookTab() {
               {e.priority}
             </span>
           </div>
+
+          {/*
+           * 1.0 阶段 A：**注入的时机与位置由玩家说了算**。
+           *
+           * 「常驻」是这一刀最要紧的一个 —— 没有它，玩家写了「这个世界的魔法规则」，
+           * 却只能等正文里出现"魔法"两个字才生效：世界的底层设定居然是"提起来才在"。
+           *
+           * ⚠️ 常驻不看关键词、全都进 → 必须与「字数」预算同刀，否则长局撑爆上下文。
+           */}
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <label className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={!!e.constant}
+                onChange={(ev) => upsert({ ...e, constant: ev.target.checked })}
+                className="accent-[#b8953f]"
+              />
+              <span className="text-[11px] text-mist-400">常驻</span>
+            </label>
+            <span
+              className="text-[10px] text-mist-500/70"
+              title="勾上后这一条不看关键词，每轮都在 —— 用来放世界的底层设定"
+            >
+              （每轮都注入）
+            </span>
+
+            <label className="flex items-center gap-1">
+              <span className="text-[11px] text-mist-500">字数上限</span>
+              <input
+                type="number"
+                min={0}
+                value={e.budget ?? 0}
+                onChange={(ev) => upsert({ ...e, budget: Number(ev.target.value) || 0 })}
+                className={`${inputCls} w-20`}
+                title="0 ＝不限制。总字数超预算时先裁优先级低的"
+              />
+            </label>
+
+            <label className="flex items-center gap-1">
+              <span className="text-[11px] text-mist-500">插入深度</span>
+              <input
+                type="number"
+                min={0}
+                max={5}
+                value={e.depth ?? 0}
+                onChange={(ev) => upsert({ ...e, depth: Number(ev.target.value) || 0 })}
+                className={`${inputCls} w-16`}
+                title="0 ＝贴着守密人的设定（最不容易被盖过）；越大越靠近当前对话"
+              />
+            </label>
+
+            <label className="flex items-center gap-1">
+              <span className="text-[11px] text-mist-500">分组</span>
+              <input
+                className={`${inputCls} w-24`}
+                value={e.group ?? ''}
+                placeholder="可留空"
+                onChange={(ev) => upsert({ ...e, group: ev.target.value })}
+              />
+            </label>
+          </div>
         </div>
       ))}
 
@@ -1063,7 +1185,13 @@ function WorldbookTab() {
         placeholder="例如：一个封闭的渔业小镇，居民信奉某种海洋信仰，对外人极度警惕"
         onGenerate={async (desc) => {
           const data = await generateJson<
-            { keys?: string[]; content?: string; priority?: number }[]
+            {
+              keys?: string[];
+              content?: string;
+              priority?: number;
+              constant?: boolean;
+              budget?: number;
+            }[]
           >(
             worldbookSystemPrompt(genre),
             desc || `请围绕「${genre.name}」题材自由创作几个世界设定条目。`,
@@ -1073,12 +1201,22 @@ function WorldbookTab() {
             throw new Error('模型没有返回合法的条目数组，请重试');
           for (const item of data) {
             if (!item.content) continue;
+            /*
+             * 1.0 阶段 A：**AI 生成的条目也要带上常驻与预算**。
+             *
+             * 以前这里只落 keys / content / priority —— 于是 AI 生成的世界条目
+             * 全是"提起来才在"，而它们偏偏多半是**世界的底层设定**（这座城的规矩、
+             * 通行货币、这里的信仰），恰恰是最该常驻的那类。手写那条腿有常驻、AI 这条没有，
+             * 同一件事两条腿不一致。
+             */
             upsert({
               id: uid(),
               keys: item.keys?.length ? item.keys : [item.content.slice(0, 6)],
               content: item.content,
               priority: item.priority ?? 50,
               enabled: true,
+              constant: item.constant === true,
+              budget: Number.isFinite(item.budget) ? Number(item.budget) : 0,
             });
           }
         }}
@@ -1122,7 +1260,7 @@ function Area({
 function ModuleTab() {
   const gameModule = useStore((s) => s.module);
   const setModule = useStore((s) => s.setModule);
-  const clearModuleDerived = useStore((s) => s.clearModuleDerived);
+  const applyModule = useStore((s) => s.applyModule);
   const config = useStore((s) => s.config);
   const character = useStore((s) => s.character);
   const rulesetId = useStore((s) => s.rulesetId);
@@ -1167,7 +1305,10 @@ function ModuleTab() {
       setModule({ items });
       setGenItemsErr('');
     } catch (e) {
-      setGenItemsErr(e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`);
+      const msg = e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`;
+      setGenItemsErr(msg);
+      // 往上抛：`genTables()` 要靠它知道"这一半失败了"（会自己 catch 记一笔）
+      throw e;
     } finally {
       setGenItemsBusy(false);
     }
@@ -1175,6 +1316,10 @@ function ModuleTab() {
 
   /** 敌对者表：默认遮住（剧透），可单独生成 */
   const monsters = gameModule.monsters ?? [];
+  // 遮罩外面那个「投入战斗」只认**起了名字的** —— 没名字的也进不了战斗（引擎同样不收）
+  const namedMonsters = monsters.filter((m) => m.name.trim().length > 0);
+  const [castPick, setCastPick] = useState(0);
+  const [castNote, setCastNote] = useState('');
   const [monstersRevealed, setMonstersRevealed] = useState(false);
   const [genMonstersBusy, setGenMonstersBusy] = useState(false);
   const [genMonstersErr, setGenMonstersErr] = useState('');
@@ -1212,7 +1357,10 @@ function ModuleTab() {
       setModule({ monsters: list });
       setMonstersRevealed(true);
     } catch (e) {
-      setGenMonstersErr(e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`);
+      const msg = e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`;
+      setGenMonstersErr(msg);
+      // 同上：`genTables()` 靠抛出来分辨哪一半失败
+      throw e;
     } finally {
       setGenMonstersBusy(false);
     }
@@ -1225,6 +1373,40 @@ function ModuleTab() {
   };
   const removeMonster = (id: string) =>
     setModule({ monsters: (gameModule.monsters ?? []).filter((x) => x.id !== id) });
+
+  /**
+   * 一键生成**敌对者 + 道具表**（用户 2026-09-17 报的"需要手动生成"）。
+   *
+   * ## 为什么要有这个按钮
+   * 原来两张表各有一个生成按钮，玩家/AI 生成完模组包之后要**记得点两次**。
+   * 漏点一次，那一局就会出现"战斗里敌人没有数值"或者"拾取的东西没有作用"——
+   * 而这恰恰是框架该替玩家兜住的事，不是靠他记性。
+   *
+   * ## 为什么是"并发两次调用"而不是"一次要两张表"
+   * 两个提示词（`itemTableSystemPrompt` / `monsterSystemPrompt`）是分别调好的，
+   * 各自**只做一件事**，作用与数值都写得比混在一起时准确（各自的注释里说过）。
+   * 所以这里保持两个提示词不变，只是把"点两次"变成"点一次"：
+   * 并发发出去，各自失败互不影响 —— 一边失败另一半照样落地。
+   *
+   * 这也符合"一次多做点"的偏好：玩家只看见一个按钮，引擎负责把两件事办完。
+   */
+  const [genAllBusy, setGenAllBusy] = useState(false);
+  const [genAllErr, setGenAllErr] = useState('');
+
+  const genTables = async () => {
+    setGenAllBusy(true);
+    setGenAllErr('');
+    const failed: string[] = [];
+    // 两张表并发：一张慢不会拖住另一张
+    await Promise.all([
+      genItems().catch(() => failed.push('道具表')),
+      genMonsters().catch(() => failed.push('敌对者')),
+    ]);
+    if (failed.length) {
+      setGenAllErr(`${failed.join(' 与 ')} 没生成成功，可以单独再点一次对应的按钮。`);
+    }
+    setGenAllBusy(false);
+  };
 
   /**
    * 按表里的数值把它放进战斗 —— 引擎初始化，模型只负责演。
@@ -1348,7 +1530,16 @@ function ModuleTab() {
                   key={m.title}
                   onClick={() => {
                     if (active) return;
-                    setModule({ ...m, npcs: m.npcs.map((n) => ({ ...n, id: uid() })) });
+                    /*
+                     * 走 `applyModule()` 而不是 `setModule()`：
+                     * 一键套用内置模组＝**真的换了一个模组**，必须一并
+                     * ①撤掉上一个模组的世界书 ②装上这个模组自带的那份
+                     *  ③清掉上一个模组推荐的队友候选 ④重算开场白。
+                     *
+                     * 以前这里只调 `setModule`，于是套用《枯井之约》之后
+                     * 屏幕上飘的还是上一个世界的设定（主人 2026-09-17 报的）。
+                     */
+                    applyModule({ ...m, npcs: m.npcs.map((n) => ({ ...n, id: uid() })) });
                     // 套用内置模组时，把题材也切到它的归属——否则会拿克苏鲁的写法跑奇幻模组
                     if (m.genre) setGenre(m.genre);
                   }}
@@ -1519,6 +1710,114 @@ function ModuleTab() {
         )}
       </div>
 
+      {/*
+       * 两张表的生成入口 —— **故意放在剧透遮罩外面**。
+       *
+       * 用户 2026-09-17：「敌对者 + 道具表需要手动生成」。
+       * 生成完模组包之后，绝大多数人的下一步就是"把这两张表补上"，
+       * 这是**常规路径**，不是"核对剧透时才做的事"。
+       * 从前它们落在 `{revealed && …}` 里，玩家不点「显示剧透」根本看不见按钮
+       * ——等于没有。生成按钮属于**操作**，表的内容才属于剧透，两者要分开。
+       */}
+      <div className="rounded-lg border border-gold-600/40 bg-gold-500/[0.04] p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <span className="text-[11px] text-gold-300">敌对者与道具</span>
+            <span className="ml-1.5 text-[10px] text-gold-500/70">
+              （两张表各自单独生成，内容默认遮住，不剧透）
+            </span>
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-1.5">
+            <button
+              onClick={genTables}
+              disabled={genAllBusy || genItemsBusy || genMonstersBusy}
+              className="rounded-md border border-gold-600/60 bg-gold-500/10 px-2.5 py-1 text-[11px] text-gold-400 transition hover:bg-gold-600/20 disabled:opacity-50"
+              title="一次把敌对者表与道具表都生成出来（两张表并发，互不影响）"
+            >
+              {genAllBusy ? '生成中…' : '一键生成两张表'}
+            </button>
+            <button
+              onClick={genMonsters}
+              disabled={genMonstersBusy}
+              className="rounded-md border border-blood-400/50 px-2.5 py-1 text-[11px] text-blood-300 transition hover:bg-blood-400/10 disabled:opacity-50"
+              title="单独生成一次敌对者表：数值定死，之后战斗照此演出"
+            >
+              {genMonstersBusy ? '生成中…' : '生成敌对者'}
+            </button>
+            <button
+              onClick={genItems}
+              disabled={genItemsBusy}
+              className="rounded-md border border-gold-600/50 px-2.5 py-1 text-[11px] text-gold-400 transition hover:bg-gold-500/10 disabled:opacity-50"
+              title="单独生成一次道具表：只做这一件事，所以作用写得比混在角色生成里准确得多"
+            >
+              {genItemsBusy ? '生成中…' : '生成道具表'}
+            </button>
+          </div>
+        </div>
+        {genAllErr && <p className="mt-1.5 text-[10px] text-gold-400">{genAllErr}</p>}
+        {genMonstersErr && <p className="mt-1.5 text-[10px] text-blood-400">{genMonstersErr}</p>}
+        {genItemsErr && <p className="mt-1.5 text-[10px] text-blood-400">{genItemsErr}</p>}
+        <p className="mt-1.5 text-[11px] text-mist-500/70">
+          已设定 {monsters.length} 个敌对者、{(gameModule.items ?? []).length} 件道具 ——
+          两张表的具体内容在下面「显示剧透」之后可查可改。
+        </p>
+
+        {/*
+         * 🔴 H13：「投入战斗」的**操作**入口 —— 与上面那排生成按钮同一个理由，
+         * 放在两层剧透遮罩（「显示剧透」＋敌对者表的「查看」）**外面**。
+         *
+         * 原来它只在遮罩里、每一只身上各挂一个按钮（下面 `1848` 那处），
+         * 于是玩家不先点两次「显示剧透」根本不知道有这条路 ——
+         * 「引擎权威」那条路被藏死，正踩用户拍板的「玩家看不见＝没做」。
+         *
+         * 这里**只出操作、不出内容**：选项写「第 N 个」，不列名字、不列数值，
+         * 遮罩本身的意义（别提前看见"这东西 12 血、怕火"）一点没破。
+         */}
+        <div className="mt-2 border-t border-gold-600/20 pt-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-gold-500/80">投入战斗</span>
+            {namedMonsters.length === 0 ? (
+              <span className="text-[10px] text-mist-500">
+                还没有敌对者 —— 先生成敌对者表
+              </span>
+            ) : (
+              <>
+                <select
+                  value={castPick}
+                  onChange={(e) => setCastPick(Number(e.target.value))}
+                  className="rounded-md border border-ink-600 bg-ink-900 px-1.5 py-1 text-[11px] text-mist-200"
+                  title="只写序号，不写名字与数值 —— 免得提前剧透"
+                >
+                  {namedMonsters.map((m, i) => (
+                    <option key={m.id} value={i}>
+                      第 {i + 1} 个
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => {
+                    const m = namedMonsters[castPick];
+                    if (!m) return;
+                    // 与遮罩里那个按钮同一条路：走 startCombatFrom，引擎按表落数值
+                    useStore.getState().startCombatFrom(gameModule.monsters ?? [], [m.name]);
+                    // 只报"第几个"，不报名字 —— 这里不剧透
+                    setCastNote(`第 ${castPick + 1} 个敌对者已按模组数值投入战斗`);
+                  }}
+                  className="rounded-md border border-blood-400/50 px-2.5 py-1 text-[11px] text-blood-300 transition hover:bg-blood-400/10"
+                  title="按模组表里的数值把它放进战斗（引擎开 combat.foes，模型只负责演）"
+                >
+                  投入战斗
+                </button>
+              </>
+            )}
+          </div>
+          <p className="mt-1 text-[10px] text-mist-500/70">
+            这里只给操作、不给名字与数值 —— 想知道具体是哪一只，到下面「显示剧透 → 查看」。
+          </p>
+          {castNote && <p className="mt-1 text-[10px] text-blood-300">{castNote}</p>}
+        </div>
+      </div>
+
       {revealed && (
         <>
       <Area
@@ -1619,14 +1918,10 @@ function ModuleTab() {
             >
               {monstersRevealed ? '遮住' : '查看'}
             </button>
-            <button
-              onClick={genMonsters}
-              disabled={genMonstersBusy}
-              className="rounded-md border border-blood-400/50 px-2.5 py-1 text-[11px] text-blood-300 transition hover:bg-blood-400/10 disabled:opacity-50"
-              title="单独生成一次敌对者表：数值定死，之后战斗照此演出"
-            >
-              {genMonstersBusy ? '生成中…' : '生成敌对者'}
-            </button>
+            {/*
+              生成按钮不在这里 —— 它们已经挪到上面「敌对者与道具」那一块（剧透遮罩**外面**）。
+              理由见那里的注释：生成是常规操作，不该藏在"显示剧透"后面。
+            */}
           </div>
         </div>
         {genMonstersErr && <p className="mt-1.5 text-[10px] text-blood-400">{genMonstersErr}</p>}
@@ -1721,14 +2016,7 @@ function ModuleTab() {
               （这个模组里会出现的东西；作用写好后，玩家拾取时自动带进背包）
             </span>
           </div>
-          <button
-            onClick={genItems}
-            disabled={genItemsBusy}
-            className="shrink-0 rounded-md border border-gold-600/50 px-2.5 py-1 text-[11px] text-gold-400 transition hover:bg-gold-500/10 disabled:opacity-50"
-            title="单独生成一次道具表：只做这一件事，所以作用写得比混在角色生成里准确得多"
-          >
-            {genItemsBusy ? '生成中…' : '生成道具表'}
-          </button>
+          {/* 生成按钮在上面「敌对者与道具」那一块（剧透遮罩外），这里只放内容 */}
         </div>
         {genItemsErr && <p className="mt-1.5 text-[10px] text-blood-400">{genItemsErr}</p>}
         <div className="mt-2 space-y-2">
@@ -1829,7 +2117,7 @@ function ModuleTab() {
       </p>
 
       <AiGenBox
-        label={canonical ? 'AI 生成模组包（按原版）' : 'AI 生成模组包'}
+        label={canonical ? '模组包（按原版）' : '模组包'}
         placeholder="例如：敦威治恐怖事件　或　1920 年代新英格兰，一名摄影师在小镇失踪"
         onGenerate={async (desc) => {
           const data = await generateJson<{
@@ -1860,52 +2148,59 @@ function ModuleTab() {
             }
           );
           if (!data) throw new Error('模型没有返回合法 JSON，请重试');
-          setModule({
-            title: data.title ?? gameModule.title,
-            premise: data.premise ?? gameModule.premise,
-            opening: data.opening ?? gameModule.opening,
-            startLocation: data.start_location ?? gameModule.startLocation,
-            goal: data.goal ?? gameModule.goal,
-            stakes: data.stakes ?? gameModule.stakes,
-            urgency: data.urgency ?? gameModule.urgency,
-            truth: data.truth ?? gameModule.truth,
-            npcs: data.npcs?.length
-              ? data.npcs.map((n) => ({
-                  id: uid(),
-                  name: n.name ?? '未命名',
-                  role: n.role ?? '',
-                  motive: n.motive ?? '',
-                  secret: n.secret ?? '',
-                }))
-              : gameModule.npcs,
-            locations: data.locations ?? gameModule.locations,
+          /*
+           * 走 `applyModule()`：AI 生成模组＝真的换了一个模组，
+           * 撤旧世界书 + 清旧队友候选 + 重算开场白都在里面做，不必再手动调
+           * `clearModuleDerived()`（从前是两步，少一步就留下上一个模组的残留）。
+           */
+          /*
+           * 一键生成＝**真的换了一个模组**：AI 没给的东西一律留空，**一个字都不许回退到上一个模组**。
+           *
+           * 以前这里写的是 `data.X ?? gameModule.X`，于是模型只要漏一个字段
+           * （它最常漏的正是 `start_location` 与 `map_nodes`），新模组就沿用旧模组的
+           * 开局地点、地点表与地图 —— 主人 2026-09-20 实测到的
+           * "开局显示角色在上个模组的地点（系统自动新建）"就是这样来的。
+           * 缺了就是这一轮没生成好，串味比残缺更糟：残缺看得出来，串味要到玩进去才发现。
+           */
+          applyModule({
+            title: data.title ?? '',
+            premise: data.premise ?? '',
+            opening: data.opening ?? '',
+            startLocation: data.start_location ?? '',
+            goal: data.goal ?? '',
+            stakes: data.stakes ?? '',
+            urgency: data.urgency ?? '',
+            truth: data.truth ?? '',
+            worldbook: [],
+            npcs: (data.npcs ?? [])
+              .filter((n) => n?.name)
+              .map((n) => ({
+                id: uid(),
+                name: n.name ?? '未命名',
+                role: n.role ?? '',
+                motive: n.motive ?? '',
+                secret: n.secret ?? '',
+              })),
+            locations: data.locations ?? '',
             /*
              * 地图节点必须接住。
              * 提示词早就在要 map_nodes，但这里以前没把它写进模组，
              * 于是 AI 生成的模组永远没有"可达关系"，地图迷雾被整块关掉，
              * 开局就把所有地点摊开——这正是玩家报的"迷雾失效"。
              */
-            mapNodes: data.map_nodes?.length
-              ? data.map_nodes
-                  .filter((n) => n.name)
-                  .map((n) => ({
-                    name: n.name!.trim(),
-                    links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
-                    note: n.note?.trim(),
-                  }))
-              : gameModule.mapNodes,
-            clueChain: data.clueChain ?? gameModule.clueChain,
-            acts: data.acts ?? gameModule.acts,
-            endings: data.endings ?? gameModule.endings,
-            notes: data.notes ?? gameModule.notes,
-            sourceNote: data.source_note ?? gameModule.sourceNote,
+            mapNodes: (data.map_nodes ?? [])
+              .filter((n) => n?.name)
+              .map((n) => ({
+                name: n.name!.trim(),
+                links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
+                note: n.note?.trim(),
+              })),
+            clueChain: data.clueChain ?? '',
+            acts: data.acts ?? '',
+            endings: data.endings ?? '',
+            notes: data.notes ?? '',
+            sourceNote: data.source_note ?? '',
           });
-          /*
-           * 模组**真的换了**才清上一套模组的派生数据（世界书 fromModule 条目 + 队友候选）。
-           * 触发点只有这里、下面"贴文本导入"、以及应用整套预设三处；
-           * 开新团与读档都不清（协作方 N2）。
-           */
-          clearModuleDerived();
 
           // 模组包：派生公开词条 + 队友候选。失败不影响已生成的模组。
           try {
@@ -1947,7 +2242,13 @@ function ModuleTab() {
                   fromModule: true,
                 }));
               if (generated.length) {
-                const manual = useStore.getState().worldbook.filter((e) => !e.fromModule);
+                /*
+                 * 只保住**玩家自己手加**的那部分（判据在 `core/worldbook.ts`，与 `applyModule` 共用一份）。
+                 * 以前这里只按 `!e.fromModule` 过滤，于是刚装上的 `mw-` 条目（模组自带的）
+                 * 也被当成"手写"留了下来 —— 换模组时撤掉、紧接着又加回去，
+                 * 这是"上个模组的地点没删"的第二个成因（第一个在 `applyModule` 里）。
+                 */
+                const manual = stripModuleWorldbook(useStore.getState().worldbook);
                 useStore.getState().setWorldbookEntries([...manual, ...generated]);
               }
 
@@ -2047,43 +2348,42 @@ function ModuleTab() {
                     { ...config, maxTokens: 3072 }
                   );
                   if (!data) throw new Error('模型没有返回合法 JSON，请重试');
-                  setModule({
-                    title: data.title ?? gameModule.title,
-                    premise: data.premise ?? gameModule.premise,
-                    opening: data.opening ?? gameModule.opening,
-                    startLocation: data.start_location ?? gameModule.startLocation,
-                    goal: data.goal ?? gameModule.goal,
-                    stakes: data.stakes ?? gameModule.stakes,
-                    urgency: data.urgency ?? gameModule.urgency,
-                    truth: data.truth ?? gameModule.truth,
-                    npcs: data.npcs?.length
-                      ? data.npcs.map((n) => ({
-                          id: uid(),
-                          name: n.name ?? '未命名',
-                          role: n.role ?? '',
-                          motive: n.motive ?? '',
-                          secret: n.secret ?? '',
-                        }))
-                      : gameModule.npcs,
-                    locations: data.locations ?? gameModule.locations,
+                  // 同样是"真的换了模组"——走 applyModule，自带世界书一起装上
+                  // 与「AI 一键生成」同一条规矩：导入＝换模组，没给的就留空，不回退上一个模组
+                  applyModule({
+                    title: data.title ?? '',
+                    premise: data.premise ?? '',
+                    opening: data.opening ?? '',
+                    startLocation: data.start_location ?? '',
+                    goal: data.goal ?? '',
+                    stakes: data.stakes ?? '',
+                    urgency: data.urgency ?? '',
+                    truth: data.truth ?? '',
+                    worldbook: [],
+                    npcs: (data.npcs ?? [])
+                      .filter((n) => n?.name)
+                      .map((n) => ({
+                        id: uid(),
+                        name: n.name ?? '未命名',
+                        role: n.role ?? '',
+                        motive: n.motive ?? '',
+                        secret: n.secret ?? '',
+                      })),
+                    locations: data.locations ?? '',
                     // 同上：地图节点要接住，否则地图迷雾没法工作
-                    mapNodes: data.map_nodes?.length
-                      ? data.map_nodes
-                          .filter((n) => n.name)
-                          .map((n) => ({
-                            name: n.name!.trim(),
-                            links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
-                            note: n.note?.trim(),
-                          }))
-                      : gameModule.mapNodes,
-                    clueChain: data.clueChain ?? gameModule.clueChain,
-                    acts: data.acts ?? gameModule.acts,
-                    endings: data.endings ?? gameModule.endings,
-                    notes: data.notes ?? gameModule.notes,
-                    sourceNote: data.source_note ?? gameModule.sourceNote,
+                    mapNodes: (data.map_nodes ?? [])
+                      .filter((n) => n?.name)
+                      .map((n) => ({
+                        name: n.name!.trim(),
+                        links: (n.links ?? []).map((x) => String(x).trim()).filter(Boolean),
+                        note: n.note?.trim(),
+                      })),
+                    clueChain: data.clueChain ?? '',
+                    acts: data.acts ?? '',
+                    endings: data.endings ?? '',
+                    notes: data.notes ?? '',
+                    sourceNote: data.source_note ?? '',
                   });
-                  // 同样是"真的换了模组"这一步才清派生数据
-                  clearModuleDerived();
                   setImportText('');
                   setImportOpen(false);
                 } catch (e) {
@@ -2104,21 +2404,270 @@ function ModuleTab() {
   );
 }
 
+/** 履历里的短日期：`9月17日 20:41`（本地时区；认不出来就把原文还回去） */
+function shortDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const hh = `${d.getHours()}`.padStart(2, '0');
+  const mm = `${d.getMinutes()}`.padStart(2, '0');
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`;
+}
+
+/**
+ * 「世界」一页（Phase 2）。
+ *
+ * 这里放的是**跨局留存**的两样东西：**世界**与**角色档案库**。
+ * 它们都不在单局存档里 —— 开新团清的是这一局的剧情，
+ * 而"这个世界记得什么""我捏过哪几张卡"该一直留着。
+ *
+ * 界面上只做两件事：**让玩家看得见会带什么过去**，以及**随时能反悔**。
+ */
+function WorldTab() {
+  const worlds = useStore((s) => s.worlds);
+  const worldName = useStore((s) => s.worldName);
+  const setWorldName = useStore((s) => s.setWorldName);
+  const carryWorld = useStore((s) => s.carryWorld);
+  const setCarryWorld = useStore((s) => s.setCarryWorld);
+  const forgetWorld = useStore((s) => s.forgetWorld);
+  const moduleTitle = useStore((s) => s.module.title);
+  const rulesetId = useStore((s) => s.rulesetId);
+  const archive = useStore((s) => s.characterArchive);
+  const character = useStore((s) => s.character);
+  const archiveCurrent = useStore((s) => s.archiveCurrentCharacter);
+  const useArchived = useStore((s) => s.useArchivedCharacter);
+  const deleteArchived = useStore((s) => s.deleteArchivedCharacter);
+  const [msg, setMsg] = useState('');
+
+  /*
+   * 派生数据都包 useMemo（WorldPanel 那条教训）：
+   * 排序 / 找留档 / 拼预览在长局里同样是每帧重算的活儿。
+   */
+  const all = useMemo(() => listWorlds(worlds), [worlds]);
+  const effective = worldName.trim() || defaultWorldName(moduleTitle);
+  const current = useMemo(() => findWorld(all, effective), [all, effective]);
+  const preview = useMemo(() => carryPreview(current), [current]);
+  const cards = useMemo(() => listArchive(archive), [archive]);
+
+  const flash = (t: string) => {
+    setMsg(t);
+    setTimeout(() => setMsg(''), 2400);
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* ── 世界名 ──────────────────────────────────────────── */}
+      <Area
+        label="这一局的世界"
+        hint="留空就跟着模组名走 · 换个名字就换一个世界（新名字底下是空的，不会串到别的世界）"
+        rows={1}
+        value={worldName}
+        onChange={setWorldName}
+        placeholder={defaultWorldName(moduleTitle)}
+      />
+
+      {all.length > 0 && (
+        <div>
+          <p className="mb-1.5 text-[11px] text-mist-400">
+            已经有留档的世界 <span className="text-mist-500/70">（点一下切过去）</span>
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {all.map((w) => (
+              <button
+                key={w.id}
+                onClick={() => setWorldName(w.name)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] transition ${
+                  w.id === current?.id
+                    ? 'border-gold-600/70 bg-gold-500/10 text-gold-300'
+                    : 'border-ink-600 text-mist-400 hover:border-gold-600/40 hover:text-mist-200'
+                }`}
+              >
+                {w.name}
+                <span className="ml-1 text-mist-500/70">{w.runs.length} 局</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── 接着上一次跑 ────────────────────────────────────── */}
+      <div className="rounded-lg border border-ink-700 bg-ink-850/40 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[12px] text-mist-100">接着上一次跑</p>
+            <p className="mt-0.5 text-[10px] leading-relaxed text-mist-500">
+              开团时把上个故事留下的东西带进来：去过的地方、还活着的人、没办完的事。
+            </p>
+          </div>
+          <button
+            onClick={() => setCarryWorld(!carryWorld)}
+            className={`shrink-0 rounded-lg border px-3 py-1.5 text-[12px] transition ${
+              carryWorld
+                ? 'border-gold-600/70 bg-gold-500/10 text-gold-300'
+                : 'border-ink-600 text-mist-400 hover:text-mist-200'
+            }`}
+          >
+            {carryWorld ? '开着' : '关着'}
+          </button>
+        </div>
+
+        {preview ? (
+          <ul className="mt-3 space-y-1 border-t border-ink-700 pt-2.5 text-[11px] leading-relaxed text-mist-300">
+            <li>
+              <span className="text-mist-500">上次最后的落脚点：</span>
+              {preview.location || preview.fallbackLocation}
+            </li>
+            <li>
+              <span className="text-mist-500">这个世界还记得的人：</span>
+              {preview.npcs.length === 0 ? (
+                <span className="text-mist-500/70">（没有记下谁）</span>
+              ) : (
+                <>
+                  {preview.npcs.join('、')}
+                  {preview.npcsMore > 0 ? ` 等 ${preview.npcs.length + preview.npcsMore} 人` : ''}
+                </>
+              )}
+            </li>
+            <li>
+              <span className="text-mist-500">还挂着的事：</span>
+              {preview.threads.length === 0 ? (
+                <span className="text-mist-500/70">（上一局的事了结了）</span>
+              ) : (
+                preview.threads.map((t) => t.name).join('、')
+              )}
+            </li>
+          </ul>
+        ) : (
+          <p className="mt-3 border-t border-ink-700 pt-2.5 text-[11px] leading-relaxed text-mist-500/80">
+            这个世界还没有留档 —— 跑完一局之后才有东西可带。
+            身上带的东西、伤势、疯狂不会带过去：那些是上一局的事，不是世界的事。
+          </p>
+        )}
+
+        {current && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-ink-700 pt-2.5">
+            <span className="text-[11px] text-mist-500">
+              这个世界跑过 <span className="text-mist-200">{current.runs.length}</span> 局
+            </span>
+            {current.runs.length > 0 && (
+              <button
+                onClick={() => {
+                  forgetWorld(current.id);
+                  flash('已忘掉这个世界的留档');
+                }}
+                className="rounded-md border border-blood-700/60 px-2 py-1 text-[11px] text-blood-300 transition hover:bg-blood-700/15"
+              >
+                忘掉这个世界的留档
+              </button>
+            )}
+          </div>
+        )}
+
+        {current && current.runs.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {current.runs.slice(0, 4).map((r) => (
+              <li key={r.at} className="flex items-baseline gap-2 text-[11px] text-mist-400">
+                <span className="shrink-0 text-mist-500/70">{shortDate(r.at)}</span>
+                <span className="min-w-0 flex-1 truncate">{runLabel(r)}</span>
+                <span className="shrink-0 text-mist-500/70">{r.turns} 回</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {msg && <p className="mt-2 text-[11px] text-moss-400">{msg}</p>}
+      </div>
+
+      {/* ── 角色档案库 ─────────────────────────────────────── */}
+      <div className="rounded-lg border border-ink-700 bg-ink-850/40 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[12px] text-mist-100">角色档案库</p>
+            <p className="mt-0.5 text-[10px] leading-relaxed text-mist-500">
+              把捏好的人存下来，换团也丢不了。同一个名字再存一次，就是更新那张卡。
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              const { replaced } = archiveCurrent();
+              flash(replaced ? `已更新《${character.name}》` : `已存下《${character.name}》`);
+            }}
+            className={smallBtn}
+          >
+            存下当前这张
+          </button>
+        </div>
+
+        {cards.length === 0 ? (
+          <p className="mt-3 border-t border-ink-700 pt-2.5 text-[11px] text-mist-500/80">
+            档案库还是空的。
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2 border-t border-ink-700 pt-2.5">
+            {cards.map((c) => (
+              <li key={c.id} className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12px] text-mist-200">{c.name}</p>
+                  <p className="mt-0.5 text-[10px] leading-snug text-mist-500">
+                    {archiveBlurb(c)}
+                  </p>
+                  {!matchesRuleset(c, rulesetId) && (
+                    <p className="mt-0.5 text-[10px] text-gold-400/80">
+                      这张卡是按另一个规则包捏的，技能名可能对不上。
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    if (useArchived(c.id)) flash(`已换成《${c.name}》`);
+                  }}
+                  className={smallBtn}
+                >
+                  用这张
+                </button>
+                <button
+                  onClick={() => deleteArchived(c.id)}
+                  className="shrink-0 rounded-lg border border-ink-600 px-2 py-1.5 text-[12px] text-mist-500 transition hover:border-blood-700/60 hover:text-blood-300"
+                >
+                  删
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <p className="text-[10px] leading-relaxed text-mist-500/70">
+        这两样都存在单局存档之外：开新团不会清掉它们，回溯更不会。
+      </p>
+    </div>
+  );
+}
+
 const TABS = [
   { id: 'module', label: '模组' },
   { id: 'character', label: '角色卡' },
   { id: 'companions', label: '同行者' },
   { id: 'worldbook', label: '世界书' },
+  { id: 'world', label: '世界' },
 ] as const;
 
 export function Preparation({
   onClose,
   onStartNew,
+  initialTab,
 }: {
   onClose: () => void;
   onStartNew: () => void;
+  /**
+   * 打开时默认停在哪个页签（缺省＝角色卡）。
+   *
+   * 存在的理由有两个，都不是"灵活"：
+   * ① 冒烟测试要能**直接渲染「世界」那一页** —— 弹层界面 `--dump-dom` 抓不到，
+   *    只渲染默认页签等于没测到新加的界面（0.3.0 白屏那次的教训）；
+   * ② 以后从结档页点"开新团"进来时，可以顺势落在该看的页签上。
+   */
+  initialTab?: (typeof TABS)[number]['id'];
 }) {
-  const [tab, setTab] = useState<(typeof TABS)[number]['id']>('character');
+  const [tab, setTab] = useState<(typeof TABS)[number]['id']>(initialTab ?? 'character');
   const { genre, all } = useGenre();
   const genreId = useStore((s) => s.genreId);
   const setGenre = useStore((s) => s.setGenre);
@@ -2175,6 +2724,19 @@ export function Preparation({
           <span className="ml-auto shrink-0 text-[10px] text-mist-500/70">
             规则：{getRuleset(rulesetId).name}
           </span>
+          {/*
+           * E3（主人 2026-09-24 点头）：解释「题材」与「描述」各管什么。
+           *
+           * 没有这句，玩家会把"我想要赛博朋克"写进描述里 —— 然后被题材（克苏鲁）盖掉，
+           * 他完全不知道为什么。**想换世界，出路是改题材，不是写在描述里。**
+           *
+           * 措辞是主人定的：描述那一栏＝**写你想要一个什么样的故事**（第二人称，对玩家说）。
+           */}
+          <p className="w-full text-[10px] leading-relaxed text-mist-500/70">
+            题材决定这个<strong className="text-mist-400">世界</strong>长什么样；下面的描述就写你
+            <strong className="text-mist-400">想要一个什么样的故事</strong>——
+            里面的人名、地名、点子都会保留下来，并翻译进这个世界。想换个世界，改上面的题材。
+          </p>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
@@ -2182,6 +2744,7 @@ export function Preparation({
           {tab === 'character' && <CharacterTab />}
           {tab === 'companions' && <CompanionsTab />}
           {tab === 'worldbook' && <WorldbookTab />}
+          {tab === 'world' && <WorldTab />}
         </div>
 
         <div className="shrink-0 border-t border-ink-700 px-5 py-3">

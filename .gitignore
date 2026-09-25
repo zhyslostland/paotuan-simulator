@@ -7,6 +7,24 @@ dist/
 .vscode/
 data/
 
+# 构建产物直接落在仓库根（见 scripts/publish-root.mjs）。
+# 为什么产物要放根：平台的**文档根写死成仓库根**（应用改不了），
+# 产物留在 dist/ 的话，线上 `/` 拿到的是仓库根那份"开发模板 index.html"
+# （它引 /src/main.tsx，浏览器按 octet-stream 拒绝执行 ES 模块 → 白屏）。
+# 唯一真源是 index.dev.html，根 index.html 由构建生成，不进版本管理。
+/index.html
+/assets/
+/version.json
+/sw.js
+/sw-v2.js
+/workbox-*.js
+/registerSW.js
+/manifest.webmanifest
+# 下面两项是 public/ 里的副本，publish-root 也会往根拷一份（值相同、非真源），
+# 与上面 8 项同性质，一并忽略。
+/entry-redirect.js
+/icon.svg
+
 # WorkBuddy 内部 / 部署产物（含本地部署标记，不进仓库）
 .wbapp_*.genie
 *.genie

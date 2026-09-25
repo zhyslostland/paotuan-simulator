@@ -1,8 +1,12 @@
 /**
  * 编排层：提示词组装
  *
- * 顺序不可随意调整 —— 越靠前的越"硬"（不可裁剪），越靠后的越"热"。
- * 超预算时从下往上砍。
+ * **段序即优先级**：越靠前越"硬"。超预算时由 `trimToBudget` 从尾往前砍；
+ * 只有两类段绝对不砍 —— **输出契约**（强化记忆所以排最后，恰恰最不能丢）
+ * 与**含真相的模组段**（真相丢了这一局就废了）。
+ *
+ * ⚠️ 别以为"排前面就安全"：裁剪循环只保住下标 0，其余都可能被砍。
+ *    要保的段必须在 `isProtectedSection` 里**显式**声明。
  */
 
 import type {
@@ -12,16 +16,36 @@ import type {
   Module,
   NpcLine,
   WorldbookEntry,
-} from '../ui/store.js';
+} from '../core/types.js';
 import type { Companion, GameState } from '../core/state/gameState.js';
 import type { Genre } from '../core/genres.js';
+import type { Ruleset } from '../core/rulesets/types.js';
+
+/**
+ * 模组段的开头标记。**唯一真源**：`buildSystemPrompt` 拼段与
+ * `isProtectedSection` 判"要不要保护"都用它 —— 写死两处迟早改一处忘一处。
+ */
+const MODULE_SECTION_PREFIX = '# 模组：';
 import { gmVoiceOf, type GmVoice } from '../core/voices.js';
 import { actAt, normalizeActIndex, parseActs } from '../core/acts.js';
+import { selectWorldbook as selectWorldbookCore } from '../core/worldbook.js';
+import { clockDetail, clockLabel, deadlineLabel, normalizeClock } from '../core/clock.js';
 
 export type { WorldbookEntry, ChronicleEntry };
 
 export interface PromptContext {
   rulesetName: string;
+  /**
+   * 当前规则包本体（不只是名字）。
+   *
+   * 为什么要有它：提示词里好几处必须**按规则包分岔**才能写对 ——
+   *   - 属性用中文标签还是英文键；
+   *   - 技能是百分比（COC）还是加值（DnD）；
+   *   - 有哪些派生值（伤害加成 / 体格 / 护甲等级）。
+   * 只给一个 `rulesetName` 字符串是做不到的（靠名字猜规则＝写死题材，
+   * 与"规则包可插拔"那条铁律冲突）。
+   */
+  ruleset: Ruleset;
   /** 题材预设：决定写法、世界观与禁忌（与规则包正交） */
   genre: Genre;
   /** 守密人口吻（R8）。只在"怎么说"这一层生效，绝不改变任何规则与数值 */
@@ -162,7 +186,13 @@ const GM_STYLE = `你是这场单人跑团的守密人（GM）。你的职责是
 - 没有就**照实写**：空枪套、卡壳、口袋里没有绳子、摸了个空。
   绝不能因为"他射击技能 40%"就让这一枪正常打出去。
 - 同理，物品数量要跟着走：用掉的东西按数量扣一处 state_delta（target 为 inventory、op 为 dec、
-  value 写物品名、amount 写数量），用完的从背包消失。`;
+  value 写物品名、amount 写数量），用完的从背包消失。
+- **扣不扣，只看"这件东西有没有被真的用掉"**，不看它有没有被提到。三个例子照这个判：
+  ① **拿出止血绷带包扎伤口 → 扣**：绷带缠上去就没了，写一处 dec。
+  ② **撕自己的衣服当布条 → 不扣、也绝不许编出一件"衣服"进背包**：玩家身上穿的本来就不在背包里，
+     凭空 add 一件等于作弊。只描述动作与该动作的后果。
+  ③ **把止血绷带铺在地上当垫子 → 扣**：它确实被用掉了，写一处 dec。
+- 拿不准时**默认不扣**（宁可下一轮补，也别凭空吞玩家的东西）。`;
 
 const INITIATIVE_RULE: Record<Companion['initiative'], string> = {
   reactive: '只在被玩家点名、或直接危险逼近时才开口。除此之外保持沉默，用动作和环境表现存在感。',
@@ -310,6 +340,9 @@ const STATUS_RULES = `## 状态演出（疯狂 / 濒死 / 死亡）
 - **持续的负面状态一律写进 flags**（键名中文，如 flags.中毒、flags.被跟踪）。
   只写在正文里、不进 flags，玩家在界面上就看不到自己身上挂着什么——
   用户实测反馈过："流血状态界面不显示，掉血了我才知道。"
+- **想让下一个模组还记得的标记，键名要带 \`世界.\` 前缀**（如 \`flags.世界.欠了船长一个人情\`）。
+  只有带这个前缀的标记会跨团保存；**玩家身上这一局的事**（中毒、流血、被跟踪…）**不要加前缀**——
+  那些本来就不该被带进下一局（新团开局就在流血，那是 bug 不是连续性）。
 - **伤口（含流血）现在由引擎接管，你不要自己扣血。**
   情况是这样：玩家受了会持续出血的伤时，引擎会在\*\*每一轮\*\*自动给他扣固定的一点点血
   （绝不叠加、绝不加大），并且把 \`flags.伤口\` 写进状态栏。你的任务是\*\*演出\*\*，不是记账：
@@ -349,6 +382,14 @@ const SPACE_RULES = `## 空间与位置（别让人物穿墙）
   他从哪来、怎么进来的，要交代一句。
 - **感官信息的来源要说清楚**：隔着门、隔着墙、在远处看见的，都得点明，
   否则玩家分不清自己是"亲眼看见"还是"听见动静"。
+- **地点要在模组给的范围内选**。模组「关键地点」一节列出的地方，就是这个故事里
+  **确实存在**的地方；玩家往那些地方走。
+  需要新场景时，优先把**已有地点细化**（"沼地"里可以有泥滩、旧界碑、浅水道），
+  而不是凭空造一个不相干的新地方——用户 2026-09-17 报过：预设模组里
+  "AI 自动生成地点，随时冒出些不相干的新地点"。
+  万不得已真要新地点，**必须让它的来路说得通**（谁提到过、从哪个已知的地方能走到）。
+- **地名用模组里的叫法**，并且始终一致。同一个地方一会儿叫"铁砧镇"、
+  一会儿叫"那个小镇"，地图会把它记成两个地方，玩家会以为自己到了别处。
 
 ## 不要替玩家编造他自己
 
@@ -403,9 +444,9 @@ const NARRATIVE_CRAFT = `## 叙事质感（怎么把故事写好看）
  *     不认识的字段跳过。宁可宽容，也不能因为一个数字把一整轮叙事废掉。
  *   - 只有**加字段 / 放宽**才 +1；改字段含义或删字段要另立大版本并写迁移。
  */
-export const CONTRACT_VERSION = 3;
+export const CONTRACT_VERSION = 4;
 
-const OUTPUT_CONTRACT = `## 输出格式（必须遵守）
+export const OUTPUT_CONTRACT = `## 输出格式（必须遵守）
 
 先写叙事正文（可以分段、可以用 Markdown）。
 
@@ -427,6 +468,8 @@ const OUTPUT_CONTRACT = `## 输出格式（必须遵守）
     { "target": "inventory", "op": "add", "value": { "id": "钥匙", "name": "黄铜钥匙", "qty": 1, "desc": "冰凉的黄铜" } },
     { "target": "flags.xxx", "op": "set", "value": true }
   ],
+  "elapsed": "三个小时",
+  "deadline_days": 22,
   "location": "当前地点",
   "summary_delta": "本轮发生的一句客观事实，用于未来压缩上下文",
   "act_done": false
@@ -440,8 +483,20 @@ const OUTPUT_CONTRACT = `## 输出格式（必须遵守）
 - **summary_delta 每轮必填**：一句 15-30 字的客观事实，写清"谁做了什么、结果如何、局面有什么变化"。它会被永久保留，是你在几十轮之后还记得前期剧情的唯一凭据。不要写"玩家进行了调查"这种废话，要写具体事实。**用自然叙事，禁止出现"通过XX检定""极难成功""掷出N"这类游戏术语**——它读起来应该像一句故事梗概，而不是规则流水账。**指代玩家时用「你」或直接省略主语**，不要写"xx女士""xx先生"这类称呼。（会让玩家自己读的，用"你"最自然。）
 - state_delta 允许的 target 前缀只有：vitals. / companions.<id>.vitals. / companions.<id>.alive / companions.<id>.present / inventory / flags. / clues / location / npcsAlive / npcNotes. / threads / combat.active / combat.round / combat.foes。
   （注意 combat 三个字段都在白名单里，开打与推进轮次就写它们，不要只写在正文里。）
-- **threads（支线表）**：这一局与主线并列、且你/玩家确实在推进的故事线，用 \`threads\` 维护成几张"便签"——
-  每条只有 \`{ "name": "支线名（4-10 字）", "status": "一句话进度" }\`。
+  **\`clock\`（故事时钟）不在白名单里，你别去改它** —— 时间只能通过下面的 \`elapsed\` 申报。
+- **\`elapsed\`（这一轮过了多久，必须填）**：用中文写一句**这一段剧情里实际过去的时间量**，
+  例如 \`"几分钟"\`、\`"一个多小时"\`、\`"三个小时"\`、\`"一整夜"\`、\`"聊了几句"\`、\`"赶了半天路"\`。
+  - 系统会把它折算成分钟、推进故事时钟（"第几天 · 什么时段"），并**自动扣减期限倒计时**。
+  - **按剧情如实写，不要为了赶进度虚报**：玩家只是站着说了两句话就是"几分钟"，
+    真的走了一天山路才写"一整天"。虚报会让倒计时凭空蒸发。
+  - 真的什么时间都没过去（纯粹的追问、重复一个动作）可以省略这个键；不确定就给个中性量。
+  - **正文里要让人读得出时间在走**（天色、光线、肚子饿、灯亮没亮、雨小了）。倒计时不是纯数字，
+    玩家应该在叙事里感觉到"期限近了"。
+- **\`deadline_days\`（还剩多少天，可选）**：只有当模组给了**明确的长线期限**（如"雨季还有二十三天结束"）、
+  并且这一轮你希望**修正**它的时候才填。一般不用写——系统会自己每轮往下减。
+  期限真正到了的时候，**要按模组的「结局与失败条件」处理**：该收束就声明 \`ending\`，
+  不能让倒计时变成负数还继续跑。
+- **threads（支线表）**：这一局与主线并列、且你/玩家确实在推进的故事线，用 \`threads\` 维护成几张"便签"——  每条只有 \`{ "name": "支线名（4-10 字）", "status": "一句话进度" }\`。
   - 有新的事冒出来（接到委托、有人失踪、欠下一笔债）→ \`{ "target": "threads", "op": "add", "value": {"name":"...","status":"..."} }\`
   - 某条线有进展 → \`{ "target": "threads", "op": "set", "value": {"name":"...","status":"..."} }\`
   - 某条线了结了 → \`{ "target": "threads", "op": "remove", "value": "支线名" }\`
@@ -524,6 +579,29 @@ function actSection(ctx: PromptContext): string {
   return lines.join('\n');
 }
 
+/**
+ * 世界层（Phase 2）：这一局是**同一个世界的延续**。
+ *
+ * 有 `carriedFrom` 就说明玩家在上一个故事里已经活过一段日子了 ——
+ * 地点、在场的人、没办完的事都是从那儿带过来的。
+ * 不说这一句，模型会把它当**全新的开场**：明明在场的人都认识他，
+ * 它却要重新自我介绍、重新描写"你第一次踏上这条甲板"。
+ *
+ * 只说"怎么接上"，**不给任何剧情内容** —— 前情本来就在编年史与状态里。
+ */
+function worldCarrySection(ctx: PromptContext): string {
+  const from = String(ctx.gameState.carriedFrom ?? '').trim();
+  if (!from) return '';
+  return [
+    `## 这一局的由来（**重要**）`,
+    `这不是这个故事的第一次开跑：玩家在**同一个世界《${from}》**里已经活过前面的日子，` +
+      `现在带着当时的状态继续（地点、在场的人、没办完的事都是从上一次带过来的）。`,
+    `- **不要当作初次见面**：下面名单里的人多半已经认识他，开场要有"接着上次"的味道。`,
+    `- **不要重演已经发生的事**：下面的地点 / 在场人物 / 支线 / 剧情标记是**既成事实**，只能往前推。`,
+    `- 若这一局的模组讲的是新故事，就当成"这个世界里的另一段日子"——他之前做过的事仍然算数。`,
+  ].join('\n');
+}
+
 export function buildSystemPrompt(ctx: PromptContext): string {
   const { character, gameState } = ctx;
 
@@ -556,6 +634,54 @@ export function buildSystemPrompt(ctx: PromptContext): string {
           .join('\n')
       : '（暂无——开团时若有明确目标，先 add 一条主线）';
 
+  /*
+   * 角色卡的三段文本：属性 / 技能 / 派生值。
+   *
+   * ## 为什么要按规则包分岔
+   * 原来属性写成 `k.toUpperCase()`（得到"STR 55"），技能一律缀 `%`。
+   * 这在 COC（1d100 百分比）下没问题，**在 DnD 下是错的**：
+   * DnD 的属性 10~18 是"原始值"、技能是**加值**（"调查 +3"），
+   * 把 +3 写成"3%"会让模型以为这人调查只有 3% 成功率。
+   * 用户 2026-09-17 报「属性技能与人设不匹配」，其中就有这一半。
+   *
+   * 改法：属性一律用规则包给的中文标签（"力量 14"），
+   * 技能按 `mainDice` 决定是百分比还是加值。
+   */
+  const attrLabel = new Map(ctx.ruleset.characteristicDefs.map((d) => [d.key, d.label]));
+  const attributesText = `属性：${
+    Object.entries(character.characteristics)
+      .map(([k, v]) => `${attrLabel.get(k) ?? k.toUpperCase()} ${v}`)
+      .join(' · ') || '（无）'
+  }`;
+
+  const isPercentDice = ctx.ruleset.mainDice === '1d100';
+  const skillsText = `技能：${
+    Object.entries(character.skills)
+      .map(([k, v]) => (isPercentDice ? `${k} ${v}%` : `${k} ${v >= 0 ? '+' : ''}${v}`))
+      .join('，') || '（无）'
+  }`;
+
+  /*
+   * 派生值（伤害加成 / 体格 / 护甲等级等）。
+   *
+   * 用户 2026-09-17 报「伤害加成与体格未生效」——
+   * 根因是这两项**只在界面上显示**，从来没进过提示词，模型压根不知道它们存在，
+   * 于是近战伤害永远只有武器本身那一串骰子，STR 90 的壮汉与 STR 30 的瘦子打出来一样疼。
+   *
+   * 现在把它们明明白白放进角色卡，并说清怎么用：
+   * 伤害加成的 `+1d4` 这类写法是**加到武器伤害上的骰子**，不是固定加值。
+   */
+  const extras = ctx.ruleset.deriveExtras?.(character.characteristics) ?? {};
+  const extrasText =
+    Object.keys(extras).length > 0
+      ? `衍生：${Object.entries(extras)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(' · ')}` +
+        `\n（**近身攻击的伤害要把「伤害加成」加到武器伤害上**，如 \`1d8+1d4\`：` +
+        `这是属性带来的力气，不是武器的属性。远处的枪械不加。` +
+        `「体格」用于对抗推拉、撞门、挡住冲击这类**比力气**的场面。）`
+      : '';
+
   // 名单为空时明确催一下，否则 GM 会一直留空，玩家检定就没对象可选
   const castNudge =
     gameState.npcsAlive.length === 0
@@ -567,6 +693,21 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       ? `\n\n**⚔ 战斗中：第 ${gameState.combat.round || 1} 轮**\n（敌人与环境本轮已经推进过一次了吗？没有就先推进，然后把笔停在等玩家行动的悬停点；玩家行动结算后把 combat.round 加 1）`
       : '';
 
+  /*
+   * 故事时钟。**每轮都要回灌**，否则模型会以为时间还停在上次那个上午：
+   * 玩家明明睡了一夜，它却继续写"窗外的阳光"。这也让"期限还剩几天"
+   * 变成一个它每轮都看得见的硬事实，而不是模组前言里一句形容词。
+   */
+  const clock = normalizeClock(gameState.clock);
+  const clockText =
+    `\n\n**⏱ 现在：${clockLabel(clock)}（${clockDetail(clock)}）**` +
+    (gameState.deadline
+      ? gameState.deadline.remain > 0
+        ? `\n期限「${gameState.deadline.label || '这件事'}」：**${deadlineLabel(gameState.deadline)}**`
+        : `\n期限「${gameState.deadline.label || '这件事'}」：**已经到点了** —— 该按模组的「结局与失败条件」处理了，不能让倒计时变成负数还接着跑`
+      : '') +
+    `\n（你这一轮在 JSON 里填的 \`elapsed\` 会推进这个时钟、并扣减上面的期限；正文要让人读得出时间在走。）`;
+
   const sections: string[] = [
     // 1. 规则
     `# 规则体系\n当前使用：${ctx.rulesetName}\n所有数值判定由引擎完成，你只负责叙事。`,
@@ -576,7 +717,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     gmVoiceOf(ctx.gmVoice).prompt,
     // 2. 模组（这一局的故事骨架）
     [
-      `# 模组：${ctx.module.title || '（未命名）'}`,
+      `${MODULE_SECTION_PREFIX}${ctx.module.title || '（未命名）'}`,
       ctx.module.premise ? `## 前言（背景基调）\n${ctx.module.premise}` : '',
       ctx.module.goal
         ? `## 玩家目标（**这是玩家这一局要达成的事**；你要让局势不断把它推到玩家面前，并在他迷茫时用线索/事件提醒他）\n${ctx.module.goal}`
@@ -605,7 +746,28 @@ export function buildSystemPrompt(ctx: PromptContext): string {
             .map((it) => `- **${it.name}**${it.look ? `（${it.look}）` : ''}：${it.effect ?? ''}`)
             .join('\n')}\n（玩家拾取或使用时，按这里写的作用如实呈现；不要临时发挥成别的效果）`
         : '',
-      ctx.module.locations ? `## 关键地点\n${ctx.module.locations}` : '',
+      ctx.module.locations
+        ? `## 关键地点（**这个故事的舞台就在这几处**；玩家的 location 应当取自这里，` +
+          `需要新场景时优先细化它们，不要凭空造无关的新地点）\n${ctx.module.locations}`
+        : '',
+      /*
+       * 地图（`mapNodes`）。
+       *
+       * 为什么要进提示词：这是模组作者画出来的**地点关系图**，
+       * 玩家走哪条路、能不能直达、中间隔着什么，全在这张图上。
+       * 不告诉模型它就自己编一套路线，于是"AI 自动生成地点"
+       * （用户 2026-09-17 报）—— 地图上多出无人认识的节点，玩家也说不清自己在哪。
+       */
+      ctx.module.mapNodes?.length
+        ? `## 地图（**这些地点之间的关系是定好的**；玩家移动要沿这里的连接走）\n${ctx.module.mapNodes
+            .map(
+              (n) =>
+                `- **${n.name}**${n.note ? `（${n.note}）` : ''}` +
+                (n.links?.length ? ` → 可去：${n.links.join('、')}` : '')
+            )
+            .join('\n')}\n（**这一节只有你知道。** 玩家想去图上没有直接相连的地方，` +
+          `得先走到一个能过去的地方——路上会发生什么由你安排，但**不要把两个不相邻的地方说成隔壁**。）`
+        : '',
       ctx.module.monsters?.length
         ? `## 敌对者（**数值已定，照此演出，不得临场改**）\n${ctx.module.monsters
             .map(
@@ -621,6 +783,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
         ? `## 线索链（按此推进，避免卡关；线索要逐步给出，不要一次抖完）\n${ctx.module.clueChain}`
         : '',
       actSection(ctx),
+      worldCarrySection(ctx),
       ctx.module.endings ? `## 结局与失败条件\n${ctx.module.endings}` : '',
       ctx.module.notes ? `## GM 备注\n${ctx.module.notes}` : '',
     ]
@@ -643,14 +806,9 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       `称呼：${ctx.playerAddress}`,
       `描述：${character.description || '（无）'}`,
       character.personality ? `性格：${character.personality}` : '',
-      `属性：${
-        Object.entries(character.characteristics)
-          .map(([k, v]) => `${k.toUpperCase()} ${v}`)
-          .join(' · ') || '（无）'
-      }`,
-      `技能：${Object.entries(character.skills)
-        .map(([k, v]) => `${k} ${v}%`)
-        .join('，')}`,
+      attributesText,
+      skillsText,
+      extrasText,
       '',
       `**NPC 对白里要用「${ctx.playerAddress}」这样的称呼喊玩家，不要直呼其全名。**`,
       '**以上设定一律以本卡为准，不得改动、不得猜测其它身份。**',
@@ -658,7 +816,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
       .filter((l) => l !== '')
       .join('\n'),
     // 4. 当前状态快照（每轮回灌，防止数值漂移）
-    `## 当前状态（唯一真相，以这里为准）\n地点：${gameState.location}\n${vitalsText}\n随身物品：${inventoryText}\n在场人物：${npcText}${castNudge}\n剧情标记：${flagsText}\n支线：\n${threadsText}${combatText}`,
+    `## 当前状态（唯一真相，以这里为准）\n地点：${gameState.location}${clockText}\n${vitalsText}\n随身物品：${inventoryText}\n在场人物：${npcText}${castNudge}\n剧情标记：${flagsText}\n支线：\n${threadsText}${combatText}`,
     // 5. 已知线索
     `## 已获得线索\n${cluesText}`,
   ];
@@ -723,29 +881,81 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     sections.push(`## 已完成的检定\n${lines}`);
   }
 
-  // 8. 输出契约（放最后，强化记忆）
+  // 输出契约（放最后，强化记忆）
   sections.push(OUTPUT_CONTRACT);
 
-  return sections.join('\n\n---\n\n');
+  return trimToBudget(sections);
+}
+
+/* ------------------------------------------------------------------
+ * 超预算裁剪（2026-09-19 · 优化计划 C″）
+ *
+ * 文件头一直写着"超预算时从下往上砍"，但**从来没有实现过** ——
+ * `sections` 只是数组拼接，没有任何长度上限。长局里编年史会一路攒到 60 条，
+ * 提示词只涨不缩，而那些 token 是**玩家自己付的**。
+ *
+ * 口径（协作方第 9 版 §3 定的）：**从尾部往前砍，越靠后越"可以被重建"**。
+ * 于是「已完成的检定 → 前情提要 → 事件日志」依次让位，
+ * 而**模组真相在最前面，天然不会被砍到**。
+ * ------------------------------------------------------------------ */
+
+/** 段与段之间用的分隔（改这里等于改所有段的拼接方式） */
+const SECTION_JOINER = '\n\n---\n\n';
+
+/**
+ * 系统提示词的字符预算。
+ *
+ * 定得比正常局长得多（正常局大约 1.5–2 万字符）—— 它是**保险丝**，不是节流阀：
+ * 只在极端长局（编年史攒满 + 世界书命中一堆 + 契约）才会真的砍。
+ * 砍的只是"最容易被重建"的那几段，契约与红线永远在。
+ */
+export const PROMPT_BUDGET_CHARS = 40000;
+
+/**
+ * 永远不许砍的段。
+ *
+ * - **输出契约**：它排在最后是"强化记忆"的设计，恰恰最不能丢。
+ * - **模组段**：`## 真相` 是这一局的地基，砍了模型就开始瞎编。
+ *
+ * ⚠️ **别指望"排前面就安全"** —— 裁剪循环只保住下标 0（规则体系），
+ * 而模组排在下标 3。极端长局（规则 + 题材 + 口吻本身就撑满预算）会一路砍到
+ * 下标 1，把模组连同真相**一起砍掉**。协作方第 12 版指出这里漏了保护，属实。
+ */
+function isProtectedSection(section: string): boolean {
+  return section === OUTPUT_CONTRACT || section.startsWith(MODULE_SECTION_PREFIX);
 }
 
 /**
- * 从世界书里挑出与当前语境相关的条目。
+ * 按预算裁剪段数组，返回拼接好的提示词。**纯函数**，不改入参。
+ * 预算够就直接拼；超了就从尾部往前丢段（跳过保护段）。
+ */
+export function trimToBudget(
+  sections: readonly string[],
+  budget: number = PROMPT_BUDGET_CHARS
+): string {
+  if (sections.length === 0) return '';
+  const kept = [...sections];
+  const size = () => kept.join(SECTION_JOINER).length;
+  for (let i = kept.length - 1; i >= 1 && size() > budget; i--) {
+    if (isProtectedSection(kept[i]!)) continue;
+    kept.splice(i, 1);
+  }
+  return kept.join(SECTION_JOINER);
+}
+
+/**
+ * 从世界书里挑出这一轮要注入的条目。
  *
- * 全部塞进提示词会撑爆上下文，也会让模型被无关设定干扰 ——
- * 所以只注入命中关键词的，并按优先级排序后截断。
+ * ⚠️ **判据不在这里**：1.0 阶段 A 把它搬到了 `core/worldbook.ts`（常驻 / 预算 / 深度 / 分组），
+ * 因为 core 是纯函数、不许反向依赖 ui，而界面也要用同一份判据。
+ * 这一层只做转调 —— 判据只有一份，别在这儿再写一遍。
  */
 export function selectWorldbook(
   entries: WorldbookEntry[],
   context: string[],
   limit = 8
 ): WorldbookEntry[] {
-  const text = context.join('\n');
-  return entries
-    .filter((e) => e.enabled)
-    .filter((e) => e.keys.some((k) => k.trim() !== '' && text.includes(k.trim())))
-    .sort((a, b) => b.priority - a.priority)
-    .slice(0, limit);
+  return selectWorldbookCore(entries, context, limit);
 }
 
 /** 把 UI 消息历史压成模型能吃的 turns（只保留最近 N 轮原文） */
@@ -937,6 +1147,19 @@ export function extractContract(text: string): {
     }[];
     location?: string;
     summary_delta?: string;
+    /**
+     * 这一轮剧情里过去了多久（契约 v4 起）。
+     *
+     * 用中文的自然语言量（"三个小时""一整夜""聊了几句"），由引擎折算成分钟推进故事时钟——
+     * 模型**不许直接改 `clock`**（它不在 `ALLOWED_ROOTS` 里）。理由见 `core/clock.ts`：
+     * 时间必须有唯一的数数的人，否则长篇的倒计时永远不动。
+     */
+    elapsed?: string;
+    /**
+     * 期限还剩多少天（契约 v4 起，可选）。
+     * 只在需要**修正**倒计时时才写；平时引擎自己按 `elapsed` 往下减。
+     */
+    deadline_days?: number;
     /**
      * 收束声明：守密人判断"模组预设的某个结局真的成立了"时填。
      * 引擎据此结档（App 会去要一段结局正文），而不是让故事无限续写下去。

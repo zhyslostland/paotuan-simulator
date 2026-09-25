@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, mapNodesOf, type MapNode } from './store';
 import { actAt, normalizeActIndex, parseActs, type ActItem } from '../core/acts.js';
+import {
+  clockDetail,
+  clockLabel,
+  deadlineLabel,
+  normalizeClock,
+  type Deadline,
+  type StoryClock,
+} from '../core/clock.js';
 import { ImageField } from './ImageField';
+import { checksOf } from './runSummary.js';
+import { playerLinesByRound } from './exportGame.js';
+import { INSANITY_TURNS_FLAG } from '../core/insanity.js';
 import { NpcCardModal, npcProfileOf, type NpcProfile } from './NpcCard';
 import { BestiaryPanel } from './Bestiary';
 import { AnchorList } from './EndingScreen';
@@ -143,9 +154,24 @@ function ActSection({
       {detail ? (
         revealed ? (
           <div className="mt-1.5 rounded-md border border-ink-700 bg-ink-900/70 px-2.5 py-2">
-            <span className="mb-1 block text-[10px] tracking-wider text-blood-300/90">
-              导演稿 · 给守密人看的，含剧透
-            </span>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="text-[10px] tracking-wider text-blood-300/90">
+                导演稿 · 给守密人看的，含剧透
+              </span>
+              {/*
+               * 打开之后要能关掉（主人 2026-09-17 报的"导演稿没有关闭按钮"）。
+               * 剧透是**开了就后悔**的东西：想核对的时候打开，
+               * 核对完必须能立刻盖回去 —— 否则一页剧透就一直摊在那儿，
+               * 玩家（也是本人）下一眼又被迫看见。
+               */}
+              <button
+                type="button"
+                onClick={() => setRevealed(false)}
+                className="shrink-0 rounded-md border border-ink-600 px-2 py-0.5 text-[10px] text-mist-500 transition hover:border-blood-300/50 hover:text-mist-300"
+              >
+                收起
+              </button>
+            </div>
             <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-mist-400">
               {detail}
             </p>
@@ -170,6 +196,55 @@ function ActSection({
         </button>
       )}
     </Section>
+  );
+}
+
+/**
+ * 故事时钟 + 期限倒计时。
+ *
+ * 三档呈现（按"还剩多少"变色）：
+ *   - 宽裕（> 3 天）→ 常规色，只报还剩多少；
+ *   - 紧张（≤ 3 天）→ 金色；
+ *   - 到点（0）→ 血色，并明说"该收束了"。
+ *
+ * `deadline` 为空时只显示日期与时段 —— 没有期限的模组照样要有"现在是第几天"。
+ */
+function ClockSection({
+  clock,
+  deadline,
+}: {
+  clock?: StoryClock;
+  deadline?: Deadline | null;
+}) {
+  const now = normalizeClock(clock);
+  const remain = deadline?.remain ?? null;
+  const urgent = remain !== null && remain <= 3 * 24 * 60;
+  const over = remain !== null && remain <= 0;
+  return (
+    <section>
+      <h3 className="mb-2 text-[11px] tracking-wider text-arcane-400">时间</h3>
+      <div className="rounded-md border border-arcane-400/40 bg-arcane-400/5 px-2.5 py-2">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[13px] text-mist-100">{clockLabel(now)}</span>
+          <span className="shrink-0 text-[10px] tabular-nums text-mist-500">
+            {clockDetail(now)}
+          </span>
+        </div>
+        {deadline && (
+          <p
+            className={`mt-1.5 border-t border-arcane-400/25 pt-1.5 text-[11px] leading-relaxed ${
+              over ? 'text-blood-300' : urgent ? 'text-gold-300' : 'text-mist-400'
+            }`}
+          >
+            <span className="text-arcane-400/90">
+              {over ? '期限已到：' : '期限：'}
+            </span>
+            {deadline.label || '这件事'}
+            {!over && <span className="ml-1">· {deadlineLabel(deadline)}</span>}
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -306,11 +381,15 @@ function MapGraph({
   revealed: Set<string>;
   /** 真正去过的地方（"只是听说过"的不算）——用来区分实心与虚线两种亮度 */
   visited?: Set<string>;
-  onTravel?: (location: string) => void;
+  /** 必传：`WorldPanel` 两个挂载点都传了。留成可选会让漏传变成"点了没反应"的静默空操作 */
+  onTravel: (location: string) => void;
 }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  // 守密人还在写的时候别让玩家搬家：点了会发出一个被静默吞掉的请求（P1-1 家族）。
+  // 直接读 store，不再加 prop —— 两个挂载点都省得改。
+  const streaming = useStore((s) => s.streaming);
   const [dragging, setDragging] = useState(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
   /**
@@ -464,18 +543,30 @@ function MapGraph({
               const lines = known ? splitLabel(nd.name) : ['？'];
               const twoLine = lines.length > 1;
               return (
-                <g
-                  key={nd.name}
-                  onClick={() => {
-                    // 刚拖过就不算点击，避免松手时压在某个地点上误搬家
-                    if (suppressClick.current) return;
-                    if (known) onTravel?.(nd.name);
-                  }}
-                  style={{ cursor: known && onTravel ? 'pointer' : 'default' }}
-                >
-                  <title>
-                    {!known ? '还没听说过这个地方' : nd.note ? `${nd.name}：${nd.note}` : nd.name}
-                  </title>
+              <g
+                key={nd.name}
+                onClick={() => {
+                  // 刚拖过就不算点击，避免松手时压在某个地点上误搬家
+                  if (suppressClick.current) return;
+                  if (streaming) return; // 守密人还在写：点了也发不出去，别装作能走
+                  if (known) onTravel(nd.name);
+                }}
+                style={{
+                  cursor: known && !streaming ? 'pointer' : 'default',
+                  // 流式期间整组压暗，让"现在走不了"是看得见的，而不是只能靠点一下才知道
+                  opacity: streaming ? 0.45 : 1,
+                  transition: 'opacity 150ms',
+                }}
+              >
+                <title>
+                  {!known
+                    ? '还没听说过这个地方'
+                    : streaming
+                      ? '守密人还在写 —— 写完了再走'
+                      : nd.note
+                        ? `${nd.name}：${nd.note}`
+                        : nd.name}
+                </title>
                   <circle
                     cx={p.x}
                     cy={p.y}
@@ -572,9 +663,12 @@ function MapSection({
   revealed: Set<string>;
   visited?: Set<string>;
   mapImage: string;
-  onTravel?: (location: string) => void;
+  /** 必传：同上。地图搬家是玩家的主动操作，静默失败＝玩家以为点了没用 */
+  onTravel: (location: string) => void;
 }) {
   const module = useStore((s) => s.module);
+  // 同 MapGraph：流式期间地点钮也要禁用（否则点了发不出去，见 P1-1 家族）
+  const streaming = useStore((s) => s.streaming);
   const setMapImage = useStore((s) => s.setMapImage);
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
@@ -642,13 +736,21 @@ function MapSection({
             return (
               <button
                 key={nd.name}
-                disabled={isCurrent || !onTravel}
-                onClick={() => onTravel?.(nd.name)}
-                title={isCurrent ? '你就在这里' : nd.note || `前往${nd.name}`}
+                disabled={isCurrent || streaming}
+                onClick={() => onTravel(nd.name)}
+                title={
+                  isCurrent
+                    ? '你就在这里'
+                    : streaming
+                      ? '守密人还在写 —— 写完了再走'
+                      : nd.note || `前往${nd.name}`
+                }
                 className={`max-w-full truncate rounded-md border px-2 py-0.5 text-[11px] transition ${
                   isCurrent
                     ? 'border-gold-600/70 bg-gold-500/10 text-gold-300'
-                    : 'border-ink-600 text-mist-300 hover:border-gold-600/50 hover:text-mist-100'
+                    : streaming
+                      ? 'cursor-not-allowed border-ink-700 text-mist-600 opacity-50'
+                      : 'border-ink-600 text-mist-300 hover:border-gold-600/50 hover:text-mist-100'
                 }`}
               >
                 {nd.name}
@@ -678,7 +780,7 @@ function MapSection({
               getGenre(genreId, customGenres)
             )}
             value={mapImage}
-            onSave={setMapImage}
+            job={{ kind: 'map', target: 'map' }}
             onClear={() => setMapImage('')}
           />
         </div>
@@ -692,9 +794,11 @@ export function WorldPanel({
   onTravel,
   onRewind,
 }: {
-  onPromptCompanion?: (name: string) => void;
-  onTravel?: (location: string) => void;
-  onRewind?: (msgId: string) => void;
+  /** 三个回调全部必传：`App.tsx` 的两处挂载（移动端 `:1194` / 桌面侧栏 `:1204`）都传了。
+   *  留成可选＝漏传时点击静默空操作（当年 `onUseItem` 就是这么栽的）。 */
+  onPromptCompanion: (name: string) => void;
+  onTravel: (location: string) => void;
+  onRewind: (msgId: string) => void;
 }) {
   const gameState = useStore((s) => s.gameState);
   const snapshots = useStore((s) => s.snapshots);
@@ -708,6 +812,12 @@ export function WorldPanel({
   const mapImage = useStore((s) => s.mapImage);
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
+  /*
+   * 订阅的是**函数引用**（稳定），不是在选择器里调用它 ——
+   * `useStore((s) => s.insanity())` 每次返回新对象会无限重渲染，那样写是错的。
+   * H16·残留：世界页「剧情标记」要跟状态栏说同一句话。
+   */
+  const insanity = useStore((s) => s.insanity);
   // 点击在地人物弹出的档案卡
   const [npcCard, setNpcCard] = useState<NpcProfile | null>(null);
   /*
@@ -725,9 +835,18 @@ export function WorldPanel({
    * ---------------------------------------------------------------------
    */
 
-  // 剧情标记是给玩家看的，只显示中文键名；模型漏填的英文 key 直接藏起来
+  /*
+   * 剧情标记是给玩家看的，只显示中文键名；模型漏填的英文 key 直接藏起来。
+   *
+   * H16：`疯狂轮数` 是**引擎自己记的账**，不是玩家的状态 ——
+   * 甩一句「疯狂轮数：2」等于让玩家自己拼"还剩几轮"。
+   * 判据与 `CharacterSheet` 的状态栏共用 `INSANITY_TURNS_FLAG`，别各写一份。
+   */
   const flags = useMemo(
-    () => Object.entries(gameState.flags).filter(([k]) => /[\u4e00-\u9fa5]/.test(k)),
+    () =>
+      Object.entries(gameState.flags).filter(
+        ([k]) => /[\u4e00-\u9fa5]/.test(k) && k !== INSANITY_TURNS_FLAG
+      ),
     [gameState.flags]
   );
   const location = gameState.location?.trim();
@@ -780,6 +899,25 @@ export function WorldPanel({
     () => [...chronicle.map((c) => c.text), ...gameState.clues, summary].join('\n'),
     [chronicle, gameState.clues, summary]
   );
+  /*
+   * §6.3c：编年史每一回下挂**玩家当时那一句**。
+   *
+   * 编年史是守密人写的"发生了什么"，玩家那句"我做了什么"一直不在里面 ——
+   * 回头看时，"我推门进去"和"门自己开了"读起来是一样的。
+   *
+   * 对齐判据在 `exportGame.playerLinesByRound`（只有那一份）：
+   * 编年史一个回合一条、玩家消息一个回合一条，按下标对齐就是按回目对齐。
+   * `messages` 很长，所以包 `useMemo`。
+   */
+  const saidByTurn = useMemo(() => {
+    const lines = playerLinesByRound(messages);
+    const m = new Map<number, string>();
+    chronicle.forEach((c, i) => {
+      const line = lines[i];
+      if (line?.trim()) m.set(c.turn, line.trim());
+    });
+    return m;
+  }, [chronicle, messages]);
   const revealed = useMemo(
     () =>
       hasLinks
@@ -816,6 +954,15 @@ export function WorldPanel({
 
   return (
     <div className="space-y-6 p-4">
+      {/*
+       * 故事时钟 —— 摆在最前面。
+       * 为什么它在"当前目标"之上：目标回答"我要干嘛"，
+       * 时钟回答"现在还有多少时间"，而后者才决定前者急不急。
+       * 以前系统里根本没有时间概念（主人 2026-09-17 报的），
+       * 长篇的"二十三天"就永远停在二十三天。
+       */}
+      <ClockSection clock={gameState.clock} deadline={gameState.deadline} />
+
       <GoalSection goal={module.goal} stakes={module.stakes} urgency={module.urgency} />
 
       {acts.length > 0 && (
@@ -864,7 +1011,7 @@ export function WorldPanel({
        */}
       <Section title={`关键抉择${anchors.length ? `（${anchors.length}）` : ''}`}>
         {anchors.length > 0 ? (
-          <AnchorList anchors={anchors} onRewind={(id) => onRewind?.(id)} />
+          <AnchorList anchors={anchors} onRewind={onRewind} />
         ) : (
           <Empty text="还没有关键抉择——检定没过、进入战斗、首次到某地、拿到新线索或新支线时，会自动记一个。" />
         )}
@@ -889,7 +1036,7 @@ export function WorldPanel({
               getGenre(genreId, customGenres)
             )}
             value={sceneImages[location]}
-            onSave={(url) => setSceneImage(location, url)}
+            job={{ kind: 'scene', target: location }}
             onClear={() => setSceneImage(location, '')}
           />
         ) : (
@@ -912,7 +1059,7 @@ export function WorldPanel({
                 agenda={c.agenda}
                 dead={!c.alive}
                 away={!c.present && c.alive}
-                onClick={() => onPromptCompanion?.(c.name)}
+                onClick={() => onPromptCompanion(c.name)}
               />
             ))}
           </div>
@@ -975,9 +1122,14 @@ export function WorldPanel({
 
       <Section title="检定记录">
         {(() => {
+          /*
+           * P2-1：读 `checksOf(m)` 而不是只读 `m.check`。
+           * 以前「一次全掷」掷出来的那几条**一条都不进这张表** ——
+           * 同一个玩家会在生涯里看到"这一局掷了 6 次"，记录里却只有 2 条。
+           */
           const checks = messages
-            .filter((m) => m.check)
-            .map((m) => m.check!)
+            .filter((m) => m.check || m.checks?.length)
+            .flatMap((m) => checksOf(m))
             .reverse();
           if (checks.length === 0) return <Empty text="还没有检定过" />;
           return (
@@ -1003,21 +1155,38 @@ export function WorldPanel({
           <Empty text="无" />
         ) : (
           <ul className="space-y-1">
-            {flags.map(([key, value]) => (
-              <li
-                key={key}
-                className="flex items-center justify-between rounded-md bg-ink-850 px-2.5 py-1.5"
-              >
-                <span className="font-mono text-[11px] text-mist-400">{key}</span>
-                <span
-                  className={`text-[11px] ${
-                    value ? 'text-moss-400' : 'text-mist-500'
-                  }`}
+            {flags.map(([key, value]) => {
+              /*
+               * H16·残留（协作方第 23 版）：同一状态不许两种说法。
+               *
+               * 这里以前对 `临时疯狂` 走 `${key}：${value}`，于是显示成
+               * 「临时疯狂：理智骤降 6 点，陷入临时疯狂」—— 复读了一遍原始描述；
+               * 而状态栏已经是「临时疯狂（还剩 2 轮）」。玩家不知道该信哪句。
+               *
+               * `临时疯狂` 是**被引擎解释过的状态**（不是模型留的叙事），
+               * 所以取 `insanityOf().label` —— 与 `CharacterSheet` 共用同一处算出来的那句。
+               */
+              const mad = key === '临时疯狂' && insanity().active;
+              return (
+                <li
+                  key={key}
+                  className="flex items-center justify-between rounded-md bg-ink-850 px-2.5 py-1.5"
                 >
-                  {String(value)}
-                </span>
-              </li>
-            ))}
+                  <span className="font-mono text-[11px] text-mist-400">
+                    {mad ? insanity().label : key}
+                  </span>
+                  {!mad && (
+                    <span
+                      className={`text-[11px] ${
+                        value ? 'text-moss-400' : 'text-mist-500'
+                      }`}
+                    >
+                      {String(value)}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </Section>
@@ -1041,6 +1210,11 @@ export function WorldPanel({
                   {c.turn}
                 </span>
                 <div className="min-w-0 flex-1 border-l border-ink-700 pl-2.5">
+                  {saidByTurn.get(c.turn) && (
+                    <p className="mb-1 border-l-2 border-gold-600/50 pl-2 text-[11px] leading-relaxed text-gold-400/85">
+                      我说：{saidByTurn.get(c.turn)}
+                    </p>
+                  )}
                   <p className="text-[12px] leading-relaxed text-mist-300">{c.text}</p>
                   {c.location && (
                     <p className="mt-0.5 text-[10px] text-mist-500/70">{c.location}</p>

@@ -68,9 +68,10 @@ describe('设置页能被画出来（冒烟）', () => {
     expect(html.length).toBeGreaterThan(1000);
   });
 
-  it('八个小节标题都在（折叠只影响展开与否，标题必须在）', () => {
+  it('九个小节标题都在（折叠只影响展开与否，标题必须在）', () => {
     const html = renderToString(createElement(Settings, { onClose: () => {} }));
     for (const t of [
+      '生涯与成就',
       '规则与题材',
       '外观与排版',
       '音频',
@@ -85,6 +86,34 @@ describe('设置页能被画出来（冒烟）', () => {
     }
   });
 
+  /*
+   * 生涯 / 成就这一块以前**只活在结档页** —— 不跑完一局就永远看不到，
+   * 而它记的恰恰是跨所有局的那本账。这条断言钉住它现在的常驻位置，
+   * 免得哪天有人把它挪回结档页，又变回"做了但玩家看不见"。
+   */
+  it('生涯与成就默认可见（第 0 条铁律：玩家看不见＝没做）', () => {
+    const html = renderToString(createElement(Settings, { onClose: () => {} }));
+    // 标题在目录里也会出现，**统计格里的内容**才证明这一节真的画出来了
+    expect(html).toContain('生涯与成就');
+    expect(html).toContain('跑过的局');
+    expect(html).toContain('累计回数');
+    // 空态也要有话说：一次都没跑过的玩家看到的是"为什么还没有"，而不是一片空白
+    expect(html).toContain('还没有解锁的成就');
+  });
+
+  /*
+   * H18（协作方第 23 版）：**JSX 不解析 Markdown**。
+   * 生图说明里那句「会 **静默失败**」写成了 Markdown 的加粗，
+   * 结果界面上原样显示两对星号 —— 看着像乱码。
+   * 判据就是：渲染出来的 HTML 里不许再有字面的 `**`。
+   */
+  it('H18：渲染结果里没有字面的 Markdown 星号', () => {
+    const html = renderToString(createElement(Settings, { onClose: () => {} }));
+    expect(html).not.toContain('**');
+    // 那句提醒**本身**还要在（星号去掉了，字不能一起没了）
+    expect(html).toContain('静默失败');
+  });
+
   it('搜索框在（G6 的入口）', () => {
     const html = renderToString(createElement(Settings, { onClose: () => {} }));
     expect(html).toContain('找设置项');
@@ -94,6 +123,7 @@ describe('设置页能被画出来（冒烟）', () => {
     const html = renderToString(createElement(Settings, { onClose: () => {} }));
     // 每个目录 id 都要在页面里真实存在
     for (const id of [
+      'sec-career',
       'sec-rules',
       'sec-look',
       'sec-audio',
