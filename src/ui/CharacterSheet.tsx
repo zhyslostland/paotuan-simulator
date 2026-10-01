@@ -11,8 +11,9 @@ import {
 } from './store';
 import { encumbranceOf, itemWeight } from '../core/encumbrance.js';
 import { isHealOnlyConsumable } from '../core/items.js';
-import { INSANITY_TURNS_FLAG } from '../core/insanity.js';
+import { statusFlagLines } from '../core/statusEffects.js';
 import { ImageLightbox } from './ImageLightbox';
+import { ICONS, type IconName } from './icons';
 import {
   weighDescription,
   DIFFICULTY_LABEL,
@@ -44,12 +45,30 @@ const LOW_SKILL_BASE = 5;
  * - 技能：我要掷什么
  * - 背包：我手里有什么
  */
-const SHEET_TABS = [
-  { id: 'profile', label: '概况' },
-  { id: 'skills', label: '技能' },
-  { id: 'bag', label: '背包' },
-] as const;
-type SheetTab = (typeof SHEET_TABS)[number]['id'];
+/**
+ * 区块标题：图标 + 名称 + 一道细线。
+ *
+ * ## 为什么加它（2026-09-26 主人拍板）
+ * 原来角色卡分三个页签（概况 / 技能 / 背包），主人否掉了：
+ * 「**人物栏分成三个是不是操作太复杂了，背包和技能本来就是要经常看和点的部分吧**」
+ * —— 技能要从这儿点掷骰、物品要从这儿点使用，藏在页签后面每次多一次点击。
+ *
+ * 去掉页签之后三块会连成一片，**玩家滚下去得知道"这几行是技能还是背包"**，
+ * 所以需要一道看得见的分隔。图标正好在这里派上用场。
+ */
+function SectionTitle({ icon, title, hint }: { icon: IconName; title: string; hint?: string }) {
+  const Icon = ICONS[icon];
+  return (
+    <div className="mb-2 flex items-center gap-1.5">
+      <Icon size={13} className="shrink-0 text-mist-500" />
+      <h3 className="shrink-0 text-[11px] tracking-wider text-mist-500">
+        {title}
+        {hint && <span className="text-mist-500">（{hint}）</span>}
+      </h3>
+      <span className="h-px flex-1 bg-ink-700" />
+    </div>
+  );
+}
 
 /**
  * 已知的"重状态"用告警色。其余中文 flag 照常显示，只是用中性色——
@@ -155,9 +174,31 @@ export function CheckDialog({
   /** 加权后的目标值（引擎仍按这个值来判定，不是界面上的花招） */
   const weightedValue = value + weight.bonus + enc.penalty;
   const npcTargets = gameState.npcsAlive;
+  /*
+   * 🔴 `P1-5` 阶段二（主人 2026-09-27 真机）：**战斗中要能选中敌人**。
+   *
+   * 症状原话：「点击背包里的手枪，使用对象里没有怪物」。
+   * 根因不是这里少写一行 —— 是**目标真源有两处**：
+   *   ① `npcsAlive`（在场人物，靠守密人写）② `combat.foes`（引擎自己维护的战斗名单）。
+   * 提示词请守密人"把敌人也写进 npcsAlive"，他漏写一次，候选就空了。
+   * 战斗名单是**引擎的真源**，不依赖任何人记得写 —— 所以这里直接读它。
+   *
+   * ⚠️ 不算剧透：敌人的名字在战斗面板上**本来就已经显示**（`Chat.tsx` 的血条那一块），
+   * 这里只是让玩家点得到它，不多给一个字。
+   */
+  const foeTargets = (gameState.combat?.active ? gameState.combat.foes ?? [] : [])
+    .map((f) => f.name?.trim() ?? '')
+    .filter((n) => n.length > 0);
   const mateTargets = gameState.companions
     .filter((c) => c.alive && c.present)
     .map((c) => c.name);
+  /*
+   * 🔴 `G3`（协28 §F① 第 10 条）：同一个敌人会在「在场人物」与「战斗中的敌人」里**各出现一次**
+   * （守密人顺手把敌人也写进了 `npcsAlive`）→ 选项里重一遍，玩家不知道该点哪个。
+   * 按名字去重，**敌人只留红色那一组**（那是引擎的真源）。
+   */
+  const foeNameSet = new Set(foeTargets);
+  const npcShown = npcTargets.filter((n) => !foeNameSet.has(n));
 
   const valueText = isPercent ? `${value}%` : `${value >= 0 ? '+' : ''}${value}`;
 
@@ -188,7 +229,7 @@ export function CheckDialog({
       <div className="pointer-events-auto max-h-[92vh] w-full max-w-sm overflow-y-auto rounded-2xl border border-ink-600 bg-ink-900 p-5 shadow-2xl lg:max-w-xs">
         <h3 className="font-serif text-[15px] text-mist-100">
           {skill} 检定
-          <span className="ml-2 text-[12px] text-gold-500/80">{valueText}</span>
+          <span className="ml-2 text-[12px] text-gold-500">{valueText}</span>
         </h3>
         {rs.beginnerGuide && (
           <p className="mt-1.5 rounded-md bg-ink-850 px-2.5 py-1.5 text-[10px] leading-relaxed text-mist-500">
@@ -215,23 +256,33 @@ export function CheckDialog({
 
         <div className="mt-4">
           <span className="mb-1.5 block text-[11px] text-mist-400">
-            对象 <span className="text-mist-500/70">（可选，也可自己填）</span>
+            对象 <span className="text-mist-500">（可选，也可自己填）</span>
           </span>
           <div className="flex flex-wrap gap-1.5">
             {targetBtn('', '环境／无特定')}
           </div>
-          {npcTargets.length > 0 && (
+          {npcShown.length > 0 && (
             <div className="mt-2">
-              <span className="mb-1 block text-[10px] text-mist-500/80">在场人物</span>
+              <span className="mb-1 block text-[10px] text-mist-500">在场人物</span>
               <div className="flex flex-wrap gap-1.5">
-                {npcTargets.map((t) => targetBtn(t))}
+                {npcShown.map((t) => targetBtn(t))}
+              </div>
+            </div>
+          )}
+          {foeTargets.length > 0 && (
+            <div className="mt-2">
+              <span className="mb-1 block text-[10px] text-blood-300">
+                战斗中的敌人
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {foeTargets.map((t) => targetBtn(t))}
               </div>
             </div>
           )}
           {mateTargets.length > 0 && (
             <div className="mt-2">
-              <span className="mb-1 block text-[10px] text-mist-500/80">
-                同行者 <span className="text-mist-500/60">（你的队友）</span>
+              <span className="mb-1 block text-[10px] text-mist-500">
+                同行者 <span className="text-mist-500">（你的队友）</span>
               </span>
               <div className="flex flex-wrap gap-1.5">
                 {mateTargets.map((t) => targetBtn(t))}
@@ -254,7 +305,7 @@ export function CheckDialog({
          */}
         <div className="mt-4">
           <span className="mb-1.5 block text-[11px] text-mist-400">
-            你想怎么做 <span className="text-mist-500/70">（行为描述，会一起发给守密人）</span>
+            你想怎么做 <span className="text-mist-500">（行为描述，会一起发给守密人）</span>
           </span>
           <textarea
             className="w-full resize-none rounded-lg border border-ink-600 bg-ink-950 px-3 py-2 text-[13px] text-mist-100 outline-none transition focus:border-gold-600/60"
@@ -291,7 +342,7 @@ export function CheckDialog({
                 )}
               </span>
             )}
-            <span className="ml-1 text-mist-500/70">
+            <span className="ml-1 text-mist-500">
               （
               {[
                 ...weight.reasons,
@@ -391,6 +442,17 @@ function ItemDialog({
   healOnlyAtFull: boolean;
 }) {
   if (!item) return null;
+  /*
+   * 🔴 `P1-5` 阶段二：**能不能拿它打人**，判据不再是"标没标成武器"。
+   *
+   * 症状原话：「我换撬棍打，没触发检定」—— 撬棍这类东西常常只被标成工具/物品，
+   * 于是既没有"用此武器攻击"、点了"使用"也只是把话写进草稿，**检定压根没走**。
+   * 现在：标成武器、**或者**带伤害骰、**或者**带检定技能 —— 三者任一就能打
+   * （技能自带的就按那个掷，没有就退到肉搏）。
+   * 都不能打时**明确说一句**，不许"点了没反应"。
+   */
+  const canAttack =
+    item.kind === 'weapon' || Boolean(item.damage?.trim()) || Boolean(item.skill?.trim());
   const KIND_LABEL: Record<string, string> = {
     weapon: '武器',
     tool: '工具',
@@ -428,7 +490,7 @@ function ItemDialog({
         {item.desc ? (
           <p className="mt-2.5 text-[12px] leading-relaxed text-mist-300">{item.desc}</p>
         ) : (
-          <p className="mt-2.5 text-[12px] leading-relaxed text-mist-500/70">
+          <p className="mt-2.5 text-[12px] leading-relaxed text-mist-500">
             还没有简介——AI 生成的角色卡会带物品说明，也可以自己在准备页补一句。
           </p>
         )}
@@ -452,7 +514,7 @@ function ItemDialog({
 
         {/* 用起来：武器走检定；消耗品把"拿它干什么"交给玩家写，本地不预扣 */}
         <div className="mt-3.5 flex flex-wrap gap-2">
-          {item.kind === 'weapon' && (
+          {canAttack && (
             <button
               onClick={() => {
                 const skill = item.skill?.trim() || '格斗（斗殴）';
@@ -465,7 +527,7 @@ function ItemDialog({
               用此武器攻击
             </button>
           )}
-          {(item.kind === 'consumable' || item.kind !== 'weapon') && (
+          {!canAttack && (
             <button
               onClick={() => {
                 onClose();
@@ -484,6 +546,11 @@ function ItemDialog({
         */}
         {streaming && (
           <p className="mt-2 text-[11px] text-mist-500">守密人还在写 —— 等这一轮写完再动。</p>
+        )}
+        {!streaming && !canAttack && item.kind !== 'consumable' && (
+          <p className="mt-2 text-[11px] text-mist-500">
+            这件东西不当武器用 —— 想拿它打人，就在下面的检定里自己写对象和动作。
+          </p>
         )}
         {!streaming && healOnlyAtFull && (
           <p className="mt-2 text-[11px] text-mist-500">
@@ -517,7 +584,6 @@ export function CharacterSheet({
   const [showAllSkills, setShowAllSkills] = useState(false);
   const [showLowSkills, setShowLowSkills] = useState(false);
   const [openItem, setOpenItem] = useState<string | null>(null);
-  const [tab, setTab] = useState<SheetTab>('profile');
 
   const rs = getRuleset(rulesetId);
   // 角色卡上没写的技能（用标准名去重，避免"手枪"与"射击（手枪）"重复出现）
@@ -558,35 +624,21 @@ export function CharacterSheet({
 
   return (
     <div className="space-y-6 p-4">
-      {/* 页签：概况 / 技能 / 背包 —— 同一份角色卡，换呈现方式 */}
-      <div className="flex gap-1 rounded-lg border border-ink-700 bg-ink-900/60 p-1">
-        {SHEET_TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex-1 rounded-md px-3 py-1.5 text-[12px] transition ${
-              tab === t.id
-                ? 'bg-ink-800 font-medium text-gold-400'
-                : 'text-mist-500 hover:text-mist-200'
-            }`}
-          >
-            {t.label}
-            {t.id === 'bag' && gameState.inventory.length > 0 && (
-              <span className="ml-1 text-[10px] text-mist-500">{gameState.inventory.length}</span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'profile' && (
-        <>
+      {/* 概况 */}
+      <>
       <section>
         {character.portrait && (
           <ImageLightbox src={character.portrait} className="mb-3">
             <img
               src={character.portrait}
               alt={character.name}
-              className="aspect-square w-full rounded-xl border border-ink-600 object-cover"
+              /*
+               * 🔴 比例必须跟**生图尺寸**一致（立绘是 3:4 的竖版）。
+               * 这里原本写死 `aspect-square` —— 3:4 的图塞进方框 + `object-cover`
+               * 会上下各裁一半，玩家看到的就是「**头顶少一截**」。
+               * 用 Tailwind 的静态类（不能拼接，JIT 扫不到变量）。
+               */
+              className="aspect-[3/4] w-full rounded-xl border border-ink-600 object-cover"
             />
           </ImageLightbox>
         )}
@@ -596,82 +648,8 @@ export function CharacterSheet({
             <span className="text-[12px] text-mist-500">{character.gender}</span>
           )}
         </div>
-        {character.description && !showFull && (
-          <p className="mt-2 text-[12px] leading-relaxed text-mist-400">
-            {character.description.slice(0, 42)}
-            {character.description.length > 42 ? '…' : ''}
-          </p>
-        )}
-        {showFull && (
-          <>
-            {character.description && (
-              <p className="mt-2 text-[12px] leading-relaxed text-mist-400">
-                {character.description}
-              </p>
-            )}
-            {character.personality && (
-              <p className="mt-2 text-[12px] leading-relaxed text-mist-500">
-                {character.personality}
-              </p>
-            )}
-            {character.items && character.items.length > 0 && (
-              <p className="mt-2 text-[11px] leading-relaxed text-mist-500">
-                随身：{character.items.join('、')}
-              </p>
-            )}
-          </>
-        )}
-        <button
-          onClick={() => setShowFull((v) => !v)}
-          className="mt-1.5 text-[11px] text-gold-500/80 transition hover:text-gold-400"
-        >
-          {showFull ? '收起简介' : '展开简介'}
-        </button>
-      </section>
-
-      {gameState.companions.length > 0 && (
-        <section>
-          <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">同行者</h3>
-          <div className="space-y-2">
-            {gameState.companions.map((c) => (
-              <div key={c.id} className="flex items-center gap-2.5">
-                {c.portrait ? (
-                  <img
-                    src={c.portrait}
-                    alt={c.name}
-                    className="h-11 w-11 shrink-0 rounded-lg border border-ink-600 object-cover"
-                  />
-                ) : (
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-ink-600 bg-ink-850 font-serif text-[15px] text-mist-400">
-                    {c.name.slice(0, 1)}
-                  </div>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-1.5">
-                    <span
-                      className={`truncate text-[12px] ${
-                        c.alive && c.present ? 'text-mist-100' : 'text-mist-500 line-through'
-                      }`}
-                    >
-                      {c.name}
-                    </span>
-                    {!c.present && c.alive && (
-                      <span className="shrink-0 text-[9px] text-mist-500">离队</span>
-                    )}
-                    {!c.alive && <span className="shrink-0 text-[9px] text-blood-400">已死亡</span>}
-                  </div>
-                  <div className="truncate text-[10px] text-mist-500">{c.role}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
       <section>
-        <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">
-          属性 <span className="text-mist-500/60">（点击检定）</span>
-        </h3>
+        <SectionTitle icon="card" title="属性" hint="点击检定" />
         <div className="grid grid-cols-4 gap-1.5">
           {rs.characteristicDefs.map((d) => (
             <button
@@ -702,6 +680,39 @@ export function CharacterSheet({
         )}
       </section>
 
+        {character.description && !showFull && (
+          <p className="mt-2 text-[12px] leading-relaxed text-mist-400">
+            {character.description.slice(0, 42)}
+            {character.description.length > 42 ? '…' : ''}
+          </p>
+        )}
+        {showFull && (
+          <>
+            {character.description && (
+              <p className="mt-2 text-[12px] leading-relaxed text-mist-400">
+                {character.description}
+              </p>
+            )}
+            {character.personality && (
+              <p className="mt-2 text-[12px] leading-relaxed text-mist-500">
+                {character.personality}
+              </p>
+            )}
+            {character.items && character.items.length > 0 && (
+              <p className="mt-2 text-[11px] leading-relaxed text-mist-500">
+                随身：{character.items.join('、')}
+              </p>
+            )}
+          </>
+        )}
+        <button
+          onClick={() => setShowFull((v) => !v)}
+          className="mt-1.5 text-[11px] text-gold-500 transition hover:text-gold-400"
+        >
+          {showFull ? '收起简介' : '展开简介'}
+        </button>
+      </section>
+
       <section className="space-y-3">
         <h3 className="text-[11px] tracking-wider text-mist-500">状态</h3>
         {/*
@@ -724,26 +735,25 @@ export function CharacterSheet({
            * 信息一直都在，只是没拼好。
            */
           const ins = insanity();
-          const statusFlags = Object.entries(gameState.flags).filter(
-            ([k, v]) =>
-              /[\u4e00-\u9fa5]/.test(k) &&
-              v !== false &&
-              v !== '' &&
-              v !== 0 &&
-              v != null &&
-              k !== INSANITY_TURNS_FLAG
-          );
+          /*
+           * H20：**判据只有一份**。
+           *
+           * 这里以前自己写一份过滤（只认 `INSANITY_TURNS_FLAG`），
+           * 于是别的引擎记账键照样显示成「中毒轮数：2」，布尔状态还会露出 `true`。
+           * 现在统一走 `statusFlagLines()`（它会过滤**所有**「轮数」结尾的键、
+           * 并把布尔状态拼成「名字（还剩 N 轮）」）。
+           * 只剩 `临时疯狂` 一个特例 —— 它有引擎算好的那句话，是人话不是数字。
+           *
+           * 🔴 这一份**不过滤键名语言**（`P3-7`）：世界页曾经多一层中文过滤，
+           * 导致 ASCII 状态名两处不一致。现在两侧都直接吃 `statusFlagLines` 的结果。
+           */
+          const statusFlags = statusFlagLines(gameState.flags);
           if (statusFlags.length === 0) return null;
           return (
             <div className="flex flex-wrap gap-1.5">
-              {statusFlags.map(([key, value]) => {
+              {statusFlags.map(({ key, text: rawText }) => {
                 const tone = SEVERE_FLAG_TONE[key];
-                const text =
-                  key === '临时疯狂' && ins.active
-                    ? ins.label
-                    : value === true
-                      ? key
-                      : `${key}：${String(value)}`;
+                const text = key === '临时疯狂' && ins.active ? ins.label : rawText;
                 return (
                   <span
                     key={key}
@@ -811,7 +821,7 @@ export function CharacterSheet({
               />
             </div>
             {enc.tier > 0 && (
-              <p className="mt-1 text-[10px] leading-relaxed text-gold-500/80">
+              <p className="mt-1 text-[10px] leading-relaxed text-gold-500">
                 扛太重了 —— 做什么都不利索，检定会吃亏。扔掉一些，或者找个地方放下。
               </p>
             )}
@@ -821,19 +831,55 @@ export function CharacterSheet({
 
       {/* 我此刻在哪——放在概况里，玩家一眼看到"我在哪、我什么状态" */}
       <section>
-        <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">当前地点</h3>
+        <SectionTitle icon="location" title="当前地点" />
         <p className="rounded-md bg-ink-850 px-2.5 py-2 text-[12px] text-mist-300">
           {gameState.location || '未知'}
         </p>
       </section>
-        </>
+      {gameState.companions.length > 0 && (
+        <section>
+          <SectionTitle icon="companions" title="同行者" />
+          <div className="space-y-2">
+            {gameState.companions.map((c) => (
+              <div key={c.id} className="flex items-center gap-2.5">
+                {c.portrait ? (
+                  <img
+                    src={c.portrait}
+                    alt={c.name}
+                    className="h-11 w-11 shrink-0 rounded-lg border border-ink-600 object-cover"
+                  />
+                ) : (
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-ink-600 bg-ink-850 font-serif text-[15px] text-mist-400">
+                    {c.name.slice(0, 1)}
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-1.5">
+                    <span
+                      className={`truncate text-[12px] ${
+                        c.alive && c.present ? 'text-mist-100' : 'text-mist-500 line-through'
+                      }`}
+                    >
+                      {c.name}
+                    </span>
+                    {!c.present && c.alive && (
+                      <span className="shrink-0 text-[9px] text-mist-500">离队</span>
+                    )}
+                    {!c.alive && <span className="shrink-0 text-[9px] text-blood-400">已死亡</span>}
+                  </div>
+                  <div className="truncate text-[10px] text-mist-500">{c.role}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
-      {tab === 'skills' && (
+        </>
+
+      {/* 技能 */}
       <section>
-        <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">
-          技能 <span className="text-mist-500/60">（点击检定）</span>
-        </h3>
+        <SectionTitle icon="dice" title="技能" hint="点击检定" />
         <div className="grid grid-cols-2 gap-1.5">
           {Object.entries(character.skills)
             // 由高到低：一眼看到自己最擅长什么，不用在几十项里找
@@ -869,13 +915,13 @@ export function CharacterSheet({
                     {skill}
                   </span>
                   {weaponMissing && (
-                    <span className="block text-[9px] text-blood-300/80">无可用武器 · 不可检定</span>
+                    <span className="block text-[9px] text-blood-300">无可用武器 · 不可检定</span>
                   )}
                   {untrainedSkill && (
-                    <span className="block text-[9px] text-mist-500/70">未受训</span>
+                    <span className="block text-[9px] text-mist-500">未受训</span>
                   )}
                 </span>
-                <span className="shrink-0 text-[12px] tabular-nums text-gold-500/80">
+                <span className="shrink-0 text-[12px] tabular-nums text-gold-500">
                   {rs.mainDice === '1d100'
                     ? `${value}%`
                     : `${value >= 0 ? '+' : ''}${value}`}
@@ -892,7 +938,7 @@ export function CharacterSheet({
          */}
         <button
           onClick={() => setShowAllSkills((v) => !v)}
-          className="mt-2 text-[11px] text-gold-500/80 transition hover:text-gold-400"
+          className="mt-2 text-[11px] text-gold-500 transition hover:text-gold-400"
         >
           {showAllSkills ? '收起全部技能' : `全部技能（含基础值 ${usefulRestSkills.length} 项）`}
         </button>
@@ -945,7 +991,7 @@ export function CharacterSheet({
                     <span className="truncate text-[12px] text-mist-500 group-hover:text-mist-300">
                       {s.name}
                     </span>
-                    <span className="shrink-0 text-[12px] tabular-nums text-mist-500/80">
+                    <span className="shrink-0 text-[12px] tabular-nums text-mist-500">
                       {rs.mainDice === '1d100' ? `${s.base}%` : `+${s.base}`}
                     </span>
                   </button>
@@ -955,20 +1001,17 @@ export function CharacterSheet({
           </>
         )}
 
-        <p className="mt-2 text-[10px] leading-relaxed text-mist-500/70">
+        <p className="mt-2 text-[10px] leading-relaxed text-mist-500">
           {rs.beginnerGuide || '点击技能即可检定，并可指定对象。'}
           未受训的技能按规则包的基础值掷，只是成功率低。
         </p>
       </section>
-      )}
 
-      {tab === 'bag' && (
+      {/* 背包 */}
       <section>
-        <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">
-          背包 <span className="text-mist-500/70">（点击查看详情）</span>
-        </h3>
+        <SectionTitle icon="bag" title="背包" hint="点击查看详情" />
         {gameState.inventory.length === 0 ? (
-          <p className="text-[12px] text-mist-500/70">空空如也</p>
+          <p className="text-[12px] text-mist-500">空空如也</p>
         ) : (
           <>
             {enc.capacity !== null && (
@@ -1015,7 +1058,6 @@ export function CharacterSheet({
           </>
         )}
       </section>
-      )}
 
       {openItem && (
         <ItemDialog

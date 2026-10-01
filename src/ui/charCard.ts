@@ -49,14 +49,42 @@ function parsePngTextChunks(buf: ArrayBuffer): Record<string, string> {
   return texts;
 }
 
+/** base64 → UTF-8 字符串；不是合法 base64 时返回 null */
+function decodeBase64Utf8(b64: string): string | null {
+  try {
+    const bin = atob(b64.replace(/\s+/g, ''));
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 🔴 `P2-13`：酒馆卡的 `chara` / `ccv3` 里装的是 **base64 的 JSON**（V2 起的惯例），
+ * 直接 `JSON.parse` 必失败 —— 玩家导入一张标准卡，只会得到"读不出角色信息"。
+ * 先按 base64 解（顺带还原 UTF-8），解不出来再当明文试（也有卡直接塞 JSON 文本）。
+ */
+export function decodeCardPayload(raw: string): string | null {
+  const t = raw.trim();
+  if (!t) return null;
+  if (t.startsWith('{') || t.startsWith('[')) return t;
+  const decoded = decodeBase64Utf8(t)?.trim();
+  if (decoded && (decoded.startsWith('{') || decoded.startsWith('['))) return decoded;
+  return t;
+}
+
 /** 从 PNG 里提取角色卡；不是酒馆卡则返回 null */
 export function extractCharacterCard(buf: ArrayBuffer): ImportedCharacter | null {
   const texts = parsePngTextChunks(buf);
   const raw = texts['ccv3'] ?? texts['chara']; // V3 优先，V2 其次
   if (!raw) return null;
+  const payload = decodeCardPayload(raw);
+  if (!payload) return null;
   try {
-    const parsed = JSON.parse(raw);
-    const d = (parsed?.spec === 'chara_card_v3' ? parsed.data : parsed) ?? {};
+    const parsed = JSON.parse(payload);
+    // V3 卡把字段包在 `data` 层；有 `data` 就取它（比认 `spec` 字符串稳）
+    const d = (parsed?.data && typeof parsed.data === 'object' ? parsed.data : parsed) ?? {};
     if (!d || typeof d.name !== 'string' || !d.name.trim()) return null;
     return {
       name: d.name.trim(),

@@ -33,6 +33,8 @@ import {
   type CustomRulesetConfig,
 } from '../core/rulesets/index.js';
 import { listGenres, type Genre } from '../core/genres.js';
+import { ART_SIZES, formatSize } from '../core/artSpec.js';
+import { ICONS } from './icons';
 import { listGmVoices } from '../core/voices.js';
 import { checksOf } from './runSummary.js';
 import {
@@ -51,6 +53,7 @@ import {
   type GenPreset,
   type StoredPreset,
 } from './preset.js';
+import { readLocal, removeLocal, writeLocal } from './state/storage.js';
 
 const PRESETS = [
   {
@@ -83,10 +86,13 @@ const PRESETS = [
   { name: '本地 Ollama', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:14b' },
 ];
 
+/*
+ * 两套主题（2026-09-26 主人重申口径：羊皮纸改进 + 另两套合并成一套 ＝ 两套）。
+ * 「午夜」＝原「午夜 · 暗金」主干 +「冷灰」的中性灰阶（合并依据见 theme.css）。
+ */
 const THEMES: { id: ThemeName; name: string; desc: string }[] = [
-  { id: 'midnight', name: '午夜 · 暗金', desc: '哥特调查' },
-  { id: 'ash', name: '冷灰', desc: '无彩现代' },
-  { id: 'parchment', name: '羊皮纸', desc: '浅色复古' },
+  { id: 'parchment', name: '羊皮纸', desc: '浅色复古（默认）' },
+  { id: 'midnight', name: '午夜 · 暗金', desc: '深色 · 哥特调查' },
 ];
 
 function Field({
@@ -102,7 +108,7 @@ function Field({
     <label className="block">
       <span className="mb-1.5 block text-[12px] text-mist-400">{label}</span>
       {children}
-      {hint && <span className="mt-1 block text-[11px] leading-relaxed text-mist-500/80">{hint}</span>}
+      {hint && <span className="mt-1 block text-[11px] leading-relaxed text-mist-500">{hint}</span>}
     </label>
   );
 }
@@ -137,7 +143,7 @@ function AudioStorageMeter() {
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-mist-400">
           音频占用 <span className="text-mist-300">{mb(total)}</span>
-          <span className="text-mist-500/70">（{rows.length} 个文件）</span>
+          <span className="text-mist-500">（{rows.length} 个文件）</span>
         </span>
         <button
           onClick={() => setTick((t) => t + 1)}
@@ -222,7 +228,7 @@ const slotKey = (id: string) => `trpg.slot.${id}`;
 
 function readSlots(): SlotMeta[] {
   try {
-    return JSON.parse(localStorage.getItem(SLOTS_KEY) || '[]') as SlotMeta[];
+    return JSON.parse(readLocal(SLOTS_KEY) || '[]') as SlotMeta[];
   } catch {
     return [];
   }
@@ -238,22 +244,59 @@ const CUSTOM_KEY = 'trpg.customRulesets';
  * （比如"存档"其实在「数据与存档」、"API Key"在「模型与接口」），
  * 光按标题匹配会搜不到，所以把同义词都列上。
  */
+/*
+ * 设置里各节的清单。
+ *
+ * `icon` 在这里**一处定义**（不在每个调用点传）—— 十个节各传一遍既啰嗦、
+ * 又一定有人漏。图标本身在 `ui/icons.tsx`，与角色卡区块标题是同一套。
+ */
 const SECTIONS = [
   {
     id: 'sec-career',
     label: '生涯与成就',
     keys: '生涯 成就 战绩 累计 局数 统计 履历 勋章',
+    icon: 'trophy',
   },
-  { id: 'sec-rules', label: '规则与题材', keys: '规则 题材 跑团 coc dnd 自定义 口吻 说书人 旁白 搭档 命运' },
-  { id: 'sec-look', label: '外观与排版', keys: '外观 主题 配色 排版 字号 行距 缩进' },
-  { id: 'sec-audio', label: '音频', keys: '音频 音量 音效 bgm 氛围音 静音' },
-  { id: 'sec-api', label: '模型与接口', keys: '模型 api key 接口 服务商 硅基流动 deepseek 地址 温度 密钥 连接测试' },
-  { id: 'sec-data', label: '数据与存档', keys: '存档 导入 导出 备份 槽位 重置 清空 数据' },
-  { id: 'sec-install', label: '安装到设备', keys: '安装 pwa 桌面 主屏 离线 重载 更新' },
-  { id: 'sec-illustrate', label: '自动配图', keys: '带图战报 配图 生图 插画 图片 自动 战报' },
-  { id: 'sec-dev', label: '开发者', keys: '开发者 沙盒 测试 调试 dev' },
-  { id: 'sec-keys', label: '快捷键', keys: '快捷键 键盘 按键 enter esc' },
-];
+  {
+    id: 'sec-rules',
+    label: '规则与题材',
+    keys: '规则 题材 跑团 coc dnd 自定义 口吻 说书人 旁白 搭档 命运',
+    icon: 'dice',
+  },
+  {
+    id: 'sec-look',
+    label: '外观与排版',
+    keys: '外观 主题 配色 排版 字号 行距 缩进',
+    icon: 'card',
+  },
+  { id: 'sec-audio', label: '音频', keys: '音频 音量 音效 bgm 氛围音 静音', icon: 'volumeOn' },
+  {
+    id: 'sec-api',
+    label: '模型与接口',
+    keys: '模型 api key 接口 服务商 硅基流动 deepseek 地址 温度 密钥 连接测试',
+    icon: 'settings',
+  },
+  {
+    id: 'sec-data',
+    label: '数据与存档',
+    keys: '存档 导入 导出 备份 槽位 重置 清空 数据',
+    icon: 'save',
+  },
+  {
+    id: 'sec-install',
+    label: '安装到设备',
+    keys: '安装 pwa 桌面 主屏 离线 重载 更新',
+    icon: 'update',
+  },
+  {
+    id: 'sec-illustrate',
+    label: '自动配图',
+    keys: '带图战报 配图 生图 插画 图片 自动 战报',
+    icon: 'image',
+  },
+  { id: 'sec-dev', label: '开发者', keys: '开发者 沙盒 测试 调试 dev', icon: 'flask' },
+  { id: 'sec-keys', label: '快捷键', keys: '快捷键 键盘 按键 enter esc', icon: 'help' },
+] as const;
 
 /**
  * 设置里的一节：**可折叠** + **可被搜索命中**（G6）。
@@ -284,7 +327,9 @@ function Section({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(true);
-  const keys = SECTIONS.find((s) => s.id === id)?.keys ?? '';
+  const sec = SECTIONS.find((s) => s.id === id);
+  const keys = sec?.keys ?? '';
+  const SecIcon = sec?.icon ? ICONS[sec.icon] : null;
   const q = query.trim().toLowerCase();
   const hit = !q || `${title} ${hint ?? ''} ${keys}`.toLowerCase().includes(q);
   // 搜索时不显示没命中的节；但**没有搜索词时一律显示**（默认全开，不做"藏起来"这种默认动作）
@@ -305,6 +350,7 @@ function Section({
         >
           ▶
         </span>
+        {SecIcon && <SecIcon size={13} className="shrink-0 text-mist-500" />}
         <span className="text-[13px] font-medium tracking-wide text-gold-400">{title}</span>
       </button>
       {hint && <p className="mt-0.5 pl-3.5 text-[11px] leading-relaxed text-mist-500">{hint}</p>}
@@ -357,7 +403,7 @@ function parseSkillLines(text: string): { name: string; base: number }[] {
 
 function readCustomRulesets(): CustomRulesetConfig[] {
   try {
-    return JSON.parse(localStorage.getItem(CUSTOM_KEY) || '[]') as CustomRulesetConfig[];
+    return JSON.parse(readLocal(CUSTOM_KEY) || '[]') as CustomRulesetConfig[];
   } catch {
     return [];
   }
@@ -412,7 +458,7 @@ function CustomRulesetEditor({ onSaved }: { onSaved: () => void }) {
     registerCustomRuleset(cfg);
     const list = [...readCustomRulesets(), cfg];
     try {
-      localStorage.setItem(CUSTOM_KEY, JSON.stringify(list));
+      writeLocal(CUSTOM_KEY, JSON.stringify(list));
       setMsg(`已保存「${cfg.name}」，可在上方切换`);
       onSaved();
     } catch {
@@ -773,6 +819,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const setConfig = useStore((s) => s.setConfig);
   const theme = useStore((s) => s.theme);
   const setTheme = useStore((s) => s.setTheme);
+  /*
+   * （主题选择器已恢复 —— 2026-09-26 主人重申是两套。）
+   * 只是界面上没有入口了。
+   */
   const typography = useStore((s) => s.typography);
   const setTypography = useStore((s) => s.setTypography);
   const audio = useStore((s) => s.audio);
@@ -801,9 +851,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
    */
   const removeCustomRuleset = (id: string) => {
     try {
-      const raw = localStorage.getItem(CUSTOM_KEY);
+      const raw = readLocal(CUSTOM_KEY);
       const list = raw ? (JSON.parse(raw) as CustomRulesetConfig[]) : [];
-      localStorage.setItem(
+      writeLocal(
         CUSTOM_KEY,
         JSON.stringify(list.filter((c) => c?.id !== id))
       );
@@ -892,8 +942,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
   };
 
   /** 复制纯文本对话记录 + 状态快照，便于直接粘贴排查 */
-  const copyLog = async () => {
-    const s = useStore.getState();
+  const copyLog = async () => {    const s = useStore.getState();
     const body = s.messages
       .map((m) => {
         const who = m.role === 'gm' ? '守密人' : m.role === 'player' ? '玩家' : '系统';
@@ -970,9 +1019,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
   };
 
   const resetAll = () => {
-    localStorage.removeItem('trpg.character');
-    localStorage.removeItem('trpg.gameState');
-    localStorage.removeItem('trpg.messages');
+    removeLocal('trpg.character');
+    removeLocal('trpg.gameState');
+    removeLocal('trpg.messages');
     useStore.getState().clearProgress();
     useStore.getState().clearMessages();
     // 不走 location.reload()：那会被旧 SW 接管，等于清空之后又退回旧包
@@ -992,9 +1041,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
     // 与导出共用 buildSave()，字段不会漏（含队友候选与快照）
     const payload = s.buildSave();
     try {
-      localStorage.setItem(slotKey(id), JSON.stringify(payload));
+      writeLocal(slotKey(id), JSON.stringify(payload));
       const next = [...slots.filter((x) => x.name !== meta.name), meta];
-      localStorage.setItem(SLOTS_KEY, JSON.stringify(next));
+      writeLocal(SLOTS_KEY, JSON.stringify(next));
       setSlots(next);
       setSlotName('');
       flash(`已保存到「${meta.name}」`);
@@ -1005,7 +1054,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   const loadSlot = (id: string) => {
     try {
-      const raw = localStorage.getItem(slotKey(id));
+      const raw = readLocal(slotKey(id));
       if (!raw) {
         flash('槽位为空');
         return;
@@ -1018,9 +1067,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
   };
 
   const deleteSlot = (id: string) => {
-    localStorage.removeItem(slotKey(id));
+    removeLocal(slotKey(id));
     const next = slots.filter((x) => x.id !== id);
-    localStorage.setItem(SLOTS_KEY, JSON.stringify(next));
+    writeLocal(SLOTS_KEY, JSON.stringify(next));
     setSlots(next);
     flash('已删除槽位');
   };
@@ -1059,7 +1108,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             added++;
           }
         }
-        localStorage.setItem(CUSTOM_KEY, JSON.stringify(merged));
+        writeLocal(CUSTOM_KEY, JSON.stringify(merged));
         setCustomVersion((v) => v + 1);
         flash(`已导入 ${added} 个规则`);
       } catch {
@@ -1158,7 +1207,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             className="mb-4 flex w-full items-center justify-between gap-2 rounded-lg border border-gold-600/50 bg-gold-500/10 px-3 py-2 text-left text-[12px] text-gold-300 transition hover:bg-gold-500/15"
           >
             <span>还没配置 API Key，配置完就能开团了</span>
-            <span className="shrink-0 text-[11px] text-gold-500/80">去配置 ›</span>
+            <span className="shrink-0 text-[11px] text-gold-500">去配置 ›</span>
           </button>
         )}
 
@@ -1224,7 +1273,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
               题材预设{' '}
-              <span className="text-mist-500/70">（决定守密人怎么写、画风、队友倾向）</span>
+              <span className="text-mist-500">（决定守密人怎么写、画风、队友倾向）</span>
             </span>
             <div className="grid grid-cols-2 gap-2">
               {listGenres(customGenres).map((g) => {
@@ -1287,7 +1336,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
               守密人的口吻{' '}
-              <span className="text-mist-500/70">（只改"怎么说"，不改任何规则与数值）</span>
+              <span className="text-mist-500">（只改"怎么说"，不改任何规则与数值）</span>
             </span>
             <div className="grid grid-cols-2 gap-2">
               {listGmVoices().map((v) => (
@@ -1309,7 +1358,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
-              规则预设 <span className="text-mist-500/70">（换规则会重置属性与技能）</span>
+              规则预设 <span className="text-mist-500">（换规则会重置属性与技能）</span>
             </span>
             <div className="grid grid-cols-2 gap-2">
               {listRulesets().map((r) => {
@@ -1380,7 +1429,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   }}
                 />
               </label>
-              <span className="text-[10px] text-mist-500/70">分享第三方自定义规则</span>
+              <span className="text-[10px] text-mist-500">分享第三方自定义规则</span>
             </div>
           </div>
 
@@ -1405,7 +1454,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">外观主题</span>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               {THEMES.map((t) => (
                 <button
                   key={t.id}
@@ -1425,7 +1474,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
-              正文排版 <span className="text-mist-500/70">（只影响故事正文的显示）</span>
+              正文排版 <span className="text-mist-500">（只影响故事正文的显示）</span>
             </span>
             <div className="grid grid-cols-4 gap-2">
               {TYPOGRAPHY_PRESETS.map((p) => {
@@ -1500,7 +1549,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <div>
             <span className="mb-2 block text-[12px] text-mist-400">
               音频{' '}
-              <span className="text-mist-500/70">
+              <span className="text-mist-500">
                 （BGM 可自配，大成功 / 大失败音效可换成你自己的梗）
               </span>
             </span>
@@ -1587,7 +1636,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
                 <div>
                   <span className="mb-1.5 block text-[11px] text-mist-500">
-                    判定音效 <span className="text-mist-500/70">（不传就用内置的程序化音效）</span>
+                    判定音效 <span className="text-mist-500">（不传就用内置的程序化音效）</span>
                   </span>
                   <div className="space-y-1.5">
                     {/* 全部槽位：每一件事都能配自己的音；不传就用内置的程序化音效 */}
@@ -1599,7 +1648,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
                 <div>
                   <span className="mb-1.5 block text-[11px] text-mist-500">
-                    自配 BGM <span className="text-mist-500/70">（可上传本地文件，或填直链）</span>
+                    自配 BGM <span className="text-mist-500">（可上传本地文件，或填直链）</span>
                   </span>
                   <div className="space-y-1.5">
                     <AudioFileRow label="本地音乐文件" storageKey="bgm" />
@@ -1742,11 +1791,22 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <Field label="尺寸">
                 <input
                   className={inputCls}
-                  value={config.imageSize ?? '1024x1024'}
+                  value={config.imageSize ?? ''}
                   onChange={(e) => setConfig({ imageSize: e.target.value })}
+                  placeholder="留空＝按图片类型自动"
                 />
               </Field>
             </div>
+            {/*
+             * 阶段 0-2：以前四类图**共用一张方图**（立绘被裁半身、场景没广角）。
+             * 现在留空就按类型自动取 —— 文案直接从 `core/artSpec.ts` 读，
+             * 与真正发给接口的尺寸共用一个真源，不会说岔。
+             */}
+            <p className="mt-1.5 text-[11px] leading-relaxed text-mist-500">
+              留空＝按图片类型自动：立绘 {formatSize(ART_SIZES.portrait)} · 场景{' '}
+              {formatSize(ART_SIZES.scene)} · 地图与插画 {formatSize(ART_SIZES.map)}。
+              填了以你填的为准（如 <code className="rounded bg-ink-700 px-1">1024x576</code>）。
+            </p>
             {/*
              * H15：首推的模型必须是**实测在架**的。
              *
@@ -1754,13 +1814,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
              * （实测 403 `Model disabled`）—— 照抄必失败。
              * 属服务商下架，不是代码写错，但对玩家的结果一样：白等 40 秒。
              */}
-            <p className="mt-1.5 text-[11px] leading-relaxed text-mist-500/80">
+            <p className="mt-1.5 text-[11px] leading-relaxed text-mist-500">
               生图与对话共用同一个 API 地址和 Key，只是模型不同。硅基流动目前可用{' '}
               <code className="rounded bg-ink-700 px-1">Qwen/Qwen-Image</code>（2026-09 实测在架）；
               <code className="rounded bg-ink-700 px-1">black-forest-labs/FLUX.1-schnell</code>{' '}
               已下线（会报 403）。留空则关闭生图。
             </p>
-            <p className="mt-1 text-[11px] leading-relaxed text-gold-400/80">
+            <p className="mt-1 text-[11px] leading-relaxed text-gold-400">
               {/* H18：JSX 不解析 Markdown —— 写 `**加粗**` 会把两对星号原样显示出来 */}
               ⚠️ 模型名填错或服务商下架时，生图会
               <strong className="font-medium text-gold-300">静默失败</strong>
@@ -1833,7 +1893,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
             <div className="mt-3">
               <span className="mb-1.5 block text-[11px] text-mist-500">
-                存档槽 <span className="text-mist-500/70">（想同时开几局，就用槽位切换）</span>
+                存档槽 <span className="text-mist-500">（想同时开几局，就用槽位切换）</span>
               </span>
               <div className="flex gap-1.5">
                 <input
@@ -1935,7 +1995,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 当前版本 <span className="font-mono text-gold-400">{versionLabel()}</span>
               </span>
               <button
-                onClick={void checkNow}
+                onClick={() => void checkNow()}
                 disabled={updateState === 'checking'}
                 className="shrink-0 rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100 disabled:opacity-50"
               >
@@ -2000,7 +2060,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             >
               打开测试沙盒
             </button>
-            <p className="text-[10px] leading-relaxed text-mist-500/80">
+            <p className="text-[10px] leading-relaxed text-mist-500">
               沙盒只写本地数据、不发请求、不需要 API Key：可一键灌入完整测试局、切换三套脚本化模组、
               把背包塞满、把数值调到濒死或归零、直接触发结档。测完点「回到出厂状态」即可清掉。
             </p>
@@ -2032,7 +2092,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   每次记下「关键抉择」时会顺手给那一轮配一张。
                   不想全局打开也没关系 —— 任何一条守密人的消息上都有单独的「配图」按钮。
                   {!config.imageModel?.trim() && (
-                    <span className="mt-1 block text-blood-300/90">
+                    <span className="mt-1 block text-blood-300">
                       还没填「生图模型」，现在打开也不会生图（先去上面「模型与接口」填）。
                     </span>
                   )}

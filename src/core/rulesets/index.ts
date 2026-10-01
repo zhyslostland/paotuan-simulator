@@ -51,12 +51,24 @@ export function unregisterCustomRuleset(id: string): boolean {
   return true;
 }
 
-/** 把 localStorage 里存的自定义规则包都注册进来（浏览器端启动时调用一次） */
-export function loadCustomRulesets(): void {
+/**
+ * 把一份**原始 JSON 串**里的自定义规则包都注册进来。
+ *
+ * ## 为什么参数是字符串，而不是自己去读 localStorage
+ *
+ * 2026-09-30 架构体检：这个函数原来自己在 core 里调 `localStorage.getItem`
+ * —— 而同一个文件的 `:45` 还写着「**core 不许有 IO**」。铁律只写在注释里，
+ * 编译器看不见，于是它就一直这么活着（体检报告 §3 · S4）。
+ *
+ * 现在把**读盘**那一半交回 UI 层（`ui/store.ts` 启动时读一次），core 只做
+ * **纯解析 + 注册**：没有 IO、没有全局对象、可以脱离浏览器单测。
+ * `scripts/check-contract.mjs` 的边界闸门会盯着这件事，写回去就红。
+ *
+ * 损坏的 JSON / 非法条目一律忽略（自定义规则包坏掉不该让游戏起不来）。
+ */
+export function registerCustomRulesetsFrom(raw: string | null): void {
+  if (!raw) return;
   try {
-    if (typeof localStorage === 'undefined') return;
-    const raw = localStorage.getItem('trpg.customRulesets');
-    if (!raw) return;
     const list = JSON.parse(raw) as CustomRulesetConfig[];
     for (const cfg of list) {
       if (cfg && cfg.id && cfg.name) registerCustomRuleset(cfg);

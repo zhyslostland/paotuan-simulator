@@ -9,32 +9,11 @@
  *   ② **最后一次一定要落盘**（否则关标签页就丢内容 —— 节流最容易踩的就是这个坑）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemStorage } from './setup.js';
 
-class MemStorage {
-  private m = new Map<string, string>();
-  getItem(k: string) {
-    return this.m.has(k) ? this.m.get(k)! : null;
-  }
-  setItem(k: string, v: string) {
-    this.m.set(k, String(v));
-  }
-  removeItem(k: string) {
-    this.m.delete(k);
-  }
-  clear() {
-    this.m.clear();
-  }
-  get length() {
-    return this.m.size;
-  }
-  key(i: number) {
-    return [...this.m.keys()][i] ?? null;
-  }
-}
 
 const mem = new MemStorage();
 vi.stubGlobal('localStorage', mem);
-vi.stubGlobal('indexedDB', undefined);
 
 // 必须在 import store 之前把桩装好（store 模块加载时就会读盘）
 const { useStore } = await import('../src/ui/store.js');
@@ -72,8 +51,8 @@ describe('P2-8：坏档要说实话，坏串不许原地作祟', () => {
     mem.setItem('trpg.badtest2', '{{{');
     loadJson('trpg.badtest2', null);
 
-    const msg = consumeLoadError();
-    expect(msg).toBeTruthy();
+    // 🔴 真判据：那句提示要**说中这件事**（不是"弹了点什么"就算数）
+    const msg = consumeLoadError() ?? '';
     expect(msg).toContain('读不出来');
     // 取完即清 —— 刷新不会重复弹同一句
     expect(consumeLoadError()).toBeNull();

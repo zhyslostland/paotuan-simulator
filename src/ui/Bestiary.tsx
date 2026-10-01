@@ -127,11 +127,11 @@ export function BestiaryPanel() {
            * "我确实见过东西"需要正反馈，否则玩家中途完全不知道自己攒到了什么进度。
            */}
           {bestiary.seen > 0 && (
-            <p className="mt-1 text-[10px] tabular-nums text-gold-400/90">
+            <p className="mt-1 text-[10px] tabular-nums text-gold-400">
               这一局你已经遭遇过 {bestiary.seen} 种 —— 名字与弱点要等这一局走完才翻开。
             </p>
           )}
-          <p className="mt-1 text-[10px] leading-relaxed text-mist-500/80">
+          <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
             里面写着这些东西怕什么、怎么脱身 —— 现在就翻等于提前看答案。
             {endingText ? '' : '这一局跑完（或走到结局）就会解锁。'}
           </p>
@@ -162,7 +162,7 @@ export function BestiaryPanel() {
                 </div>
 
                 {locked ? (
-                  <p className="mt-1 text-[10px] leading-relaxed text-mist-500/70">
+                  <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
                     这一局里你还没碰上它。
                   </p>
                 ) : (
@@ -174,11 +174,11 @@ export function BestiaryPanel() {
                     <Row label="习性" value={c.behavior} />
                     {c.weakness ? (
                       <p className="mt-1 border-t border-ink-700 pt-1 text-[11px] leading-relaxed text-gold-300">
-                        <span className="text-gold-500/80">弱点：</span>
+                        <span className="text-gold-500">弱点：</span>
                         {c.weakness}
                       </p>
                     ) : (
-                      <p className="mt-1 border-t border-ink-700 pt-1 text-[10px] leading-relaxed text-mist-500/70">
+                      <p className="mt-1 border-t border-ink-700 pt-1 text-[10px] leading-relaxed text-mist-500">
                         只知道它不好惹 —— 真跟它交过手，才看得出它怕什么。
                       </p>
                     )}
@@ -190,7 +190,7 @@ export function BestiaryPanel() {
         </div>
       )}
 
-      <p className="text-[10px] leading-relaxed text-mist-500/70">
+      <p className="text-[10px] leading-relaxed text-mist-500">
         图鉴只记这一局模组的对手{moduleTitle ? `（${moduleTitle}）` : ''}。
         未遭遇的先不显示名字 —— 报出名字本身就已经剧透了。
       </p>

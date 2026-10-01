@@ -9,6 +9,8 @@
  * 想听自己的曲子时，用户可以上传本地文件（存 IndexedDB）或填直链来覆盖。
  */
 
+import { readLocal, writeLocal } from './state/storage.js';
+
 export type AmbienceKind = 'none' | 'rain' | 'wind' | 'heart' | 'drone';
 
 /**
@@ -78,7 +80,7 @@ const CFG_KEY = 'trpg.audio';
 
 export function loadAudioConfig(): AudioConfig {
   try {
-    const raw = localStorage.getItem(CFG_KEY);
+    const raw = readLocal(CFG_KEY);
     if (!raw) return { ...DEFAULT_AUDIO };
     return { ...DEFAULT_AUDIO, ...(JSON.parse(raw) as Partial<AudioConfig>) };
   } catch {
@@ -88,7 +90,7 @@ export function loadAudioConfig(): AudioConfig {
 
 export function saveAudioConfig(c: AudioConfig): void {
   try {
-    localStorage.setItem(CFG_KEY, JSON.stringify(c));
+    writeLocal(CFG_KEY, JSON.stringify(c));
   } catch {
     /* 隐私模式下写不了就算了，不影响玩 */
   }

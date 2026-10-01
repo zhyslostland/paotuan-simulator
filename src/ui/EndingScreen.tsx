@@ -63,7 +63,7 @@ export function AnchorList({
             <span className="min-w-0 truncate text-[12px] text-mist-300">
               {a.label || '关键抉择'}
             </span>
-            <span className="shrink-0 text-[11px] text-gold-500/80">↺ 回到这里</span>
+            <span className="shrink-0 text-[11px] text-gold-500">↺ 回到这里</span>
           </button>
         </li>
       ))}
@@ -77,7 +77,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
     <div className="rounded-lg border border-ink-700 bg-ink-900/60 px-3 py-2">
       <div className="text-[10px] tracking-wider text-mist-500">{label}</div>
       <div className="mt-0.5 text-[15px] tabular-nums text-mist-100">{value}</div>
-      {hint && <div className="mt-0.5 text-[10px] text-mist-500/80">{hint}</div>}
+      {hint && <div className="mt-0.5 text-[10px] text-mist-500">{hint}</div>}
     </div>
   );
 }
@@ -147,7 +147,7 @@ function RunAndCareer() {
             <ul className="mt-1 space-y-0.5">
               {lastUnlocked.map((a: AchievementDef) => (
                 <li key={a.id} className="text-[12px] text-gold-200">
-                  · {a.name} <span className="text-gold-500/80">— {a.desc}</span>
+                  · {a.name} <span className="text-gold-500">— {a.desc}</span>
                 </li>
               ))}
             </ul>
@@ -359,7 +359,7 @@ export function EndingScreen({
       <div className="mx-auto max-w-2xl px-5 py-10 sm:py-16">
         <div className="mb-6 flex items-center gap-3">
           <span className="h-px w-8 bg-gold-600/60" />
-          <span className="text-[11px] tracking-[0.2em] text-gold-500/80">结档</span>
+          <span className="text-[11px] tracking-[0.2em] text-gold-500">结档</span>
         </div>
 
         <h1 className="font-serif text-[26px] leading-snug text-mist-100">
@@ -378,11 +378,21 @@ export function EndingScreen({
         )}
 
         <div className="prose-trpg mt-6 font-serif text-[15px] leading-[1.9] text-mist-300">
-          {ending.text.split(/\n+/).map((p, i) => (
-            <p key={i} className="mb-4">
-              {p}
+          {/*
+           * `G26`：结档时守密人还没写下结局正文，也得有一句话把这一屏撑住
+           * —— 以前这里是空白的，玩家只看到"已结档"却什么都没有。
+           */}
+          {ending.text.trim() ? (
+            ending.text.split(/\n+/).map((p, i) => (
+              <p key={i} className="mb-4">
+                {p}
+              </p>
+            ))
+          ) : (
+            <p className="mb-4">
+              这一局到这里结束了，守密人没有留下结局正文 —— 账已经记下了，你可以从这里回溯到某个抉择，或者开新的一局。
             </p>
-          ))}
+          )}
         </div>
 
         {/* R13/R30：这一局的账 + 生涯 + 成就 */}
@@ -455,7 +465,7 @@ export function EndingScreen({
             <div className="rounded-lg border border-gold-600/30 bg-gold-500/[0.04] p-3 sm:col-span-2">
               <div className="flex items-baseline gap-2">
                 <span className="text-[12px] text-mist-300">完整留档</span>
-                <span className="text-[10px] text-gold-400/80">含守密人真相</span>
+                <span className="text-[10px] text-gold-400">含守密人真相</span>
               </div>
               <div className="mt-0.5 text-[10px] leading-relaxed text-mist-500">
                 同上，末尾多一段折叠起来的真相。留给自己，或发给已经跑完这一局的人 ——
@@ -522,7 +532,7 @@ export function EndingScreen({
           {anchors.length > 0 ? (
             <AnchorList anchors={anchors} onRewind={onRewind} />
           ) : (
-            <p className="text-[12px] text-mist-500/70">
+            <p className="text-[12px] text-mist-500">
               这一局还没有被标记为关键的抉择点（检定没过、进入战斗、首次到某地、拿到新线索或新支线时会自动标记）。
             </p>
           )}

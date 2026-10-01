@@ -7,6 +7,7 @@ import type { Ruleset } from '../core/rulesets/types.js';
 import type { Genre } from '../core/genres.js';
 import { ACT_EXPAND_SPEC } from '../core/acts.js';
 import { characteristicBudget } from '../core/skills.js';
+import { appearanceOf } from '../core/appearance.js';
 
 /**
  * 模组篇幅。类型定义放在这里（而不是 ui/store），
@@ -61,17 +62,26 @@ function parseLoose<T>(text: string): T | null {
   return null;
 }
 
+/**
+ * `signal` 是**超时与取消**用的（H24）。
+ *
+ * 第 12 轮实测：点「整理成模组卡」后界面停在「整理中…」**200 秒没有任何反馈**，
+ * 只能刷新脱身 —— 而刷新会把这一页填好的东西一起丢掉。
+ * `chat()` 早就支持 signal，只是这里一直没传下去。
+ */
 export async function generateJson<T>(
   system: string,
   user: string,
-  cfg: ModelConfig
+  cfg: ModelConfig,
+  signal?: AbortSignal
 ): Promise<T | null> {
   const raw = await chat(
     [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    { ...cfg, temperature: Math.min(cfg.temperature, 1.0) }
+    { ...cfg, temperature: Math.min(cfg.temperature, 1.0) },
+    signal
   );
   return parseLoose<T>(raw);
 }
@@ -158,12 +168,15 @@ ${genre.castHint}
 
 ${modSec}
 格式：
-{"name":"姓名","gender":"男|女","description":"描述","personality":"性格","scenario":"开局处境","characteristics":${spec.attrExample},"skills":{"技能名":数值,...},"items":[{"name":"物品名","desc":"一句话说明它是什么、能干嘛","kind":"weapon|tool|clue|consumable|other","damage":"1d10","skill":"对应检定技能"}]}
+{"name":"姓名","gender":"男|女","description":"描述","appearance":"外貌","personality":"性格","scenario":"开局处境","characteristics":${spec.attrExample},"skills":{"技能名":数值,...},"items":[{"name":"物品名","desc":"一句话说明它是什么、能干嘛","kind":"weapon|tool|clue|consumable|other","damage":"1d10","skill":"对应检定技能"}]}
 
 要求：
 - 全部中文，姓名与身份要贴合上面题材的世界观与时代。
 - gender 必填，只写"男"或"女"。
 - description 80-150 字：外貌（一眼能记住的特征）+ 年龄 + 身份 + 来历，写成一段连贯的话，不要分点。
+- **appearance 20-40 字：只写长相**（发型发色、五官特征、身形、衣着的主色与样式），
+  是给"按这张卡画角色立绘"用的 —— 所以**不要写性格、身份与来历**（那些在别处已有，
+  混进来会让画出来的脸不固定）。要求具体到"画得出来"：不写"很帅"，写"眉骨一道浅疤"。
 - personality 40-80 字：说话方式、性格弱点、在意什么。要具体到"能演出来"的程度。
 - scenario 30-60 字：开局时这个人身处何地、正在做什么。
 ${spec.rules}
@@ -183,6 +196,9 @@ ${
   ${rs.skillCatalog.map((s) => s.name).join('、')}
   挑 6-9 项，给数值（${rs.mainDice === '1d100' ? '百分比' : '加值'}）。角色卡上没有的技能不代表不会——
   未受训按规则包的基础值掷，所以**不要为了"会用"而把技能表塞满**。
+- 🔴 **技能点要有预算意识**：这是硬约束 —— 引擎按属性推算技能点总额，加点时**要用尽、但绝不许超支**
+  （超了你给的这张卡会被打回重算，玩家看到的是"预算 340 / 已用 380"）。生成完**自己核算一遍**：
+  每项投入 = 数值 − 该技能在规则包里的基础值，总和必须 ≤ 总额。
 - 若玩家没给描述，自行创作一个贴合题材的有戏的角色。`;
 }
 
@@ -347,13 +363,16 @@ ${genre.setting}
 ${genre.castHint}
 
 格式：
-{"name":"姓名","role":"身份","personality":"性格与说话方式","initiative":"reactive|balanced|proactive","skills":{"技能名":数值},"vitals":{${rs.vitalDefs
+{"name":"姓名","role":"身份","personality":"性格与说话方式","appearance":"外貌","initiative":"reactive|balanced|proactive","skills":{"技能名":数值},"vitals":{${rs.vitalDefs
     .map((v) => `"${v.key}":${v.default}`)
     .join(',')}}}
 
 要求：
 - 全部中文，贴合上面题材的世界观与时代。
 - personality 60-120 字：写说话习惯、口头禅、害怕什么、在紧张时的反应。要具体，能让人一眼看出怎么演这个角色。
+- **appearance 20-40 字：只写长相**（发型发色、五官特征、身形、衣着的主色与样式），
+  供"按这名队友画立绘"用 —— 同一个角色往后重画都吃这一句，
+  所以务必具体到"照着能画出同一张脸"，只写"衣着朴素"等于没写。不要写性格与身份。
 - **要写出这个角色对玩家的态度**（是信赖、警惕、好奇，还是嘴上嫌弃）——这决定了他为什么会跟着玩家。
 - initiative：话少沉稳或身份低微的选 reactive；好奇外向、职业需要主动追问的选 balanced；有主张、会擅自行动的选 proactive。**默认倾向 reactive，避免抢玩家风头。**
 - vitals 只能填这几个键：${vitalSpec(rs)}；各取一个合理整数（参考默认值，**不要超过玩家的水平**）。
@@ -363,7 +382,11 @@ ${genre.castHint}
 /** 世界书词条：只写客观事实 */
 /*
  * ⚠️ 下面是**模板字符串**：正文里要写反引号必须转义成 \`（否则 TS1005），
- * 而且注释写进去会变成给模型看的正文 —— 要注释就写在这儿。我刚踩了这两个坑各一次。
+ * 而且注释写进去会变成给模型看的正文 —— 要注释就写在这儿。
+ *
+ * 🔴 我已经在这上面栽了**三次**（H18 的星号不算，这里专指反引号）：
+ * 每次都是"顺手给 JSON 字段名加个代码样式"。写提示词时**不要敲反引号**，
+ * 要写就写 \` —— 或者干脆像下面那样用中文描述字段。
  */
 export function worldbookSystemPrompt(genre: Genre): string {
   return `你是 TRPG 世界设定助手。当前题材：**${genre.name}**。
@@ -501,7 +524,7 @@ ${SCALE_GUIDE[scale]}
 根据描述创作一个${scale === 'long' ? '长篇' : scale === 'medium' ? '中篇' : '短篇'}模组。**只输出 JSON，不要任何解释文字。**
 
 格式：
-{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明"}
+{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明","start_clock":{"day":1,"minute":540},"deadline_in":0}
 
 要求：
 - 全部中文，严格贴合上面题材的世界观、时代与风格。
@@ -529,7 +552,14 @@ ${SCALE_GUIDE[scale]}
   长篇 200-350 字，**分章写**，每章给阶段目标与分支，并说明章与章之间世界会怎么变。
 - endings 60-120 字：成功 / 失败 / 灰色结局各一条。
 - notes 40-100 字：基调，以及反复出现的意象。
-- source_note：一句话诚实说明这张卡的**来源与忠实度**，例如"已按原版《××》生成"、"未找到原版，按标题风格自创"、"原创模组"。不要夸大对原版的把握。`;
+- source_note：一句话诚实说明这张卡的**来源与忠实度**，例如"已按原版《××》生成"、"未找到原版，按标题风格自创"、"原创模组"。不要夸大对原版的把握。
+- **start_clock（故事开场的时刻，必须填）**：day = 第几天（从 1 起），minute = 当天第几分钟（0-1439）。
+  按**你自己写的标题与开场白**来定：标题带"今夜/深夜"就是晚上（minute 约 1200-1400），
+  "清晨"是早上（约 360-540），"黄昏"约 1020-1140。
+  ⚠️ 别一律填上午九点（day 1 / minute 540）—— 那会让"今夜"的模组在上午开场，第一幕立刻穿帮。
+  真的看不出来才回退到上午九点。
+- **deadline_in（期限还剩多少分钟，可选）**：只有这张卡给了**明确期限**（"雨季还有二十三天结束"）才填，
+  换算成分钟（23 天 = 33120）。没有明确期限就填 0 —— **不许凭空造一个期限**。`;
 }
 
 /**
@@ -593,7 +623,7 @@ export function importSystemPrompt(genre: Genre): string {
 你的任务是：**读懂它，把它整理成一张模组卡**。**只输出 JSON，不要任何解释文字。**
 
 格式：
-{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明"}
+{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明","start_clock":{"day":1,"minute":540},"deadline_in":0}
 
 要求：
 - **忠实于原文**。原文写过的人名、地名、真相、线索链，照搬，不要自创替换。
@@ -658,7 +688,7 @@ export function presetSystemPrompt(rs: Ruleset): string {
     "imageStyle":"生图画风描述（30-60 字，中文）",
     "castHint":"这个世界里通常有哪些人（40-80 字）"
   },
-  "module":{"title":"","premise":"","opening":"","start_location":"","goal":"","stakes":"","urgency":"","truth":"","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"","map_nodes":[{"name":"","links":[],"note":""}],"clueChain":"","acts":"","endings":"","notes":"","source_note":""},
+  "module":{"title":"","premise":"","opening":"","start_location":"","goal":"","stakes":"","urgency":"","truth":"","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"","map_nodes":[{"name":"","links":[],"note":""}],"clueChain":"","acts":"","endings":"","notes":"","source_note":"","start_clock":{"day":1,"minute":540},"deadline_in":0},
   "worldbook":[{"keys":["关键词"],"content":"设定正文","priority":50}],
   "companions":[{"name":"","role":"","bond":"","personality":"","secret":"","agenda":"","initiative":"reactive","skills":{"技能":数值},"vitals":{${rs.vitalDefs
     .map((v) => `"${v.key}":${v.default}`)
@@ -686,31 +716,85 @@ export function presetSystemPrompt(rs: Ruleset): string {
  * 四、生图提示词 —— 画风由题材决定
  * ============================================================ */
 
-/** 默认画风（题材没给时兜底）：二次元动漫插画，强调必须有完整背景 */
+/**
+ * 默认画风（题材没给时兜底）。
+ *
+ * 🔴 为什么是「中文题材 + 英文硬约束」两段式（2026-09-26 实测定版，勿改回纯中文）：
+ * 原先这段是纯中文（"精细的赛璐璐上色，色彩层次丰富…"），用 WorkBuddy 平台生图与
+ * 硅基流动 Qwen/Qwen-Image 各跑了一轮，**中文软形容词压不住画风** —— 模型会自动往
+ * "写实厚涂 / 概念设定图"跑，出图偏油画质感，不是动画片。
+ * 换成下面这串英文硬约束后，赛璐璐质感稳定复现。原因：这些是绘图模型训练时
+ * 见惯的技法词（cel shading / flat color / line art），指向唯一且强。
+ *
+ * 主人 2026-09-26 看过对比图后拍板用 B 版（本串），原话：「就用B」。
+ */
 export const IMAGE_STYLE =
-  '二次元动漫插画风格（anime style），精细的赛璐璐上色，色彩层次丰富，画面有完整而细腻的环境背景，室内或户外的场景细节充实（建筑、家具、窗光、地面、装饰），电影感构图，画面干净清晰';
+  '赛璐璐动画插画，干净的平涂色块，明朗的硬边阴影，清晰的黑色描边线稿，' +
+  '无厚涂笔触，无油画质感，无写实渲染；' +
+  'anime key visual style, cel shading, clean flat color blocks, ' +
+  'crisp hard-edged shadows, distinct black outline line art, ' +
+  'no painterly texture, no photorealistic rendering';
 
-/** 取画风：题材优先，其次默认 */
+/**
+ * 背景充实约束（中文）—— 独立于画风，所有品类共用。
+ *
+ * 单拎出来是因为它跟"怎么画"无关，是"画什么"：模型偷懒时会交一张纯色背景，
+ * 立绘尤其常见。放在画风后面会跟英文硬约束混成一句，模型容易只顾质感忘了背景。
+ */
+export const IMAGE_BACKGROUND_RULE =
+  '画面必须有完整而细腻的环境背景（建筑、家具、窗光、地面、装饰），电影感构图，画面干净清晰';
+
+/** 取画风：题材优先，其次默认；两者都拼上背景充实约束 */
 function styleOf(genre?: Genre): string {
   const s = genre?.imageStyle?.trim();
-  return s ? `${s}，${IMAGE_STYLE}` : IMAGE_STYLE;
+  return s ? `${s}，${IMAGE_STYLE}，${IMAGE_BACKGROUND_RULE}` : `${IMAGE_STYLE}，${IMAGE_BACKGROUND_RULE}`;
 }
 
-/** 角色立绘提示词：第三视角半身/全身，带上性别外貌与服装，并给出具体环境 */
+/**
+ * 立绘构图约束（中文 + 英文）。
+ *
+ * ## 🔴 为什么必须显式说"别裁头"（2026-09-26 的 bug）
+ * 立绘是 3:4 竖版，模型很容易把人物放到"顶满画幅"——
+ * 出图后头顶已经贴着上边缘，稍一裁切就**少一截**。
+ * 光说"半身像"不够（模型对"半身"的默认取景比我们要的更满），
+ * 得把"**头部完整 + 上方留白 + 不要特写**"明说出来。
+ *
+ * 英文那串是实测更管用的（与 `IMAGE_STYLE` 同理：技法词指向唯一）。
+ * ⚠️ 这是**第二道防线** —— 第一道是 UI 容器比例必须与生成尺寸一致
+ * （`ui/ImageField.tsx` 走 `aspectRatioOf`），那道错了，这句写得再好也白搭。
+ */
+export const PORTRAIT_FRAMING_RULE =
+  '半身构图，人物位于画面中间，头顶上方留出空间，头部完整不被裁切，不要特写；' +
+  'medium shot, full head visible, comfortable headroom above the head, ' +
+  'not cropped at the top, head and shoulders well inside the frame, not a close-up';
+
+/**
+ * 角色立绘提示词：第三视角半身/全身，带上性别外貌与服装，并给出具体环境
+ *
+ * ## 🔴 "画谁"只认一处：外貌锚点（`core/appearance.ts` 的 `appearanceOf`）
+ * 以前这里接的是 `c.description`（主角是"外貌+来历"混写的一大段，队友连这段都没有）——
+ * 队友只能凭"铁路工 / 话少"让模型自己脑补长相，**每次重生成都是一张陌生的脸**。
+ *
+ * 现在优先吃 `appearance`（AI 生成角色时一并产出、玩家可在准备页改）；
+ * **没有时才退回 `description`** —— 老存档、手写卡的提示词一个字都不变。
+ */
 export function characterImagePrompt(
   c: {
     name: string;
     gender?: string;
     description?: string;
+    /** 外貌锚点（新增，生图专用；没有就退回 description） */
+    appearance?: string;
   },
   genre?: Genre
 ): string {
   const parts = [
-    '二次元动漫角色立绘，第三视角半身像',
-    c.description?.trim() || '一名角色',
+    '动漫角色立绘，第三视角半身像',
+    appearanceOf(c) || '一名角色',
     c.gender ? `性别为${c.gender}` : '',
     genre ? `题材：${genre.name}` : '',
     '身后是有细节的具体环境（室内或街道等），人物与背景都清晰',
+    PORTRAIT_FRAMING_RULE,
     styleOf(genre),
   ];
   return parts.filter(Boolean).join('，');
@@ -729,7 +813,7 @@ export function sceneImagePrompt(
       }）全身或半身入镜，采用第三视角的广角全景，视角拉远，展示整个空间`
     : '采用第三视角广角全景，视角拉远，展示整个空间';
   const parts = [
-    '二次元动漫场景插画，广角全景（establishing shot），镜头拉远',
+    '动漫场景插画，广角全景（establishing shot），镜头拉远',
     location?.trim() ? `地点：${location.trim()}` : '一个场景',
     genre ? `题材：${genre.name}` : '',
     premise?.trim() ? `背景设定：${premise.trim().slice(0, 120)}` : '',
@@ -748,7 +832,7 @@ export function mapImagePrompt(
   genre?: Genre
 ): string {
   const parts = [
-    '二次元动漫风格的手绘区域地图（羊皮纸 / 地图质感）',
+    '手绘区域地图（羊皮纸 / 地图质感）',
     title?.trim() ? `地图主题：${title.trim()}` : '',
     genre ? `题材：${genre.name}` : '',
     locations.length
@@ -774,7 +858,7 @@ export function actionImagePrompt(
       }）入镜，第三视角`
     : '';
   const parts = [
-    '二次元动漫场景插画，第三视角中景',
+    '动漫场景插画，第三视角中景',
     `场景内容：${content.trim().slice(0, 120) || '一个场景'}`,
     genre ? `题材：${genre.name}` : '',
     playerText,

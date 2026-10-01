@@ -15,6 +15,7 @@ import {
   nextQueued,
   pruneJobs,
   reviveJobs,
+  stalledJobs,
   statusText,
   type ImageJob,
 } from '../src/ui/imageJobs.js';
@@ -119,12 +120,34 @@ describe('状态流转', () => {
   it('begin → 在跑；fail → 带上人话；drop → 出队', () => {
     const started = beginJob([job()], 'j1');
     expect(started[0]!.status).toBe('running');
-
     const failed = failJob(started, 'j1', '生图失败 500');
     expect(failed[0]!.status).toBe('failed');
     expect(failed[0]!.error).toBe('生图失败 500');
 
     expect(dropJob(failed, 'j1')).toEqual([]);
+  });
+
+  /* ------------------------------------------------------------
+   * 🔴 主人 2026-09-27 真机：一条图"一直不成功也不失败"，还把后面的堵死。
+   * 根因是请求没人计时 —— `running` 一旦挂住，并发槽就再也不让出来。
+   * 两条防线：① 每条任务自带硬超时；② `stalledJobs` 兜底那条落在缝里的任务。
+   * ------------------------------------------------------------ */
+  it('🔴 begin 要记下"几点开的工"（超时回收靠它算飞了多久）', () => {
+    const started = beginJob([job()], 'j1', 1_000);
+    expect(started[0]!.startedAt).toBe(1_000);
+    // 排队的那条不该有这个字段 —— 排队等待的时间不算请求耗时
+    expect(beginJob([job()], 'nope')[0]!.startedAt).toBeUndefined();
+  });
+
+  it('🔴 飞太久的 running 会被点出来；没到点 / 没记时刻的都不动', () => {
+    const old = { ...job({ status: 'running' as const }), startedAt: 0 };
+    const fresh = { ...job({ id: 'j2' }), status: 'running' as const, startedAt: 1_000 };
+    const noStamp = { ...job({ id: 'j3' }), status: 'running' as const };
+    expect(stalledJobs([old, fresh, noStamp], 1_500, 1_000).map((j) => j.id)).toEqual(['j1']);
+    // 还没到点 → 一条都不回收（不能把正在跑的好请求误杀）
+    expect(stalledJobs([fresh], 1_500, 1_000)).toEqual([]);
+    // 没记时刻 → 不知道飞了多久，宁可不判也不误杀
+    expect(stalledJobs([noStamp], 999_999, 1_000)).toEqual([]);
   });
 
   it('读盘回来：running 一律降级成"中断"（进程都没了，不可能还在飞）', () => {

@@ -6,13 +6,16 @@
   "description": "跑团模拟器：上下文编排器 + 规则引擎 + 状态机",
   "scripts": {
     "dev": "node scripts/use-dev-entry.mjs && vite",
-    "build": "node scripts/use-dev-entry.mjs && vite build && node scripts/publish-root.mjs && node scripts/check-dist.mjs",
+    "build": "node scripts/use-dev-entry.mjs && vite build && node scripts/publish-root.mjs && node scripts/check-dist.mjs && node scripts/check-contract.mjs && node scripts/check-boundaries.mjs && node scripts/memory-lint.mjs",
     "preview": "vite preview --host",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "demo": "tsx src/demo.ts",
-    "lint:memory": "node scripts/memory-lint.mjs"
+    "lint:memory": "node scripts/memory-lint.mjs",
+    "lint:contract": "node scripts/check-contract.mjs",
+    "lint:contract:baseline": "node scripts/check-contract.mjs --update-baseline",
+    "lint:boundaries": "node scripts/check-boundaries.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

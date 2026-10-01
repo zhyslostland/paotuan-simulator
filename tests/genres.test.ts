@@ -6,6 +6,9 @@ import {
   characterImagePrompt,
   characterSystemPrompt,
   companionSystemPrompt,
+  sceneImagePrompt,
+  mapImagePrompt,
+  actionImagePrompt,
   moduleSystemPrompt,
   moduleUserPrompt,
 } from '../src/orchestrator/generate.js';
@@ -14,13 +17,18 @@ describe('题材预设（Genre）', () => {
   it('内置题材都有必填字段，且 id 唯一', () => {
     const ids = new Set<string>();
     for (const g of BUILTIN_GENRES) {
-      expect(g.id).toBeTruthy();
-      expect(g.name).toBeTruthy();
-      expect(g.blurb).toBeTruthy();
-      expect(g.setting).toBeTruthy();
-      expect(g.tone).toBeTruthy();
-      expect(g.imageStyle).toBeTruthy();
-      expect(g.castHint).toBeTruthy();
+      /*
+       * 🔴 真判据（不再只是"有值"）：
+       *   - `id` 必须是不带空格的 ASCII slug（它要进 localStorage 的键与提示词）
+       *   - 其余六项都是**给人看的中文**，空了或退化成英文 key 立刻红
+       */
+      expect(g.id, `${g.name} 的 id 不是 slug`).toMatch(/^[a-z0-9_-]+$/);
+      expect(g.name, `${g.id} 没有中文名`).toMatch(/[\u4e00-\u9fa5]/);
+      expect(g.blurb, `${g.id} 没有中文简介`).toMatch(/[\u4e00-\u9fa5]/);
+      expect(g.setting, `${g.id} 没有世界设定`).toMatch(/[\u4e00-\u9fa5]/);
+      expect(g.tone, `${g.id} 没有基调`).toMatch(/[\u4e00-\u9fa5]/);
+      expect(g.imageStyle, `${g.id} 没有画风`).toMatch(/[\u4e00-\u9fa5]/);
+      expect(g.castHint, `${g.id} 没有角色倾向`).toMatch(/[\u4e00-\u9fa5]/);
       ids.add(g.id);
     }
     expect(ids.size).toBe(BUILTIN_GENRES.length);
@@ -179,8 +187,55 @@ describe('生图画风跟着题材走', () => {
     expect(p).toContain('柔和通透');
   });
 
-  it('没给题材时退回默认二次元画风', () => {
+  it('没给题材时退回默认赛璐璐画风', () => {
     const p = characterImagePrompt({ name: '某人', description: '一个人' });
-    expect(p).toContain('anime style');
+    expect(p).toContain('anime key visual style');
+    expect(p).toContain('cel shading');
+  });
+});
+
+/*
+ * 定版画风守门（2026-09-26）。
+ *
+ * 背景：纯中文画风描述（"精细的赛璐璐上色，色彩层次丰富…"）实测**压不住**，
+ * 模型会往写实厚涂跑。换成英文技法词硬约束后才稳定出赛璐璐。
+ * 主人 2026-09-26 看过对比图拍板用这套。
+ *
+ * 这组断言的意义是：以后谁再把英文硬约束"顺手精简"掉，门禁立刻红 ——
+ * 而不是等到出图变成油画才发现。
+ */
+describe('H20：定版赛璐璐画风硬约束不许被摘掉', () => {
+  const HARD = [
+    'cel shading',
+    'clean flat color blocks',
+    'crisp hard-edged shadows',
+    'distinct black outline line art',
+    'no painterly texture',
+    'no photorealistic rendering',
+    'anime key visual style',
+  ] as const;
+
+  /** 四个品类都要带上全套硬约束（用真实调用，不是只看常量） */
+  const cases: Array<[string, string]> = [
+    ['立绘', characterImagePrompt({ name: '阿岚', gender: '女', description: '短发少女' }, getGenre('coc'))],
+    ['场景', sceneImagePrompt('废弃医院走廊', '雨夜', { name: '阿岚', description: '一名角色' }, getGenre('coc'))],
+    ['地图', mapImagePrompt('雾港镇', ['码头', '教堂', '市政厅'], '1920 年代', getGenre('coc'))],
+    ['动作', actionImagePrompt('她推开吱呀作响的木门', { description: '一名角色' }, getGenre('coc'))],
+  ];
+
+  it.each(cases)('%s 提示词带齐 7 条英文硬约束', (_name, prompt) => {
+    for (const k of HARD) expect(prompt).toContain(k);
+  });
+
+  it('背景充实约束独立存在，且四类都拼上', () => {
+    for (const [, prompt] of cases) {
+      expect(prompt).toContain('画面必须有完整而细腻的环境背景');
+    }
+  });
+
+  it('题材画风不会被英文硬约束挤掉（题材与画风是并列的）', () => {
+    const p = characterImagePrompt({ name: '阿岚', description: '少女' }, getGenre('fantasy'));
+    expect(p).toContain('史诗奇幻动漫插画'); // 题材自己的画风
+    expect(p).toContain('cel shading'); // 定版硬约束
   });
 });

@@ -16,30 +16,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-class MemStorage {
-  private m = new Map<string, string>();
-  getItem(k: string) {
-    return this.m.has(k) ? this.m.get(k)! : null;
-  }
-  setItem(k: string, v: string) {
-    this.m.set(k, String(v));
-  }
-  removeItem(k: string) {
-    this.m.delete(k);
-  }
-  clear() {
-    this.m.clear();
-  }
-  get length() {
-    return this.m.size;
-  }
-  key(i: number) {
-    return [...this.m.keys()][i] ?? null;
-  }
-}
 
-vi.stubGlobal('localStorage', new MemStorage());
-vi.stubGlobal('indexedDB', undefined);
 vi.mock('virtual:pwa-register', () => ({ registerSW: () => () => {} }));
 
 const { createElement } = await import('react');
@@ -59,13 +36,18 @@ describe('主要界面能被画出来（冒烟）', () => {
     useStore.setState({ messages: [], streaming: false });
   });
 
-  it('角色卡能画出来（含属性 / 技能 / 背包三个页签的默认态）', () => {
+  it('角色卡能画出来（概况 / 技能 / 背包 三块一次全展开）', () => {
     const html = renderToString(
       createElement(CharacterSheet, { onRequestCheck: noop, onPromptUse: noop })
     );
     expect(html.length).toBeGreaterThan(800);
-    // 三个页签的入口必须在（换了页面结构这条会红，是提醒不是噪音）
-    expect(html).toContain('概况');
+    /*
+     * 2026-09-26 主人拍板**去掉三页签、全部展开** —— 所以现在三块是**同时**渲染的。
+     * 这条按"三块的内容都在"来断言（换了结构会红，是提醒不是噪音）。
+     * ⚠️ 「概况」不再是按钮文案，改成断言技能/背包两个**区块标题**。
+     */
+    expect(html).toContain('技能');
+    expect(html).toContain('背包');
   });
 
   const chatProps = {

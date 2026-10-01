@@ -12,6 +12,8 @@ import { registerCustomRuleset, type CustomRulesetConfig } from '../core/ruleset
 import type { Genre } from '../core/genres.js';
 import type { ModuleNpc, WorldbookEntry } from './store.js';
 import type { Companion } from '../core/state/gameState.js';
+import { normalizeDeadlineIn, normalizeStartClock } from '../core/clock.js';
+import { readLocal, writeLocal } from './state/storage.js';
 
 export type GenPresetModule = {
   title?: string;
@@ -30,6 +32,10 @@ export type GenPresetModule = {
   endings?: string;
   notes?: string;
   source_note?: string;
+  /** 开局时刻（P2-10）：模型按标题/开场白申报，不合法就退回默认 */
+  start_clock?: { day?: number; minute?: number };
+  /** 期限还剩多少分钟（H22）；0 / 没给 = 没有期限 */
+  deadline_in?: number;
 };
 
 export type GenPreset = {
@@ -111,7 +117,7 @@ function parseSkills(text: string): { name: string; base: number }[] {
 
 export function readPresets(): StoredPreset[] {
   try {
-    const list = JSON.parse(localStorage.getItem(PRESET_KEY) || '[]') as StoredPreset[];
+    const list = JSON.parse(readLocal(PRESET_KEY) || '[]') as StoredPreset[];
     return Array.isArray(list) ? list.filter((p) => p?.id && p?.data) : [];
   } catch {
     return [];
@@ -120,7 +126,7 @@ export function readPresets(): StoredPreset[] {
 
 export function writePresets(list: StoredPreset[]): void {
   try {
-    localStorage.setItem(PRESET_KEY, JSON.stringify(list));
+    writeLocal(PRESET_KEY, JSON.stringify(list));
   } catch {
     /* 本地存储满了：不致命，本次仍可用 */
   }
@@ -168,8 +174,8 @@ export function applyPreset(data: GenPreset): void {
     if (cfg.characteristics.length > 0) {
       registerCustomRuleset(cfg);
       try {
-        const list = JSON.parse(localStorage.getItem(CUSTOM_KEY) || '[]') as CustomRulesetConfig[];
-        localStorage.setItem(CUSTOM_KEY, JSON.stringify([...list, cfg]));
+        const list = JSON.parse(readLocal(CUSTOM_KEY) || '[]') as CustomRulesetConfig[];
+        writeLocal(CUSTOM_KEY, JSON.stringify([...list, cfg]));
       } catch {
         /* 存不下就算了，本次仍可用 */
       }
@@ -235,6 +241,8 @@ export function applyPreset(data: GenPreset): void {
       stakes: m.stakes,
       urgency: m.urgency,
       truth: m.truth ?? '',
+      startClock: normalizeStartClock(m.start_clock),
+      deadlineIn: normalizeDeadlineIn(m.deadline_in),
       npcs,
       locations: m.locations ?? '',
       mapNodes: (m.map_nodes ?? [])

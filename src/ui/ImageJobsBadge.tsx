@@ -26,6 +26,7 @@ export function ImageJobsBadge() {
   const jobs = useStore((s) => s.imageJobs);
   const retry = useStore((s) => s.retryImageJob);
   const dismiss = useStore((s) => s.dismissImageJob);
+  const cancel = useStore((s) => s.cancelImageJob);
   const [open, setOpen] = useState(false);
 
   // 空队列什么都不显示：平时不该占着屏幕一角
@@ -92,10 +93,23 @@ export function ImageJobsBadge() {
                       不画了
                     </button>
                   </div>
+                ) : j.status === 'running' ? (
+                  /*
+                   * `H26`：正在画的那条**也要有出口**。
+                   * 以前这里只有一句「画着…」—— 玩家改主意时只能干等（或等 3 分钟硬闸）。
+                   * 点它就是 `abort()` + 出队，后面排着的那张当场开工。
+                   */
+                  <div className="flex shrink-0 items-center gap-1">
+                    <span className="pt-0.5 text-[10px] text-mist-500">画着…</span>
+                    <button
+                      onClick={() => cancel(j.id)}
+                      className="rounded-md border border-ink-600 px-1.5 py-0.5 text-[10px] text-mist-500 transition hover:border-blood-400/60 hover:text-blood-400"
+                    >
+                      不画了
+                    </button>
+                  </div>
                 ) : (
-                  <span className="shrink-0 pt-0.5 text-[10px] text-mist-500">
-                    {j.status === 'running' ? '画着…' : '等着'}
-                  </span>
+                  <span className="shrink-0 pt-0.5 text-[10px] text-mist-500">等着</span>
                 )}
               </li>
             ))}

@@ -29,6 +29,14 @@ export interface ActItem {
   title: string;
   /** 这一幕要发生什么（原文里冒号后面那段） */
   summary: string;
+  /**
+   * 有**独立幕名**吗（`第一幕 · 接案与试探：…` 这种写法）。
+   *
+   * `G5`：没有独立幕名时 `title` 只是摘要的前 10 个字（兜底）——
+   * 界面要是标题、摘要**都**渲染，同一句话就印两遍。`false` 时只渲染一行。
+   * 可选：老调用方（测试里手写的 ActItem）不传时按"有幕名"处理。
+   */
+  titled?: boolean;
 }
 
 /** 中文数字 → 阿拉伯数字（只处理幕序号会用到的一到二十） */
@@ -60,25 +68,30 @@ export function parseActs(text: string | undefined | null): ActItem[] {
   const t = String(text ?? '').trim();
   if (!t) return [];
 
-  // 先按行切；只有一行时再按"分号 / 幕标记"切
-  let chunks: string[] = t
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
+  /*
+   * 🔴 `G18`：切分顺序是**幕标记 > 换行 > 分号**。
+   *
+   * 老顺序反了：先按 `；;` 切、切不开才按幕标记 —— 而**分号在幕内部也会出现**
+   * （真机那条 AI 三幕模组，第二幕里就有一个分号）。先按分号切出 2 块，
+   * 第 1 块把"第二幕"整段吞掉；块内又只认第一个幕标记 → 最终 `[第1幕, 第3幕]`，
+   * **第 2 幕凭空消失**（界面写「第 1 / 2 幕」，R14 按幕展开也跟着带错）。
+   * 触发条件很常见：**一行 + 幕内部有分号**，模型很爱这么写。
+   */
+  const marks = (t.match(ACT_MARK) ?? []).length;
+  let chunks: string[] =
+    marks > 1
+      ? t.split(/(?=第\s*[一二三四五六七八九十\d]{1,3}\s*[幕章])/)
+      : t.split(/\r?\n/);
+  chunks = chunks.map((l) => l.trim()).filter(Boolean);
 
-  if (chunks.length <= 1) {
-    chunks = t
-      .split(/[；;]/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-  }
-  // 还是切不开 → 直接在幕标记前面断开
-  if (chunks.length <= 1 && (t.match(ACT_MARK) ?? []).length > 1) {
-    chunks = t
-      .split(/(?=第\s*[一二三四五六七八九十\d]{1,3}\s*[幕章])/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-  }
+  /*
+   * ⚠️ 这里原本还有一条"再按 `；;` 切"的兜底 —— **2026-09-29 删掉**（`G18` 同一刀）。
+   *
+   * 它看着像在帮忙，其实只在**害**：`第一幕：走访码头；问了老板娘几句` 这种"一幕 + 摘要里带分号"
+   * 会被切成两块，第二块没有幕标记 → **摘要的后半截被丢掉**。
+   * 而它本来想救的"一行挤三幕"那种写法，上面的幕标记切分已经先一步处理了。
+   * 所以：**只在切不出幕时才用它** = 永远轮不到它，那就别留。
+   */
 
   const out: ActItem[] = [];
   for (const raw of chunks) {
@@ -92,12 +105,15 @@ export function parseActs(text: string | undefined | null): ActItem[] {
     const colon = rest.search(/[:：]/);
     let title = '';
     let summary = rest;
+    let titled = false;
     if (colon > 0) {
       title = rest.slice(0, colon).trim();
       summary = rest.slice(colon + 1).trim();
+      titled = title.length > 0;
     }
-    if (!title) title = summary.slice(0, 10);
-    out.push({ index: n - 1, title: title || `第 ${n} 幕`, summary });
+    // 没有独立幕名时拿摘要前 10 字兜底（`titled:false` 让界面知道"别印两遍"，见 `G5`）
+    if (!titled) title = summary.slice(0, 10);
+    out.push({ index: n - 1, title: title || `第 ${n} 幕`, summary, titled });
   }
 
   // 按幕号排好、去重（同一幕写了两遍时保留信息更多的那条）

@@ -8,7 +8,8 @@
  * 真实网络当然要挡掉：把 `generateImage` 换成 mock（它本来就只是个 fetch）。
  * 单独一个文件是因为要 `vi.mock` 掉 provider —— 混进 `store.test.ts` 会污染别处。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ImageJob } from '../src/ui/imageJobs.js';
 
 vi.mock('../src/providers/model.js', () => {
   class ModelError extends Error {
@@ -28,30 +29,7 @@ vi.mock('../src/providers/model.js', () => {
   };
 });
 
-class MemStorage {
-  private m = new Map<string, string>();
-  getItem(k: string) {
-    return this.m.has(k) ? this.m.get(k)! : null;
-  }
-  setItem(k: string, v: string) {
-    this.m.set(k, String(v));
-  }
-  removeItem(k: string) {
-    this.m.delete(k);
-  }
-  clear() {
-    this.m.clear();
-  }
-  get length() {
-    return this.m.size;
-  }
-  key(i: number) {
-    return [...this.m.keys()][i] ?? null;
-  }
-}
 
-vi.stubGlobal('localStorage', new MemStorage());
-vi.stubGlobal('indexedDB', undefined);
 
 type StoreMod = typeof import('../src/ui/store.js');
 let mod: StoreMod;
@@ -59,6 +37,7 @@ let store: StoreMod['useStore'];
 let createInitialState: typeof import('../src/core/state/gameState.js').createInitialState;
 let gen: ReturnType<typeof vi.fn>;
 let grab: ReturnType<typeof vi.fn>;
+let IMAGE_TIMEOUT_MS: typeof import('../src/ui/store.js').IMAGE_TIMEOUT_MS;
 
 /* 一份**真正的**图数据。以前这里用 'IMG' 这种占位串 —— 新的自包含闸门会把它拒掉，
  * 那是对的：假数据不该混进落盘通道。*/
@@ -77,6 +56,7 @@ beforeEach(async () => {
     const model = await import('../src/providers/model.js');
     gen = model.generateImage as unknown as ReturnType<typeof vi.fn>;
     grab = model.fetchImageAsLocal as unknown as ReturnType<typeof vi.fn>;
+    IMAGE_TIMEOUT_MS = mod.IMAGE_TIMEOUT_MS;
   }
   gen.mockReset();
   grab.mockReset();
@@ -325,8 +305,8 @@ describe('P1-2：闸门拒落 = 失败，必须留队并说人话（不能静默
     // 关键：**没有**出队 —— 以前这里 imageJobs 会是 []
     expect(store.getState().imageJobs).toHaveLength(1);
     const job = store.getState().imageJobs[0]!;
-    expect(job.error).toBeTruthy();
-    expect(job.error).toContain('不是图片数据');
+    // 🔴 真判据：留队原因要**说中这件事**（不是"有个 error 字段"就算数）
+    expect(job.error ?? '').toContain('不是图片数据');
     // 图当然也没落上去
     expect(store.getState().messageImages['m1']).toBeUndefined();
   });
@@ -381,5 +361,186 @@ describe('消息已经不在的任务：悄悄出队，不浪费一次调用', (
     });
     expect(gen).toHaveBeenCalledTimes(1);
     expect(store.getState().messageImages['m1']).toBe(IMG);
+  });
+});
+
+/* ============================================================
+ * 🔴 主人 2026-09-27 真机：一生图就卡死。
+ *
+ * 现象三条，其实是同一个病：
+ *   ① 一张图"一直不成功也不失败"，隔夜才冒出一句失败；
+ *   ② 第二张画出来了，队列却不散，角标说"正在画 2 张"；
+ *   ③ 第三张永远"排队中"，再也没开工。
+ * 根因：请求发出去之后**没有人给它计时** —— `running` 一旦挂住，
+ * 那两个并发槽就再也不让出来，排在后面的图全饿死。
+ *
+ * 这里用**永不 settle 的 mock** 复现"服务端连上了但不回话"，
+ * 断的是：到点自己变失败（看得见、能重试）+ 后面的图立刻接班。
+ * ============================================================ */
+describe('挂住的请求不许占着槽位（主人 2026-09-27 真机）', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('🔴 超过 3 分钟 → 当失败处理，留给玩家一句话 + 能重试', async () => {
+    vi.useFakeTimers();
+    withKey();
+    // 永不 settle：模拟"连上了、服务器却不回话"
+    gen.mockReturnValue(new Promise(() => {}));
+    store.getState().queueImage({ kind: 'action', target: 'm1', prompt: 'p', label: '插画' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.getState().imageJobs[0]!.status).toBe('running');
+
+    await vi.advanceTimersByTimeAsync(IMAGE_TIMEOUT_MS + 10);
+    const jobs = store.getState().imageJobs;
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.status).toBe('failed');
+    // 人话 + 下一步能照着做（不是一句干巴巴的"失败"）
+    expect(jobs[0]!.error).toContain('3 分钟');
+    expect(jobs[0]!.error).toContain('重试');
+  });
+
+  it('🔴 超时时那个请求真的被掐掉了（不是放着不管）', async () => {
+    vi.useFakeTimers();
+    withKey();
+    let seen: { signal?: AbortSignal } | undefined;
+    gen.mockImplementation((_prompt: string, cfg: { signal?: AbortSignal }) => {
+      seen = cfg;
+      return new Promise(() => {});
+    });
+    store.getState().queueImage({ kind: 'action', target: 'm1', prompt: 'p', label: '插画' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen?.signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(IMAGE_TIMEOUT_MS + 10);
+    expect(seen?.signal?.aborted).toBe(true);
+  });
+
+  it('🔴 卡住的那条被收走之后，排在后面的图立刻开工（不再原地等到第二天）', async () => {
+    withKey();
+    store.setState({
+      messages: [
+        { id: 'm1', role: 'gm', content: '甲板上很冷。', ts: 1 },
+        { id: 'm2', role: 'gm', content: '雾里有个影子。', ts: 2 },
+      ],
+    });
+    /*
+     * 塞一条"已经飞了一小时"的 running —— 模拟定时器被浏览器节流之后
+     * 那条 promise 没能自己停下来的漏网情况（第二条防线）。
+     */
+    const stuck: ImageJob = {
+      id: 'stuck',
+      kind: 'action',
+      target: 'm1',
+      prompt: 'p1',
+      label: '插画',
+      status: 'running',
+      at: 0,
+      startedAt: Date.now() - IMAGE_TIMEOUT_MS - 60_000,
+    };
+    store.setState({ imageJobs: [stuck] });
+    // 第二条排队等着；它也挂着（只要证明它**开工了**，不是还堵在后面）
+    gen.mockReturnValue(new Promise(() => {}));
+    store.getState().queueImage({ kind: 'action', target: 'm2', prompt: 'p2', label: '插画' });
+
+    await flush();
+    // 卡住的那条 → 失败得看得见
+    const stuckNow = store.getState().imageJobs.find((j) => j.id === 'stuck');
+    expect(stuckNow?.status).toBe('failed');
+    // 后面那条拿了刚空出来的槽位，**真的开工了**（不再是永远的"排队中"）
+    expect(store.getState().imageJobs.find((j) => j.target === 'm2')?.status).toBe('running');
+    expect(gen).toHaveBeenCalledTimes(1);
+    expect(gen.mock.calls[0]![0]).toBe('p2');
+  });
+});
+
+/* ============================================================
+ * 🔴 `H26`（协28 §F① 第 20 条 · 协29 补裁）：**正在跑的那张也能当场停**。
+ *
+ * 排队中的 `dismissImageJob` 一直能用；`running` 那条以前只有角标上一句「画着…」，
+ * 玩家只能干等（或等 3 分钟硬闸）—— 自动配图连着画、他突然改主意时没有出口。
+ * 判据（协29 §3 H26）：点「不画了」→ 该条从 `running` 消失；后面排队的**立刻开工**。
+ * ============================================================ */
+describe('H26：正在跑的那张也能停', () => {
+  /** 三条待画：并发是 2，所以第三条一定排在后面等着 */
+  const seedThree = () => {
+    store.setState({
+      messages: [
+        { id: 'm1', role: 'gm', content: '甲板上很冷。', ts: 1 },
+        { id: 'm2', role: 'gm', content: '雾里有个影子。', ts: 2 },
+        { id: 'm3', role: 'gm', content: '缆绳在响。', ts: 3 },
+      ],
+    });
+    gen.mockReturnValue(new Promise(() => {})); // 永不 settle：模拟"一直在画"
+    for (const m of ['m1', 'm2', 'm3']) {
+      store.getState().queueImage({ kind: 'action', target: m, prompt: 'p', label: '插画' });
+    }
+  };
+  const at = (target: string) =>
+    store.getState().imageJobs.find((j) => j.target === target);
+
+  it('🔴 取消 → 那条出队，而且请求真的被掐掉（不是放着不管）', async () => {
+    withKey();
+    let seen: AbortSignal | undefined;
+    gen.mockImplementation((_p: string, cfg: { signal?: AbortSignal }) => {
+      seen = cfg.signal;
+      return new Promise(() => {});
+    });
+    store.getState().queueImage({ kind: 'action', target: 'm1', prompt: 'p', label: '插画' });
+    await flush();
+    const running = at('m1')!;
+    expect(running.status).toBe('running');
+    expect(seen?.aborted).toBe(false);
+
+    store.getState().cancelImageJob(running.id);
+
+    expect(seen?.aborted).toBe(true); // 连接不在后台白挂着
+    expect(at('m1')).toBeUndefined(); // 玩家说不要了就是不要了
+  });
+
+  it('🔴 停掉之后，排在后面的那张**立刻开工**（不用等到下一次交互）', async () => {
+    withKey();
+    seedThree();
+    await flush();
+    expect(at('m1')?.status).toBe('running');
+    expect(at('m2')?.status).toBe('running');
+    expect(at('m3')?.status).toBe('queued'); // 并发只有 2 个槽，它得等着
+
+    store.getState().cancelImageJob(at('m1')!.id);
+    await flush();
+
+    expect(at('m3')?.status).toBe('running'); // 槽位当场让出来
+    expect(gen).toHaveBeenCalledTimes(3);
+  });
+
+  it('取消之后那条不会被"标红复活"（catch 里 failJob 找不到它，就原样返回）', async () => {
+    withKey();
+    let rejectIt: ((e: unknown) => void) | undefined;
+    gen.mockImplementation((_p: string, cfg: { signal?: AbortSignal }) => {
+      // 真的像 fetch 一样：abort 时把自己的 promise 拒掉
+      return new Promise((_res, rej) => {
+        rejectIt = rej;
+        cfg.signal?.addEventListener('abort', () => rej(new Error('aborted')));
+      });
+    });
+    store.getState().queueImage({ kind: 'action', target: 'm1', prompt: 'p', label: '插画' });
+    await flush();
+    const running = at('m1')!;
+    store.getState().cancelImageJob(running.id);
+    rejectIt?.(new Error('aborted')); // 请求那边也顺着把错误抛出来
+    await flush();
+
+    // 队列里干干净净：既没留一条红着的，也没多出一条
+    expect(store.getState().imageJobs).toHaveLength(0);
+  });
+
+  it('排队中的那条照旧走 dismiss（两条路各管各的，没打架）', async () => {
+    withKey();
+    seedThree();
+    await flush();
+    store.getState().dismissImageJob(at('m3')!.id);
+    await flush();
+    expect(at('m3')).toBeUndefined();
+    expect(gen).toHaveBeenCalledTimes(2); // 它压根没被发出去
   });
 });

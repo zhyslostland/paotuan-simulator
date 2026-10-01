@@ -339,7 +339,25 @@ export function deadlineLabel(d: Deadline | undefined | null): string {
 export function tickClock(
   clock: StoryClock,
   deadline: Deadline | null | undefined,
-  elapsedText: string | undefined | null
+  elapsedText: string | undefined | null,
+  opts?: {
+    /**
+     * **时钟下限**（绝对分钟，`G17`）：玩家说了「等到凌晨」「睡到天亮」时，
+     * 这一轮推完**至少**要到这个点。
+     */
+    floorMinutes?: number;
+    /**
+     * **时钟上限**（绝对分钟，`G17` · 协30 §2.4）：**同一个目标时刻**。
+     *
+     * 为什么"等到 X"既是下限也是上限：第 19 轮真机里玩家 15:00 说等到傍晚六点，
+     * 下限算对了（不许提前），但模型报的 `elapsed` 更久就照它的 —— 结果时钟一路走到
+     * **次日 14:30**（+23.5 小时），而叙事只过了 1～3 小时。冲过目标等于没做到：
+     * 玩家说"我等到六点"，他就该在六点。
+     *
+     * ⚠️ 只在**玩家这一句申报了目标时刻**时才传。没申报时维持"只抬不压"的老口径。
+     */
+    capMinutes?: number;
+  }
 ): {
   clock: StoryClock;
   deadline: Deadline | null;
@@ -349,7 +367,27 @@ export function tickClock(
   noteworthy: boolean;
 } {
   const before = normalizeClock(clock);
-  const elapsedMinutes = parseElapsed(elapsedText);
+  let elapsedMinutes = parseElapsed(elapsedText);
+  /*
+   * `G17`：把"等到 X"变成真正的推进量。以前这里毫无落点 —— 玩家写「我等到午夜」，
+   * 时钟走多少全看守密人填的 `elapsed`（他常只写"一会儿"），于是"等"这个动作
+   * 在引擎侧等于不存在，玩家等到天亮、界面还是同一个上午。
+   */
+  const floor = opts?.floorMinutes;
+  const start = absoluteMinutes(before);
+  if (floor !== undefined && Number.isFinite(floor)) {
+    const need = Math.round(floor) - start;
+    if (need > elapsedMinutes) elapsedMinutes = need;
+  }
+  /*
+   * `G17` 的**另一半**（协30 §2.4）：申报了目标时刻时，它同时也是上限。
+   * 模型报得过久 → 压到目标（玩家说等到六点，他就该在六点）。
+   */
+  const cap = opts?.capMinutes;
+  if (cap !== undefined && Number.isFinite(cap)) {
+    const room = Math.round(cap) - start;
+    if (room >= 0 && elapsedMinutes > room) elapsedMinutes = room;
+  }
   const after = advanceClock(before, elapsedMinutes);
   const nextDeadline: Deadline | null = deadline
     ? { ...deadline, remain: Math.max(0, deadline.remain - elapsedMinutes) }
@@ -373,3 +411,80 @@ export function phaseOf(c: StoryClock): string {
   const n = normalizeClock(c);
   return PHASES.find((p) => n.minute < p.until)?.label ?? '深夜';
 }
+
+/* ============================================================
+ * 模组申报的**开局时刻与期限** → 引擎能用的值（P2-10 / H22 的中段）
+ *
+ * 第 12 轮测出我漏了这一段：字段在 `types.ts` 加了、引擎也会读，
+ * 但**提示词没告诉模型**，于是永远 undefined，开团时刻恒为上午 9:00
+ * （"今夜"的模组在上午开场 —— 主人 2026-09-25 独立实测撞到）。
+ *
+ * 这两个函数是"模型写的东西 → 引擎能用的东西"那道闸：
+ * **校验要严**，不合法就当没给（退回默认），宁可用上午九点也不能让时钟乱掉。
+ * ============================================================ */
+
+/** `start_clock` → 开局时刻；不合法就 undefined（调用方退回 DEFAULT_CLOCK） */
+export function normalizeStartClock(
+  raw: { day?: number; minute?: number } | undefined | null
+): StoryClock | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const day = Number(raw.day);
+  const minute = Number(raw.minute);
+  if (!Number.isFinite(day) || day < 1) return undefined;
+  if (!Number.isFinite(minute) || minute < 0 || minute > 1439) return undefined;
+  return { day: Math.floor(day), minute: Math.floor(minute) };
+}
+
+/** `deadline_in`（分钟）→ 期限；0 / 负数 / 非数字都当"没给" */
+export function normalizeDeadlineIn(raw: number | undefined | null): number | undefined {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.round(n);
+}
+
+
+/**
+ * 🔴 `G17`：玩家这句里有没有「等到 / 直到 + 某个时刻」？有就给一个**绝对分钟**下限。
+ *
+ * 只认**时刻词**（天亮、正午、傍晚、午夜…），不猜日期 —— `clock.ts` 自己写着"猜日期必错"。
+ * 今天的这个点已经过去了就顺延到**明天**（"等到午夜"多半指今夜，同一逻辑）。
+ * 认不出来返回 `null`，调用方照旧全文交给模型（不拒绝，不报错）。
+ */
+export function waitTargetMinutes(
+  text: string | undefined | null,
+  clock: StoryClock
+): number | null {
+  const t = String(text ?? '');
+  if (!t) return null;
+  // 得有"等"的意思，否则"午夜"只是叙事里的一个词
+  if (!/(等到|等到了|一直等|等到时|睡到|待到|直到|熬到|蹲到|守到|挨到|等到天亮)/.test(t)) {
+    return null;
+  }
+  let minuteOfDay: number | null = null;
+  for (const [re, m] of WAIT_PHASES) {
+    if (re.test(t)) {
+      minuteOfDay = m;
+      break;
+    }
+  }
+  if (minuteOfDay === null) return null;
+  const cur = absoluteMinutes(normalizeClock(clock));
+  const day = Math.floor(cur / MINUTES_PER_DAY);
+  let target = day * MINUTES_PER_DAY + minuteOfDay;
+  if (target <= cur) target += MINUTES_PER_DAY;
+  return target;
+}
+
+/** 时刻词 → 当天的第几分钟（顺序敏感：先长后短，"凌晨"要在"晨"前面） */
+const WAIT_PHASES: [RegExp, number][] = [
+  [/午夜|子夜|零点|半夜十二/, 0],
+  [/后半夜|凌晨|深夜/, 2 * 60 + 30],
+  [/破晓|天明|天亮|日出|拂晓/, 5 * 60],
+  [/清晨|早晨|早上|一早/, 7 * 60],
+  [/上午|巳时/, 9 * 60 + 30],
+  [/正午|中午|晌午|日中/, 12 * 60],
+  [/下午|午后/, 14 * 60 + 30],
+  [/傍晚|黄昏|日落|天黑|入夜前/, 18 * 60],
+  [/晚上|入了夜|夜里|夜晚/, 20 * 60],
+  [/半夜|夜深/, 23 * 60],
+];

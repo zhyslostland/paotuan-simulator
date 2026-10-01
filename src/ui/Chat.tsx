@@ -10,6 +10,26 @@ import {
   type Typography,
 } from './store';
 import { jobAt } from './imageJobs';
+import { draftBlockReason } from './chatInput.js';
+
+/**
+ * 🔴 `G20`（协28 §F① 第 14 条）：390×844 下，输入框那句长提示会折两行、**第二行被底部导航切掉**
+ * （屏上只剩半行残字）。窄屏就换短句，桌面端放得下、保留完整说明。
+ */
+function useNarrow(px = 480): boolean {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < px
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia(`(max-width: ${px - 1}px)`);
+    const on = () => setNarrow(mq.matches);
+    on();
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, [px]);
+  return narrow;
+}
 import { actionImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
 import { ImageLightbox } from './ImageLightbox';
@@ -296,7 +316,7 @@ const MessageRow = memo(function MessageRow({
     <div className="rise-in">
       <div className="mb-1.5 flex items-center gap-2">
         <span className="h-px w-5 bg-gold-600/50" />
-        <span className="text-[11px] tracking-wide text-gold-500/80">守密人</span>
+        <span className="text-[11px] tracking-wide text-gold-500">守密人</span>
       </div>
       <div
         className={`prose-trpg font-serif text-mist-300 ${typography.indent ? 'prose-indent' : ''}`}
@@ -363,6 +383,14 @@ export function Chat({
   const streaming = useStore((s) => s.streaming);
   const snapshots = useStore((s) => s.snapshots);
   const pendingChecks = useStore((s) => s.pendingChecks);
+  const narrow = useNarrow();
+  /** `G8`：被拦下时的那句说明（掷掉 / 忽略之后自己退场） */
+  const [blockNote, setBlockNote] = useState('');
+
+  // 检定掷掉或被忽略之后，那句提示别一直挂着 —— 挂着就像"坏了"
+  useEffect(() => {
+    if (pendingChecks.length === 0) setBlockNote('');
+  }, [pendingChecks.length]);
   const typography = useStore((s) => s.typography);
   const combat = useStore((s) => s.gameState.combat);
   const messageImages = useStore((s) => s.messageImages);
@@ -404,6 +432,27 @@ export function Chat({
     const text = draft.trim();
     // 结档 / 流式期间都不发，但**不清草稿**：清掉＝把玩家刚写的东西悄悄拿走
     if (!text || streaming || ended) return;
+    /*
+     * 🔴 `G8`（协28 §F① 第 9 条 · 测试方给的结构性证据）：
+     * **手里还捏着没掷的检定，就先别把下一句送出去。**
+     *
+     * 待掷队列的消费只发生在 `rollCheck` / `rollAllChecks` 两处；
+     * 不掷就发下一句，队列不被消费、那张卡就一直挂着（真机：「未掷骰就继续下一步，检定框不消失」）。
+     * 这里**拦而不代掷** —— 替玩家掷就是替他做决定，还拿走他挑加值的机会；
+     * 出口就在那张卡上（掷骰 / 忽略 / 全部忽略），所以拦不死人。
+     * ⚠️ 拦住时**不清草稿**（与上面那条同一个道理）。
+     */
+    const block = draftBlockReason({
+      hasText: true,
+      streaming,
+      ended,
+      pendingChecks: pendingChecks.length,
+    });
+    if (block) {
+      setBlockNote(block);
+      return;
+    }
+    setBlockNote('');
     setDraft('');
     if (taRef.current) taRef.current.style.height = 'auto';
     onSend(text);
@@ -452,7 +501,7 @@ export function Chat({
             <div>
               <div className="mb-1.5 flex items-center gap-2">
                 <span className="h-px w-5 bg-gold-600/50" />
-                <span className="text-[11px] tracking-wide text-gold-500/80">守密人</span>
+                <span className="text-[11px] tracking-wide text-gold-500">守密人</span>
               </div>
               <TypingDots />
             </div>
@@ -534,7 +583,7 @@ export function Chat({
               </div>
             )}
             {streaming && (
-              <p className="text-[11px] text-gold-500/80">
+              <p className="text-[11px] text-gold-500">
                 守密人还在写 —— 写完了这些检定才能掷。
               </p>
             )}
@@ -575,12 +624,15 @@ export function Chat({
 
       <div className="safe-bottom border-t border-ink-700 bg-ink-900/95 px-4 py-3 backdrop-blur sm:px-8">
         <div className="mx-auto max-w-3xl">
+          {blockNote && <p className="mb-1.5 text-[11px] text-gold-500">{blockNote}</p>}
           <div className="flex items-end gap-2 rounded-xl border border-ink-600 bg-ink-850 p-2 focus-within:border-gold-600/60">
             <textarea
               ref={taRef}
               value={draft}
               onChange={(e) => {
                 setDraft(e.target.value);
+                // 玩家一动手写字，说明他看见那句提示了，别再压着
+                if (blockNote) setBlockNote('');
                 const el = e.target;
                 el.style.height = 'auto';
                 el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
@@ -611,8 +663,12 @@ export function Chat({
               disabled={ended}
               placeholder={
                 ended
-                  ? '这一局已经结档 —— 想继续玩，用结档页上的「回溯」或「再开一局」'
-                  : '你要做什么，或直接说你角色的话（Enter 发送 · Shift+Enter 换行 · ↑ 取回上一条）'
+                  ? narrow
+                    ? '已结档 —— 回溯或再开一局'
+                    : '这一局已经结档 —— 想继续玩，用结档页上的「回溯」或「再开一局」'
+                  : narrow
+                    ? '你要做什么？（Enter 发送）'
+                    : '你要做什么，或直接说你角色的话（Enter 发送 · Shift+Enter 换行 · ↑ 取回上一条）'
               }
               className="max-h-40 flex-1 resize-none bg-transparent px-2 py-2 text-[15px] text-mist-100 outline-none placeholder:text-mist-500 disabled:cursor-not-allowed"
             />

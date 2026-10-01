@@ -75,7 +75,7 @@ export class ErrorBoundary extends Component<Props, State> {
             </button>
           </div>
 
-          <p className="mt-3 text-[10px] leading-relaxed text-mist-500/80">
+          <p className="mt-3 text-[10px] leading-relaxed text-mist-500">
             如果反复出现，按 <code>F12</code> 打开控制台，把红色的那条报错截给开发者。
           </p>
         </div>

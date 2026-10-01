@@ -141,8 +141,9 @@ describe('G5：没见过就不给弱点（图鉴的核心约定）', () => {
   it('只是见过 → 外观/攻击/习性给，**弱点不给**', () => {
     const c = bestiaryCard(TABLE[0]!, ['雾中的巨影'], []);
     expect(c.level).toBe('seen');
-    expect(c.look).toBeTruthy();
-    expect(c.attack).toBeTruthy();
+    // 🔴 真判据：给的是**表里那句原话**（不是"有东西就行"，也不是剧透裁过的版本）
+    expect(c.look).toBe(TABLE[0]!.look);
+    expect(c.attack).toBe(TABLE[0]!.attack);
     // 弱点是活路：没交手就不该出现在卡片上
     expect(c.weakness).toBeUndefined();
   });

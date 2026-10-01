@@ -151,8 +151,10 @@ import {
   deadlineFromDays,
   normalizeClock,
   tickClock,
+  waitTargetMinutes,
 } from '../core/clock.js';
 import { isLifeVital } from '../core/rulesets/types.js';
+import { statusFlagLines, tickStatusEffects, turnsKeyOf } from '../core/statusEffects.js';
 import {
   INSANITY_TURNS,
   insanityNote,
@@ -184,9 +186,17 @@ import {
 
 export type { Companion };
 import { DYING_NOTE } from '../orchestrator/prompt.js';
-import { roll, type DieGroup } from '../core/dice/index.js';
+import { roll, seededRng, type DieGroup } from '../core/dice/index.js';
 import { rollPercentile } from '../core/rulesets/coc7.js';
-import { getRuleset, listRulesets, loadCustomRulesets } from '../core/rulesets/index.js';
+/*
+ * 本局的**运行期随机源**（种子派生 + 调用日志）。
+ *
+ * ⚠️ 只 import `currentRng`（getter）与 `reseedRun`，**绝不 import 一个 `let` 源** ——
+ * 第一版就是那么写的，结果"换了种子还在用旧源"（绑定旧值），
+ * 且让 `startNewGame()` 之后的用例失去 `Math.random` 桩。详见 `ui/runRng.ts` 头部。
+ */
+import { currentRng, reseedRun } from './runRng.js';
+import { getRuleset, listRulesets, registerCustomRulesetsFrom } from '../core/rulesets/index.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
 import { DEFAULT_GM_VOICE, gmVoiceOf, type GmVoice } from '../core/voices.js';
 import { emptyCareer, recordRun, type AchievementDef, type Career } from '../core/career.js';
@@ -215,16 +225,25 @@ import {
   jobKey,
   nextQueued,
   reviveJobs,
+  stalledJobs,
   type ImageJob,
   type ImageJobKind,
 } from './imageJobs.js';
 import { encumbranceOf, encumbranceNote, type Encumbrance } from '../core/encumbrance.js';
 import { presentNpcNames, pruneNpcNotes, touchNpcNotes } from '../core/npcNotes.js';
+import { defaultImageSizeFor } from '../core/artSpec.js';
 
 export type { Encumbrance };
 
-// 先注册 localStorage 里存的自定义规则包，再初始化 store（否则 loadRulesetId 认不到它们）
-loadCustomRulesets();
+/*
+ * 先注册本地存的自定义规则包，再初始化 store（否则 `loadRulesetId` 认不到它们）。
+ *
+ * ⚠️ **读盘那一半在 UI 层**（`readLocal`）：2026-09-30 架构体检发现，
+ * `core/rulesets/index.ts` 原来自己在 core 里调 `localStorage.getItem` ——
+ * 而它自己第 45 行还写着「core 不许有 IO」。现在 core 只收**原始 JSON 串**做纯注册，
+ * 边界闸门（`scripts/check-contract.mjs`）盯着这条不让它长回去。
+ */
+registerCustomRulesetsFrom(readLocal('trpg.customRulesets'));
 import {
   loadAudioConfig,
   saveAudioConfig,
@@ -236,6 +255,7 @@ import {
   type AudioConfig,
 } from './audio.js';
 import { idbGet, idbSet } from './idb.js';
+import { readLocal, removeLocal, writeLocal } from './state/storage.js';
 import { pruneSnapshots } from './snapshotPrune.js';
 import { generateImage, fetchImageAsLocal, ModelError } from '../providers/model.js';
 import { isSelfContainedImage, isStoreableImage } from '../core/imageData.js';
@@ -562,15 +582,13 @@ export const SAMPLE_COMPANIONS: Companion[] = [
 
 
 /**
- * 真正的写入（同步、可能抛配额异常）。
- * 只有 `saveJson` / `flushSaves` 该调它 —— 别在别处直接 `localStorage.setItem`。
+ * 真正的写入（同步、可能抛配额异常）—— 实现在 `ui/state/storage.ts`。
+ *
+ * 这个薄壳留着是为了让 `saveJson` / `flushSaves` 的调用点不用改；
+ * 写盘本身只有那一个入口，别在这里再写一遍 `localStorage`。
  */
 function writeNow(key: string, value: unknown): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch (e) {
-    console.warn(`[跑团] 持久化 ${key} 失败（可能超出存储配额）`, e);
-  }
+  writeLocal(key, JSON.stringify(value));
 }
 
 /*
@@ -669,6 +687,55 @@ function scheduleSaveMessages(get: () => Store): void {
  */
 const IMAGE_CONCURRENCY = 2;
 let pumping = false;
+
+/**
+ * 🔴 一次生图的**硬上限**（毫秒）—— 主人 2026-09-27 真机那条的直接答案。
+ *
+ * 症状是：「画图还在排队，一直不成功也不失败」，隔夜才冒出一句失败。
+ * 根因：请求发出去之后**没有人给它计时**。服务端连上了但不回话（网关挂起 / 流式卡住 / 网络半死），
+ * 那条任务就永远停在 `running` —— 占着并发槽，**排在它后面的图一张也开不了工**，
+ * 玩家看到的是"正在画 N 张"和一个永远不动的队列。
+ *
+ * 取 3 分钟：正常的生图十几秒到一分钟；硅基流动偶尔会排到两分钟往上。
+ * 再短会误杀慢但正常的请求，再长就是把"卡住"拖到玩家已经不想等了。
+ */
+export const IMAGE_TIMEOUT_MS = 180_000;
+
+/**
+ * 超时回收的宽限：单条任务自己会在 `IMAGE_TIMEOUT_MS` 处停下，
+ * 只有"请假条没打上"的漏网（`stalledJobs`）才轮到这里。
+ * 多给 30 秒，免得两条判据在同一毫秒打架。
+ */
+const IMAGE_STALL_MS = IMAGE_TIMEOUT_MS + 30_000;
+
+/*
+ * 🔴 `H26`（协28 §F① 第 20 条 · 协29 补裁）：**正在跑的那条也要能当场停**。
+ *
+ * 排队中的 `dismissImageJob` 一直能用；`running` 那条以前只有角标上一句「画着…」，
+ * 玩家只能干等（或等 3 分钟硬闸）—— 自动配图连着画好几张、他突然改主意的时候没有出口。
+ *
+ * 句柄只活在内存里（不落盘）：刷新页面本来就没人接着跑，存它没意义。
+ */
+const imageAborts = new Map<string, AbortController>();
+
+/** 超时时给玩家的那句人话（要能照着做下一步，不是一句"失败了"） */
+export const IMAGE_TIMEOUT_NOTE =
+  '这张图画超过 3 分钟还没回来，已经停下 —— 可以重试一次；' +
+  '要是每次都这样，去「设置」换个生图模型（或把尺寸调小一点）会快得多。';
+
+/**
+ * 回收飞太久的任务，让它们**失败得看得见**，并把并发槽让出来给后面的图。
+ *
+ * 返回回收后的队列；一条都没到点就返回 `null`（调用方据此决定要不要落盘）。
+ */
+function reclaimStalled(list: readonly ImageJob[]): ImageJob[] | null {
+  const now = Date.now();
+  const stale = stalledJobs(list, now, IMAGE_STALL_MS);
+  if (stale.length === 0) return null;
+  let out = [...list];
+  for (const j of stale) out = failJob(out, j.id, IMAGE_TIMEOUT_NOTE);
+  return out;
+}
 
 function persistImageJobs(list: ImageJob[]): void {
   saveJsonNow('trpg.imageJobs', list);
@@ -908,12 +975,203 @@ const CHANGE_MERGE_MS = 4000;
  * 窗口内的第二次调用认为"这一轮已经推过了"。
  * 与状态提示的合并共用 `CHANGE_MERGE_MS`，两者口径一致。
  */
-let clockTickedAt = 0;
+/**
+ * `N2-余`：时钟推进这一轮算过没有（与战斗轮 / 状态 / 伤口**分开**消费）。
+ *
+ * ⚠️ 四个标记各管一段，共用一个就会"先消费的把后到的饿死"（协30 §2.3 明写）。
+ */
+let clockTickPending = false;
 
-function shouldTickClock(): boolean {
-  const now = Date.now();
-  if (now - clockTickedAt < CHANGE_MERGE_MS) return false;
-  clockTickedAt = now;
+/*
+ * 🔴 状态结算也要去重（第 12 轮测出的 P1-3 后遗症）。
+ *
+ * `applyModelDeltas` 一轮里会被调**不止一次**（状态一次、地点一次），
+ * 于是"中毒每轮扣 1"被算成了扣 2、轮数一次减 2（2 → 0 → 当场解除）。
+ * 测试方实测：注入 `{中毒, 中毒轮数:2}` → 推一轮 → hp 掉 2 且一轮即清除，
+ * 与 COC7 的表（`perRound{hp:-1} / duration 3`）对不上。
+ *
+ * 与时钟推进同一个道理：**一轮只算一次**。
+ * 这里复用同一个合并窗口，口径一致。
+ */
+/*
+ * 🔴 `N2`（协30 §2.3）：状态结算与伤口失血改成**一次玩家行动只算一次**（与 `G1` 同口径）。
+ *
+ * 病：`shouldTickStatus` 一直是**4 秒时间窗**。而真机一轮 32–121 秒，
+ * 同一轮里 `applyModelDeltas` 必然被调多次（正文一次、地点一次、漏契约补一次），
+ * 相隔 >4 秒就再扣一次 —— 真机看到的是「声明每轮 −1，实际 −2～−3」。
+ * 第 13 轮给「状态半边」的已验是短回合注入，挡不住真 LLM 回合。
+ *
+ * ⚠️ **三个标记必须分开消费**（协30 明写"不要共用一个标记，先消费的会把后到的饿死"）：
+ * 战斗轮、状态效果、伤口失血发生在同一轮的不同位置，共用标记的话第一个消费掉的
+ * 就把另外两个饿死了。
+ *
+ * 📌 时钟推进原来是唯一还留着 4 秒窗的（`N2` 那一版没打回它），
+ * 协31 §F① 第 1 条点名同病同治 —— 现在四个标记口径一致了，时间窗在本文件里彻底退场。
+ */
+let statusTickPending = false;
+/** `N2`：伤口失血本轮算过没有（与状态结算分开消费） */
+let bleedTickPending = false;
+
+/*
+ * 🔴 战斗轮也由**引擎**推进（P1-5 阶段 1，主人 2026-09-27 真机）。
+ *
+ * 以前 `combat.round` 只有一条路：提示词里请守密人自己写
+ * （"玩家行动结算后把 combat.round 加 1"）。他忘了写，界面就永远"第 1 轮"——
+ * 玩家的原话：「战斗轮还在，且一直停留在第一轮」。
+ * 与 `P2-10`（`startClock` 有字段有读取、**没人写它**）是同一个坑。
+ *
+ * 为什么放在这里：`applyModelDeltas` 正是"这一轮落地"的那一刻 ——
+ * 玩家行动 → 守密人回合 → 本轮变化落库 → **轮次 +1**，然后笔停在等玩家行动。
+ *
+ * ⚠️ 一轮里 `applyModelDeltas` 会被调多次（状态一次、地点一次）——
+ * 所以去重不是"多久一次"，而是"**一次玩家行动只算一次**"（`G1`，见下）。
+ */
+let combatRoundPending = false;
+
+/*
+ * 🔴 `G17`：「等到某个时刻」的引擎落点。
+ *
+ * 玩家落消息时算出目标**绝对分钟**记在这，本轮结算时交给 `tickClock` ——
+ * 它**同时当下限与上限**（协30 §2.4）：不许提前、也不许冲过头（真机冲到过次日 14:30）。
+ * 一次性：用过就清。
+ */
+let pendingClockTarget: number | null = null;
+
+/*
+ * 🔴 `G23` + `G19`（**仅阶段 A**）：收束自检引导 —— 一次性，取走即清。
+ *
+ * 结算点守密人既没声明 `ending`、也没声明 `act_done` 时挂上；下一轮把
+ * 「模组 endings ＋ 当前幕原文」再塞回提示词，逼他对照着自检一遍（只补通道，不硬判剧情）。
+ * 用模块级而不是 store 字段：它**不该落盘**，属于"这一轮"的上下文（与 `foeDamageGrant` 同类）。
+ */
+let selfCheckNote: string | null = null;
+
+export function setSelfCheckNote(note: string | null): void {
+  selfCheckNote = note;
+}
+
+export function consumeSelfCheckNote(): string | null {
+  const n = selfCheckNote;
+  selfCheckNote = null;
+  return n;
+}
+
+/*
+ * 🔴 命中授权（`P1-5` 阶段二 · 主人 2026-09-28 拍板「骰子说了算」）。
+ *
+ * 玩家掷完一次检定，就把"这一轮掷没掷中"记下来；守密人回话落地时
+ * （`applyModelDeltas`）把它交给引擎：**带 weapon 的攻击没有命中授权就不许扣血**。
+ *
+ * 为什么用时间窗：一次检定到守密人回话之间就是"这一轮"。
+ * 2 分钟够任何一轮走完（生图那条链路都不止这个数），过期当"没掷过"。
+ */
+let lastCheckAt = 0;
+let lastCheckSuccess = false;
+/** `G27`：这一轮掷出**大失败**了吗（要"一次掉到位"用） */
+let lastCheckFumble = false;
+const CHECK_GRANT_MS = 120_000;
+
+function noteCheckOutcome(ok: boolean, fumble = false): void {
+  lastCheckAt = Date.now();
+  lastCheckSuccess = ok;
+  lastCheckFumble = fumble;
+}
+
+/** 给引擎的命中授权：'hit' 掷中 / 'miss' 掷了没过 / 'none' 这一轮没掷 */
+function foeDamageGrant(): 'hit' | 'miss' | 'none' {
+  if (Date.now() - lastCheckAt > CHECK_GRANT_MS) return 'none';
+  return lastCheckSuccess ? 'hit' : 'miss';
+}
+
+/*
+ * 🔴 属性变更授权（`G25` · 协28 §F① 第 6b 条 · 主人 2026-09-29：「**动我属性都要检定的**」）。
+ *
+ * 与 `foeDamageGrant` 同一手法（同一个窗口、同一份掷骰记录），判据更松一档：
+ * **只要掷过**就算数 —— 引擎**不猜"该掷哪个检定"**（主人：「武器表也是一个烂活，穷举不太靠谱」；
+ * 猜错会弹出不相干的检定、猜不出来又退到体格，两头都更糟）。那一半交回模型：
+ * 要扣属性就在 `dice_requests` 里要一次检定，否则引擎拒落地。
+ *
+ * ⚠️ 与 `foeDamage` 的两处不同：
+ *   1. **不限定战斗**（掉理智、坠落受伤都在战斗外）；
+ *   2. 只管"有没有掷"和"是不是大失败"，不管成败 —— 掷没过也可能挨打
+ *      （躲闪失败本来就该挨打）；成败影响的是"该不该掉"，那是叙事层的事。
+ */
+function harmGrant(): { checked: boolean; fumble: boolean } {
+  return {
+    checked: Date.now() - lastCheckAt <= CHECK_GRANT_MS,
+    fumble: lastCheckFumble,
+  };
+}
+
+/** **仅供测试**：清掉命中授权窗口（与 `resetStatusTickForTest` 同理） */
+export function resetCheckGrantForTest(): void {
+  lastCheckAt = 0;
+  lastCheckSuccess = false;
+  lastCheckFumble = false;
+}
+
+/*
+ * 🔴 `G1`（协28 §F① 第 2 条 · 真机 4 次里复现 3 次）：**一次玩家行动只许计一轮**。
+ *
+ * 旧判据问的是「距上次推进够 4 秒了吗」—— 一次行动里只要出现两个相隔 >4 秒的结算点
+ * （正文一轮 ＋ 漏契约时"只补契约"的兜底），轮次就 +2：真机跑出 `1→3→5→7`。
+ * 规格原文是「你行动完、他叙述完，这一轮就结束」⇒ 期望 **+1**。
+ *
+ * 现在按**行动**计：玩家消息落盘时置标记，结算点消费掉。与 `shouldTickStatus` 同语义 ——
+ * **按行动，不按秒**。这也是 `P2-10` 的兄弟款：得追问「什么时候算一次」。
+ */
+function markPlayerActed(): void {
+  combatRoundPending = true;
+  statusTickPending = true;
+  bleedTickPending = true;
+  clockTickPending = true;
+}
+
+/** 状态效果结算：这一轮算过没有（消费即清） */
+function consumeStatusTick(): boolean {
+  if (!statusTickPending) return false;
+  statusTickPending = false;
+  return true;
+}
+
+/** 伤口失血：这一轮算过没有（与上面**分开**消费 —— 共用会互相饿死） */
+function consumeBleedTick(): boolean {
+  if (!bleedTickPending) return false;
+  bleedTickPending = false;
+  return true;
+}
+
+/** 结算点：这一轮已经计过 → false（同一次行动里的第二、三次结算不再推进） */
+function consumeCombatRoundTick(): boolean {
+  if (!combatRoundPending) return false;
+  combatRoundPending = false;
+  return true;
+}
+
+/**
+ * **仅供测试**：把"本轮已结算"的窗口清掉。
+ *
+ * 那个窗口是 4 秒，而测试是连着跑的 —— 不清的话前一个用例刚 tick 过，
+ * 下一个用例就永远轮不到结算，断言会莫名其妙地失败。
+ * 战斗轮那道窗口同理（同一个函数里清，免得测试只清一半）。
+ */
+export function resetStatusTickForTest(): void {
+  statusTickPending = false;
+  bleedTickPending = false;
+  clockTickPending = false;
+  combatRoundPending = false;
+}
+
+/**
+ * 🔴 `N2-余`（协31 §F① 第 1 条 · P3）：**时钟推进也从 4 秒窗改成行动标记**。
+ *
+ * 这是 14.38 自己报备的遗留：`N2` 把状态结算与伤口失血改成"一次行动只算一次"，
+ * 唯独时钟还留着 4 秒窗 —— **同一个病**（真机一轮 32–121 秒，一轮里 `applyModelDeltas`
+ * 会被调多次）。同病同治，别让同一处判据留两种口径。
+ */
+function consumeClockTick(): boolean {
+  if (!clockTickPending) return false;
+  clockTickPending = false;
   return true;
 }
 
@@ -992,7 +1250,22 @@ function fillFoeNumbers(
 
     touched = true;
     const hp = givenHp ?? tableHp!;
-    return { ...d, value: { ...foe, hp, max: givenMax ?? hp } };
+    /*
+     * 🔴 `max`（上限）**绝不能拿"当前血量"来补**（主人 2026-09-27 真机："敌人血量与状态不符"）。
+     *
+     * 老写法是 `max: givenMax ?? hp` —— 守密人每轮"记一笔血量"时只写 `hp`
+     * （他写的是"它现在还剩多少"，不是"它最多多少"），于是**上限被补成当前值**：
+     *   敌人满血 20 → 打掉 12 剩 8 → 下一轮 add 只写 hp:8 → 补出 max:8
+     *   → 血条渲染成 `8/8`（满格）→ 玩家看到的血量**跟他刚打掉的伤害对不上**。
+     *
+     * 现在按"这三点哪个最可信"排：
+     *   ① 模型显式给了 → 用它的；
+     *   ② 表里那只的满血值（作者填的、不随战斗漂）→ 用它；
+     *   ③ 前两个都没有（自定义敌人且模型只写 hp）→ 才退到当前 hp。
+     * 最后再夹一道"上限不小于当前值"，免得显示成 8/5 这种倒挂。
+     */
+    const max = Math.max(givenMax ?? tableHp ?? hp, hp);
+    return { ...d, value: { ...foe, hp, max } };
   });
   return touched ? out : deltas;
 }
@@ -1159,8 +1432,14 @@ interface Store extends StoreState {
   }): ImageJob | null;
   /** 重试一条失败的任务 */
   retryImageJob(id: string): void;
-  /** 不管了 —— 从队列里去掉（失败的那条） */
+  /** 不管了 —— 从队列里去掉（失败的那条 / 排队中的那条） */
   dismissImageJob(id: string): void;
+  /**
+   * `H26`：**正在跑的那条也停掉** —— 掐断请求并出队（玩家改主意了就是不要了）。
+   * 与 `dismissImageJob` 分开：那个只管"别画了，从队列里去掉"，
+   * 它管"把已经在飞的这一张也拉回来"。
+   */
+  cancelImageJob(id: string): void;
   /** 推一把队列：把排队的按并发上限发出去（多余的等前面跑完自动续） */
   pumpImageJobs(): Promise<void>;
   /**
@@ -1191,6 +1470,13 @@ interface Store extends StoreState {
   clearChanges(): void;
   /** 取走后台留下的一句提示（取完即清，不会重复弹） */
   takeNotice(): void;
+  /**
+   * 冒一句给玩家看的话（`App.tsx` 会 toast 出来）。
+   *
+   * 用途：**可见降级** —— 出了玩家该知道、但系统没法自动补救的事，
+   * 用一句人话说清"发生了什么 + 你现在能做什么"（不是技术错误信息）。
+   */
+  notify(message: string): void;
   /** 当前负重（界面与提示词共用同一份计算，别各算一遍） */
   encumbrance(): Encumbrance;
   /**
@@ -1299,15 +1585,20 @@ interface Store extends StoreState {
   /** 用当前的模组 + 角色卡开一团新游戏：清空剧情与进度，重新生成开场 */
   startNewGame(): void;
 
-  /** 本地掷骰（不经过模型） */
-  rollExpression(expr: string): DiceBadge;
+  /** 本地掷骰（不经过模型）。`seed` 只给测试注入；省略时用本局的运行期随机源。 */
+  rollExpression(expr: string, seed?: number): DiceBadge;
   /** 技能检定：本地掷骰 + 规则包判定 */
   /**
    * 掷一次技能检定。
    * `bonus` 是描述加权给出的目标值修正量（正数＝更容易），由引擎在**掷骰之前**加进目标值，
    * 所以判定、成功率与结果标签都是一致的 —— 不是事后改数。
    */
-  skillCheck(skill: string, difficulty?: 'regular' | 'hard' | 'extreme', bonus?: number): CheckBadge;
+  skillCheck(
+    skill: string,
+    difficulty?: 'regular' | 'hard' | 'extreme',
+    bonus?: number,
+    seed?: number
+  ): CheckBadge;
   /**
    * 应用模型返回的状态变更。
    *
@@ -1412,6 +1703,18 @@ export const useStore = create<Store>((set, get) => ({
   audio: loadAudioConfig(),
 
   addMessage(m) {
+    /*
+     * `G1`：玩家落了一条行动 → 这一轮的战斗轮"还没计过"。
+     * 标记在这里置、在 `applyModelDeltas` 的结算点消费，**一次行动只推一轮**。
+     */
+    if (m.role === 'player') {
+      markPlayerActed();
+      // `G17`：这一句若写了「等到 X」，算出时钟下限（本轮结算时交给 `tickClock`）
+      pendingClockTarget = waitTargetMinutes(
+        String(m.content ?? ''),
+        get().gameState.clock ?? DEFAULT_CLOCK
+      );
+    }
     const id = uid();
     set((s) => {
       const next = [...s.messages, { ...m, id, ts: Date.now() }];
@@ -1494,7 +1797,8 @@ export const useStore = create<Store>((set, get) => ({
         ...(reason?.trim() ? { reason: reason.trim() } : {}),
       },
     };
-    saveJson('trpg.gameState', gs);
+    // 结档是结构性操作：必须**立刻**落盘（节流窗口内重开会把结局丢掉 —— `G26` 就是这么丢的）
+    saveJsonNow('trpg.gameState', gs);
     set({ gameState: gs });
   },
 
@@ -1508,7 +1812,8 @@ export const useStore = create<Store>((set, get) => ({
       ...(s.gameState.ending?.reason ? { reason: s.gameState.ending.reason } : {}),
     };
     const gameState: GameState = { ...s.gameState, ending };
-    saveJson('trpg.gameState', gameState);
+    // 结局正文也是结档的一部分，同样立刻落盘（`G26`）
+    saveJsonNow('trpg.gameState', gameState);
     set({ gameState });
   },
 
@@ -1516,7 +1821,8 @@ export const useStore = create<Store>((set, get) => ({
     const s = get();
     if (!s.gameState.ending) return;
     const gameState: GameState = { ...s.gameState, ending: null, dying: false };
-    saveJson('trpg.gameState', gameState);
+    // 清结档也是结构性操作（回溯要立刻作数，别被待写的旧值盖回来）
+    saveJsonNow('trpg.gameState', gameState);
     // 濒死解除了，那条一次性引导也就没了意义
     set({ gameState, dyingNote: null });
   },
@@ -1560,13 +1866,13 @@ export const useStore = create<Store>((set, get) => ({
 
   setConfig(patch) {
     const next = { ...get().config, ...patch };
-    localStorage.setItem('trpg.config', JSON.stringify(next));
+    writeLocal('trpg.config', JSON.stringify(next));
     set({ config: next });
   },
 
   setRuleset(id) {
     const rs = getRuleset(id);
-    localStorage.setItem('trpg.rulesetId', id);
+    writeLocal('trpg.rulesetId', id);
     const character = get().character;
     // 换规则包 = 换一套属性与技能。旧值对不上新规则，直接按新规则重置，
     // 否则会带着 COC 的百分比技能跑 DnD。
@@ -1589,13 +1895,13 @@ export const useStore = create<Store>((set, get) => ({
       vitals,
       vitalsMax: deriveVitalsMax(nextChar, id),
     };
-    localStorage.setItem('trpg.character', JSON.stringify(nextChar));
+    writeLocal('trpg.character', JSON.stringify(nextChar));
     saveJson('trpg.gameState', gameState);
     set({ rulesetId: id, character: nextChar, gameState });
   },
 
   setGenre(id) {
-    localStorage.setItem('trpg.genreId', id);
+    writeLocal('trpg.genreId', id);
     set({ genreId: id });
     // 兜底开场白是按题材给的：换题材时同步一次，否则会拿旧题材的场景开场
     const opening = openingText(get().character, get().module, id);
@@ -1651,7 +1957,7 @@ export const useStore = create<Store>((set, get) => ({
       }
       next.skills = clamped;
     }
-    localStorage.setItem('trpg.character', JSON.stringify(next));
+    writeLocal('trpg.character', JSON.stringify(next));
     set({ character: next });
     // 姓名/性别/称呼变化会影响开场白里的喊法，同步一次
     if (patch.name !== undefined || patch.gender !== undefined || patch.address !== undefined) {
@@ -1762,18 +2068,18 @@ export const useStore = create<Store>((set, get) => ({
     const list = get().worldbook;
     const idx = list.findIndex((x) => x.id === e.id);
     const next = idx >= 0 ? list.map((x) => (x.id === e.id ? e : x)) : [...list, e];
-    localStorage.setItem('trpg.worldbook', JSON.stringify(next));
+    writeLocal('trpg.worldbook', JSON.stringify(next));
     set({ worldbook: next });
   },
 
   removeWorldbookEntry(id) {
     const next = get().worldbook.filter((x) => x.id !== id);
-    localStorage.setItem('trpg.worldbook', JSON.stringify(next));
+    writeLocal('trpg.worldbook', JSON.stringify(next));
     set({ worldbook: next });
   },
 
   setWorldbookEntries(list) {
-    localStorage.setItem('trpg.worldbook', JSON.stringify(list));
+    writeLocal('trpg.worldbook', JSON.stringify(list));
     set({ worldbook: list });
   },
 
@@ -1788,7 +2094,7 @@ export const useStore = create<Store>((set, get) => ({
    */
   clearModuleWorldbook() {
     const kept = stripModuleWorldbook(get().worldbook);
-    localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
+    writeLocal('trpg.worldbook', JSON.stringify(kept));
     set({ worldbook: kept });
   },
 
@@ -1799,7 +2105,7 @@ export const useStore = create<Store>((set, get) => ({
    * 开新团与读档都**不**清——它们不换模组（协作方 N2）。
    */
   setDevMode(on) {
-    localStorage.setItem('trpg.devMode', on ? '1' : '0');
+    writeLocal('trpg.devMode', on ? '1' : '0');
     set({ devMode: on });
   },
 
@@ -1810,12 +2116,12 @@ export const useStore = create<Store>((set, get) => ({
     set({ module });
   },
 
-  devMode: localStorage.getItem('trpg.devMode') === '1',
+  devMode: readLocal('trpg.devMode') === '1',
 
   clearModuleDerived() {
     // 同上：判据用 `core/worldbook.ts` 那一份（这里以前漏了 `mw-`）
     const kept = stripModuleWorldbook(get().worldbook);
-    localStorage.setItem('trpg.worldbook', JSON.stringify(kept));
+    writeLocal('trpg.worldbook', JSON.stringify(kept));
     saveJson('trpg.companionCandidates', []);
     set({ worldbook: kept, companionCandidates: [] });
   },
@@ -1881,7 +2187,7 @@ export const useStore = create<Store>((set, get) => ({
       }));
     const worldbook = [...baseWorldbook, ...own];
 
-    localStorage.setItem('trpg.worldbook', JSON.stringify(worldbook));
+    writeLocal('trpg.worldbook', JSON.stringify(worldbook));
     saveJson('trpg.module', merged);
     set({ module: merged, worldbook });
 
@@ -2074,11 +2380,42 @@ export const useStore = create<Store>((set, get) => ({
     persistImageJobs(next);
   },
 
+  cancelImageJob(id) {
+    /*
+     * `H26`：先把请求掐掉，再出队。
+     *
+     * 顺序有讲究：`abort()` 会让 `runImageJob` 里那个 race 抛出来走 `catch`，
+     * 而那时这条**已经不在队列里**了 —— `failJob` 是按 id `map` 的，找不到就原样返回，
+     * 所以不会把出队的任务又"标红复活"。
+     * 出队之后立刻 `pumpImageJobs()`：槽位当场让出来，后面排着的那张立刻开画
+     * （与超时那条路同一个口径 —— 玩家看到的是"我刚停掉，下一张就动起来了"）。
+     */
+    imageAborts.get(id)?.abort();
+    imageAborts.delete(id);
+    const next = dropJob(get().imageJobs, id);
+    set({ imageJobs: next });
+    persistImageJobs(next);
+    void get().pumpImageJobs();
+  },
+
   async pumpImageJobs() {
     // 重入保护：并发那一轮自己会再叫一次，不能让两个 pump 同时抢同一条任务
     if (pumping) return;
     pumping = true;
     try {
+      /*
+       * 🔴 推之前先把"卡住的任务"收回来（主人 2026-09-27 真机）。
+       *
+       * 单条任务有自己的硬超时，但定时器可能被浏览器节流（后台标签页），
+       * 也可能那条 promise 压根漏在 race 之外 —— 那种永远挂在 `running` 的任务
+       * 会**永久占着并发槽**，队列后面排着的图一张也轮不上。
+       * 收成失败（看得见、能重试）之后，下面的循环立刻就能把位置让给下一条。
+       */
+      const reclaimed = reclaimStalled(get().imageJobs);
+      if (reclaimed) {
+        set({ imageJobs: reclaimed });
+        persistImageJobs(reclaimed);
+      }
       // 一次把还能开的都开出去（上限 IMAGE_CONCURRENCY）；跑完一条会自动续
       for (;;) {
         const s = get();
@@ -2107,11 +2444,43 @@ export const useStore = create<Store>((set, get) => ({
       return;
     }
 
-    try {
+    /*
+     * 🔴 每一张图自己带一道硬闸（主人 2026-09-27 真机那条的根因）。
+     *
+     * `fetch` 本身不知道"该等多久"：服务端连上了不回话的时候，请求会**无限挂着**，
+     * 这条任务就永远停在 `running` —— 占着并发槽，后面排队的图一张也开不了工，
+     * 玩家看到的是"还排队呢"，一等就是一整夜。
+     * 所以：到点就 abort 掉那个请求，并把这条任务交给下面那个 `catch` 当失败处理
+     * （失败是**看得见且能重试**的，悬挂则什么都不是）。
+     */
+    const controller = new AbortController();
+    // `H26`：把句柄挂上 —— 角标上那颗「不画了」就是通过它把在飞的请求掐掉的
+    imageAborts.set(job.id, controller);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const guard = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new ModelError(IMAGE_TIMEOUT_NOTE));
+      }, IMAGE_TIMEOUT_MS);
+    });
+
+    const work = async (): Promise<void> => {
       const raw = await generateImage(job.prompt, {
         ...s.config,
         model: s.config.imageModel!.trim(),
-        size: s.config.imageSize || '1024x1024',
+        /*
+         * 🔴 切图规格（阶段 0-2）：**按图类型取尺寸**，不再四类共用一张方图。
+         *
+         * 以前一律 `config.imageSize || '1024x1024'` → 立绘被裁成半身、
+         * 场景没有广角。现在：
+         * - 玩家**手动填过** `imageSize` → 尊重他的选择（旧配置照跑，不搞突然袭击）；
+         * - 没填（绝大多数人）→ 按 `kind` 自动取（立绘 3:4 / 场景 16:9 / 地图·插画 1:1）。
+         *
+         * 规格真源在 `core/artSpec.ts`，`Settings` 的提示文案也读它，三处不会再说岔。
+         */
+        size: s.config.imageSize?.trim() || defaultImageSizeFor(job.kind),
+        // 超时就把这个请求掐掉，不让它在后台继续挂着占连接
+        signal: controller.signal,
       });
       if (!raw) throw new ModelError('生图接口没有返回图片，换一个生图模型试试');
       /*
@@ -2149,6 +2518,10 @@ export const useStore = create<Store>((set, get) => ({
       const next = dropJob(get().imageJobs, job.id);
       set({ imageJobs: next });
       persistImageJobs(next);
+    };
+
+    try {
+      await Promise.race([work(), guard]);
     } catch (e) {
       const msg = e instanceof ModelError ? e.message : `生图失败：${(e as Error).message}`;
       // 失败**留在队列里**：这是最需要被看见的状态，还得能重试
@@ -2156,7 +2529,16 @@ export const useStore = create<Store>((set, get) => ({
       set({ imageJobs: next });
       persistImageJobs(next);
     } finally {
-      // 空出一个位置就接着推（无论成功失败）
+      // 这条已经落地了（不管成功还是失败），硬闸可以拆了
+      if (timer) clearTimeout(timer);
+      imageAborts.delete(job.id);
+      /*
+       * 空出一个位置就接着推（无论成功失败）。
+       *
+       * 🔴 主人那条「第三张排队的画始终没开工」正是靠这一行解：
+       * 前面那条超时/失败之后，槽位在这一刻让出来，后面排着的立刻开画，
+       * 不用等到下一次交互。
+       */
       void get().pumpImageJobs();
     }
   },
@@ -2305,6 +2687,17 @@ export const useStore = create<Store>((set, get) => ({
     set({ uiNotice: null });
   },
 
+  /**
+   * 冒一句给玩家看的话（`App.tsx` 会把它 toast 出来，用 `takeNotice` 取走）。
+   *
+   * 为什么要加这个 action：原来 `uiNotice` 只有**内部写**（生图链路四处 `set({uiNotice})`），
+   * 别的模块想说一句人话只能 `useStore.setState(...)` —— 那是绕过 store 的暗门。
+   * 2026-09-30 补"叙述违规用尽重试后的可见降级"时需要它，就补成正式入口。
+   */
+  notify(message) {
+    set({ uiNotice: message });
+  },
+
   encumbrance() {
     const rs = getRuleset(get().rulesetId);
     return encumbranceOf(
@@ -2399,9 +2792,17 @@ export const useStore = create<Store>((set, get) => ({
     if (deltas.length === 0) return [];
     get().applyModelDeltas([
       { target: 'combat.active', op: 'set', value: true },
-      { target: 'combat.round', op: 'set', value: 1 },
       ...deltas,
     ] as never);
+    /*
+     * 🔴 `G1`（协30 §2.1）：**轮次是引擎独占的**，所以开打那一刻由引擎自己写 1 ——
+     * 不走 delta（那条路已经统一忽略 `combat.round` 的写法，模型写了也没用）。
+     * 开打是结构性操作（横幅与轮次要当场对）：立刻落盘。
+     */
+    const gs = get().gameState;
+    const opened = { ...gs, combat: { ...gs.combat, round: 1 } };
+    saveJsonNow('trpg.gameState', opened);
+    set({ gameState: opened });
     return deltas.map((d) => d.value.name);
   },
 
@@ -2511,7 +2912,7 @@ export const useStore = create<Store>((set, get) => ({
       items: [...(entry.profile.items ?? [])],
       itemDetails: (entry.profile.itemDetails ?? []).map((d) => ({ ...d })),
     };
-    localStorage.setItem('trpg.character', JSON.stringify(profile));
+    writeLocal('trpg.character', JSON.stringify(profile));
     set({ character: profile });
     return true;
   },
@@ -2621,25 +3022,37 @@ export const useStore = create<Store>((set, get) => ({
       0
     );
     const next = [...list, { turn: lastTurn + 1, text: t, location }];
-    localStorage.setItem('trpg.chronicle', JSON.stringify(next));
+    writeLocal('trpg.chronicle', JSON.stringify(next));
     set({ chronicle: next });
   },
 
   foldChronicle(keepFrom, summary) {
     const next = get().chronicle.slice(keepFrom);
-    localStorage.setItem('trpg.chronicle', JSON.stringify(next));
-    localStorage.setItem('trpg.summary', JSON.stringify(summary));
+    writeLocal('trpg.chronicle', JSON.stringify(next));
+    writeLocal('trpg.summary', JSON.stringify(summary));
     set({ chronicle: next, summary });
   },
 
   clearProgress() {
-    localStorage.removeItem('trpg.chronicle');
-    localStorage.removeItem('trpg.summary');
+    removeLocal('trpg.chronicle');
+    removeLocal('trpg.summary');
     set({ chronicle: [], summary: '' });
   },
 
   startNewGame() {
     const s = get();
+    /*
+     * 🔴 **开一局就播一次种子**（2026-09-30 修）。
+     *
+     * 为什么要在这里：引擎本来就支持注入随机源（`applyDeltas` 的 `ctx.rng`、
+     * `rollPercentile`/`roll` 的 `rng` 参数），但**生产侧一处都没传**，
+     * 于是走 `Math.random` —— 玩家报"我那次掷出 96 之后状态就乱了"永远复现不了。
+     *
+     * 现在这一局的骰子全部来自这一个种子派生的源，日志留在内存里；
+     * 玩家报问题时把种子给我，引擎那一段就能在本地重放。
+     * ⚠️ 只有**引擎侧**可复现 —— 模型写什么故事不可复现（见 `ui/runRng.ts` 头部）。
+     */
+    reseedRun(Date.now() >>> 0);
     const opening = openingText(s.character, s.module, s.genreId);
     const messages: Message[] = [
       { id: WELCOME_ID, role: 'gm', content: opening, ts: Date.now() },
@@ -2691,7 +3104,11 @@ export const useStore = create<Store>((set, get) => ({
        * 上一局的"第 27 天"不带过来 —— 那和"开新团不带上局的队友"是同一条道理。
        * 期限从模组推（见 `deadlineOf`），推不出来就没有期限。
        */
-      clock: { ...DEFAULT_CLOCK },
+      /*
+       * P2-10：开局时刻**以模组申报的为准**（`clock.start`），没申报才用默认值。
+       * 兑现 `core/clock.ts` 头注释里承诺了但从没实现的那条。
+       */
+      clock: s.module.startClock ? { ...s.module.startClock } : { ...DEFAULT_CLOCK },
       deadline: deadlineOf(s.module),
       visited: (() => {
         const here = initialLocation(s.module, s.character).trim();
@@ -2756,12 +3173,12 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   setTheme(t) {
-    localStorage.setItem('trpg.theme', t);
+    writeLocal('trpg.theme', t);
     set({ theme: t });
   },
 
-  rollExpression(expr) {
-    const outcome = roll(expr);
+  rollExpression(expr, seed) {
+    const outcome = roll(expr, seed === undefined ? currentRng() : seededRng(seed));
     return {
       expression: outcome.expression,
       total: outcome.total,
@@ -2769,7 +3186,12 @@ export const useStore = create<Store>((set, get) => ({
     };
   },
 
-  skillCheck(skill, difficulty = 'regular', bonus = 0) {
+  skillCheck(skill, difficulty = 'regular', bonus = 0, seed) {
+    /*
+     * ⚠️ **每次现取**当前源（`currentRng()`），不要提前存进变量 ——
+     * 一局里 `reseedRun()` 可能被调用（开新团），存下来的会是旧源。
+     */
+    const rng = seed === undefined ? currentRng() : seededRng(seed);
     const key = skill.trim();
     const rs = getRuleset(get().rulesetId);
     // 目标值可从角色卡技能 / 规则包基础值 / 属性表里解析（属性也可检定）
@@ -2802,6 +3224,8 @@ export const useStore = create<Store>((set, get) => ({
     if (percentile) {
       const pr = rollPercentile();
       const res = rs.resolveCheck(pr.value, target, difficulty);
+      // 掷完把结果记下来：守密人回话时引擎据此决定收不收伤害、能不能扣属性（G25/G27）
+      noteCheckOutcome(res.success, res.tier === 'fumble');
       return {
         skill,
         target: res.target,
@@ -2816,6 +3240,7 @@ export const useStore = create<Store>((set, get) => ({
     }
     const outcome = roll(rs.mainDice);
     const res = rs.resolveCheck(outcome.total, target, difficulty);
+    noteCheckOutcome(res.success, res.tier === 'fumble');
     return {
       skill,
       target: res.target,
@@ -2831,7 +3256,18 @@ export const useStore = create<Store>((set, get) => ({
 
   applyModelDeltas(deltas, opts) {
     const { gameState, rulesetId, character } = get();
-    const tickNow = opts?.elapsed !== undefined && shouldTickClock();
+    const tickNow = opts?.elapsed !== undefined && consumeClockTick();
+    /*
+     * `G17`：时钟下限只在"真的会推进"的那一次传，传完就清 ——
+     * `applyModelDeltas` 一轮里会被调多次（状态一次、地点一次），传两遍就等于等两次。
+     */
+    const clockFloor = tickNow ? pendingClockTarget ?? undefined : undefined;
+    if (tickNow) pendingClockTarget = null;
+    /*
+     * 命中授权（P1-5 阶段二）：这一轮玩家掷没掷中，交给引擎判"武器伤害算不算"。
+     * 只在战斗里给（不在战斗中就没有敌人可打；传了也无害，但少一条路径就少一个坑）。
+     */
+    const foeDamage = get().gameState.combat?.active ? foeDamageGrant() : undefined;
     /*
      * 敌人兜底，**两道**，顺序有讲究：
      *
@@ -2846,12 +3282,20 @@ export const useStore = create<Store>((set, get) => ({
     const report = applyDeltas(gameState, fillFoeNumbers(withNames, get().module.monsters), {
       ruleset: getRuleset(rulesetId),
       vitalsMax: deriveVitalsMax(character, rulesetId),
+      // 本局随机源（种子派生）：伤害骰 / 失血 / 状态结算都走它，整局可复现
+      rng: currentRng(),
       /*
        * 故事时钟：把守密人申报的"过了多久"交给引擎折算。
        * 只在**这一轮的第一次调用**里传 —— 一轮里可能分几次调
        * （状态一次、地点一次），传两遍会把时间算两次。
        */
       ...(tickNow ? { elapsed: opts!.elapsed } : {}),
+      // 命中授权（P1-5 阶段二）：带 weapon 的攻击没掷中就不许扣血
+      ...(foeDamage ? { foeDamage } : {}),
+      // `G17`：玩家说了「等到 X」→ 这一轮时钟至少走到那个点
+      ...(clockFloor !== undefined ? { clockFloor } : {}),
+      // `G25`：模型申报的属性下降要有检定授权（引擎自己的账不传这一项，天然不受影响）
+      harm: harmGrant(),
     });
     // 模型偶尔会把模组里的 {{称呼}} 占位符漏进状态（地点/线索/物品名）。
     // 状态是要显示给玩家的，进库前统一替换成真实值。
@@ -2934,19 +3378,24 @@ export const useStore = create<Store>((set, get) => ({
     let bleedNote: string | null = null;
     if (
       !bornThisTurn &&
+      /*
+       * `N2`：先判"该不该流血"（纯函数），再消费行动标记 ——
+       * 顺序反了的话，不该流血的那一轮也会把标记吃掉（那一轮就永远不结算）。
+       */
       shouldBleed({
         wounds,
         hp: hpNow,
         hpMin: lifeMin,
         dying: report.state.dying,
         ending: Boolean(report.state.ending),
-      })
+      }) &&
+      consumeBleedTick()
     ) {
       const amount = totalBleed(wounds);
       const bleedReport = applyDeltas(
         { ...report.state, wounds },
         [bleedDelta(amount)],
-        { ruleset: rsForWounds, vitalsMax: deriveVitalsMax(character, rulesetId) }
+        { ruleset: rsForWounds, vitalsMax: deriveVitalsMax(character, rulesetId), rng: currentRng() }
       );
       report.state = bleedReport.state;
       report.applied.push(...bleedReport.applied);
@@ -3023,6 +3472,85 @@ export const useStore = create<Store>((set, get) => ({
        * 会永远读到默认值、永远解除不掉。所以引擎把自己记的轮数（存在 `疯狂轮数`）
        * 当作真源，守密人的描述只当开窗的触发。
        */
+      /* ────────────────────────────────────────────────────────────
+       * 状态效果结算（1.0 阶段 C 的**接线** —— P1-3 回归）。
+       *
+       * 🔴 这一段以前**根本没写**：`tickStatusEffects` 纯函数在、单测在、
+       * `statusNote` 也接进了提示词，唯独"推进一轮"这里从没调用它。
+       * 结果引擎一边对守密人说"后果我已算过、别重复扣"，一边**什么都没扣** ——
+       * 中毒永久挂在身上。这比没做更糟：它把权威宣示出去了，行为却是空。
+       *
+       * ⚠️ 顺序（协作方第 25 版钉死，与 `tickInsanity` 同构）：
+       * **用「上一轮」的 flags 推进**，再收本轮的新申报。
+       * 若拿本轮的 flags 推进，模型刚写 `中毒轮数:2` 会被立刻 tick 成 1，
+       * 玩家在状态栏看到的和守密人申报的对不上。
+       * ──────────────────────────────────────────────────────────── */
+      {
+        const rs = getRuleset(rulesetId);
+        const prevFlags = get().gameState.flags ?? {};
+        // ⚠️ 一轮只结算一次（`applyModelDeltas` 一轮会被调多次，见 `shouldTickStatus`）
+        const seTick = consumeStatusTick()
+          ? tickStatusEffects(prevFlags, rs, currentRng())
+          : { deltas: [], cleared: [], remaining: [] };
+        if (seTick.deltas.length > 0) {
+          const seReport = applyDeltas(report.state, seTick.deltas, {
+            ruleset: rs,
+            vitalsMax: deriveVitalsMax(character, rulesetId),
+            rng: currentRng(),
+          });
+          report.state = seReport.state;
+          report.applied.push(...seReport.applied);
+          report.rejected.push(...seReport.rejected);
+        }
+        // 回写：到期的删掉（连记账键一起），还在持续的写回剩余轮数
+        const after = { ...report.state.flags };
+        for (const c of seTick.cleared) {
+          delete after[c];
+          delete after[turnsKeyOf(c)];
+        }
+        for (const r of seTick.remaining) after[turnsKeyOf(r.name)] = r.turns;
+        report.state = { ...report.state, flags: after };
+        /*
+         * ⚠️ `flags` 是上面那个块的局部变量，回写后必须**完全跟上** ——
+         * 否则下面伤口那段结尾的 `report.state = {... , flags}` 会把旧内容盖回去。
+         * 而且必须**先清空再拷**：`Object.assign` 只覆盖不删除，
+         * 光 assign 的话"到期删掉"的键会原地复活（中毒永远好不了）。
+         */
+        for (const k of Object.keys(flags)) delete flags[k];
+        Object.assign(flags, after);
+      }
+
+      /*
+       * 🔴 战斗轮 +1（P1-5 阶段 1）—— **引擎自己走，不等守密人记得写**。
+       *
+       * ⚠️ 判据用**上一轮**的 `combat.active`（`get().gameState`），不是本轮的：
+       * 「刚进入战斗」那一次（false → true，模型写 active=true + round=1）**不算走完一轮**，
+       * 否则开打的第一秒界面就写着"第 2 轮"。只有"这一轮开始前就已经在打"才推进。
+       * 同理，战斗结束后（active 落 false）也不再往上加。
+       */
+      const prevCombat = get().gameState.combat;
+      if (
+        prevCombat?.active &&
+        report.state.combat?.active &&
+        (report.state.combat.foes?.length ?? 0) > 0 &&
+        consumeCombatRoundTick()
+      ) {
+        /*
+         * 🔴 `G1`（协30 §2.1）：基数取**引擎上一拍**的值，不取模型申报的、也不能 `|| 1`。
+         *
+         * 两处病叠在一起才出现真机那条 `0 → 2 → 4`：
+         *   ① `Number(report.state.combat.round) || 1` —— `0` 是**合法轮次**，
+         *      被 `|| 1` 折叠成 1，再 +1 就是 2（对得上真机的第一次 +2）；
+         *   ② 模型照抄旧提示词在契约里写了 round，引擎在**它写的值**上再加。
+         */
+        const prevRoundRaw = Number(prevCombat.round);
+        const prevRound = Number.isFinite(prevRoundRaw) ? Math.max(0, Math.floor(prevRoundRaw)) : 0;
+        report.state = {
+          ...report.state,
+          combat: { ...report.state.combat, round: prevRound + 1 },
+        };
+      }
+
       const tick = tickInsanity(flags, insanityTurnsHint(flags));
       if (tick.next === false) {
         delete flags['临时疯狂'];
@@ -3088,7 +3616,17 @@ export const useStore = create<Store>((set, get) => ({
       if (typeof san === 'number' && san <= 0) {
         kind = 'insanity';
       } else if (typeof hp === 'number' && hp <= 0) {
-        if (nextState.dying) kind = 'death';
+        /*
+         * 🔴 `G27`（协28 §F① 第 6b 条）：**致命一击直接出结局**，不给"下一轮再看一眼"的缓冲。
+         *
+         * 主人原话：「该死的时候能死，守密人不要硬找理由拖着不让死」「死定了就一次性掉大量属性直接出结局」。
+         * 以前无论怎么死都要先挂一轮濒死（`dying`），中间模型给一口回血就又活过来了 ——
+         * "死亡 = 结档"这条设计在真机上几乎不可达（62 轮里 hp 一次没动）。
+         * 现在：引擎认出这一下是**打光的那一击**（`planHarm` 的 `lethal`）→ 当场结档。
+         * 逐点掉血那套照旧：血见底但还不是致命一击，仍然先给一轮施救窗口。
+         */
+        if (report.lethal) kind = 'death';
+        else if (nextState.dying) kind = 'death';
         else {
           nextState = { ...nextState, dying: true };
           /*
@@ -3182,7 +3720,18 @@ export const useStore = create<Store>((set, get) => ({
         lines.push({ text: '已经倒下了 —— 这一轮生命不再下降，还有一口气', tone: 'good' });
         continue;
       }
-      if (r.delta?.target !== 'inventory') continue;
+      if (r.delta?.target !== 'inventory') {
+        /*
+         * 🔴 非物品的拦下**也要说一声**（`G25` / `G24` 都靠这一句被看见）。
+         *
+         * 以前这里只处理 `inventory`（"武器不按数量消耗"那一套），其余一律 `continue` ——
+         * 于是"这一下没算数"是**静默**的（只 `console.warn`）。而它恰恰是玩家最需要看到的：
+         * 守密人写着"你被撞得骨头生疼"，血却没动，不说等于让玩家以为系统坏了。
+         * `G24`（敌人还活着不许关战斗）拒掉时同理。
+         */
+        lines.push({ text: r.reason ?? '这一下被引擎拦下了', tone: 'warn' });
+        continue;
+      }
       const name = String(r.delta.value ?? '物品');
       lines.push({
         text: r.reason?.includes('武器')
@@ -3288,15 +3837,15 @@ export const useStore = create<Store>((set, get) => ({
       companionCandidates: candidates,
       snapshots: data.snapshots ?? s.snapshots,
     }));
-    if (data.character) localStorage.setItem('trpg.character', JSON.stringify(data.character));
+    if (data.character) writeLocal('trpg.character', JSON.stringify(data.character));
     // 导入存档：整份替换，立刻落盘
     if (data.module) saveJsonNow('trpg.module', data.module);
     if (data.gameState) saveJsonNow('trpg.gameState', data.gameState);
     if (data.messages) saveJsonNow('trpg.messages', data.messages);
     if (data.chronicle)
-      localStorage.setItem('trpg.chronicle', JSON.stringify(data.chronicle));
-    if (data.summary) localStorage.setItem('trpg.summary', JSON.stringify(data.summary));
-    localStorage.setItem('trpg.worldbook', JSON.stringify(worldbook));
+      writeLocal('trpg.chronicle', JSON.stringify(data.chronicle));
+    if (data.summary) writeLocal('trpg.summary', JSON.stringify(data.summary));
+    writeLocal('trpg.worldbook', JSON.stringify(worldbook));
     saveJson('trpg.companionCandidates', candidates);
     if (data.snapshots) saveJson('trpg.snapshots', data.snapshots);
   },

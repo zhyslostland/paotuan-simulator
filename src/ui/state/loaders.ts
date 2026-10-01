@@ -68,6 +68,7 @@ import {
 import {
   fillPlayerTokens,
 } from './tokens.js';
+import { readLocal, removeLocal, writeLocal } from './storage.js';
 
 
 export const DEFAULT_CONFIG: ApiConfig = {
@@ -136,7 +137,7 @@ export const DEFAULT_WORLDBOOK: WorldbookEntry[] = [
 
 export function loadWorldbook(): WorldbookEntry[] {
   try {
-    const raw = localStorage.getItem('trpg.worldbook');
+    const raw = readLocal('trpg.worldbook');
     if (raw) return JSON.parse(raw) as WorldbookEntry[];
   } catch {
     /* 忽略损坏数据 */
@@ -169,14 +170,14 @@ export function consumeLoadError(): string | null {
  */
 export function loadJson<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = readLocal(key);
     if (raw) return JSON.parse(raw) as T;
   } catch {
     const raw = safeGetRaw(key);
     if (raw !== null) {
       try {
-        localStorage.setItem(`${BROKEN_SAVE_PREFIX}${key}`, raw);
-        localStorage.removeItem(key);
+        writeLocal(`${BROKEN_SAVE_PREFIX}${key}`, raw);
+        removeLocal(key);
       } catch {
         /* 连备份都写不进去就算了，别因为"想留个底"把启动搞崩 */
       }
@@ -190,7 +191,7 @@ export function loadJson<T>(key: string, fallback: T): T {
 /** 取原始串；连 localStorage 本身都抛异常时返回 null（测试沙盒/隐私模式） */
 function safeGetRaw(key: string): string | null {
   try {
-    return localStorage.getItem(key);
+    return readLocal(key);
   } catch {
     return null;
   }
@@ -241,6 +242,17 @@ export function fallbackState(): GameState {
     location: initialLocation(m, c),
     npcsAlive: initialNpcs(m, c),
     visited: initialLocation(m, c).trim() ? [initialLocation(m, c).trim()] : [],
+    /*
+     * P2-11①（协作方第 25 版）：**期限必须和 `startNewGame` 同源**。
+     *
+     * 这里以前压根不设 `deadline`，而 `startNewGame` 是设的 ——
+     * 于是两条开局路径不同源：`setDeadlineDays` 那道 `if (cur) return`
+     * （守密人申报的期限不该覆盖模组已有的期限）因为 `cur` 是 null 而**形同虚设**，
+     * 模型一申报就把模组的期限顶掉了。
+     *
+     * 现在两边都从模组推（`deadlineOf`），保护条件立刻真的成立。
+     */
+    deadline: deadlineOf(m),
   });
 }
 
@@ -394,9 +406,22 @@ export function initialNpcs(m: Module, c?: CharacterProfile): string[] {
  * 引擎每轮按 `elapsed` 往下减。
  */
 export function deadlineOf(m: Module): Deadline | null {
+  const label = modDeadlineLabel(m);
+  /*
+   * P2-10：**模组显式申报的期限优先**，正则只是退回。
+   *
+   * 以前只有"从 urgency 文本里正则抽"这一条路 —— 而文本永远抽不全
+   * （「天黑前」「一旦入夜」这类根本没数字）。现在模组可以直接给 `deadlineIn`（分钟），
+   * 给了就信它；没给才走老路（老模组完全兼容）。
+   * ⚠️ 不去扩那张词表 —— 词表永远补不完，把猜测挪进来只会把坑挖深。
+   */
+  const declared = Number(m.deadlineIn);
+  if (Number.isFinite(declared) && declared > 0) {
+    return { remain: Math.round(declared), label };
+  }
+
   const text = `${m.urgency ?? ''}\n${m.stakes ?? ''}`.trim();
   if (!text) return null;
-  const label = modDeadlineLabel(m);
 
   /*
    * 优先级：先找"天"（长篇/中篇），再找"小时/分钟"（短篇）。
@@ -438,7 +463,34 @@ export function deadlineOf(m: Module): Deadline | null {
  * 现在两处共用这一个函数，判据只有一份，不会再分叉。
  */
 export function modDeadlineLabel(m: Module): string {
-  return (m.urgency ?? '').split(/[。；;\n]/)[0]?.trim().slice(0, 24) || '期限';
+  /*
+   * H21（协作方第 25 版）：**就近标点截断**，不要硬截。
+   *
+   * 以前是 `slice(0, 24)` —— 不看标点，一句话经常被劈成
+   * 「雨季结束前她必须离」这种断头句（少半个词，读着像坏了）。
+   * 现在先退到最近的「，、：」再加「…」；实在找不到标点才硬截。
+   *
+   * `deadlineOf` 与 `setDeadlineDays` 共用它，改一处即三处。
+   */
+  return truncateAtPunctuation(
+    (m.urgency ?? '').split(/[。；;\n]/)[0]?.trim() ?? ''
+  ) || '期限';
+}
+
+/** 截到 24 字以内，优先停在最近的标点上（找不到标点才硬截） */
+export function truncateAtPunctuation(text: string, max = 24): string {
+  const s = (text ?? '').trim();
+  if (s.length <= max) return s;
+  const head = s.slice(0, max);
+  // 从后往前找最近的"软"标点
+  let cut = -1;
+  for (let i = head.length - 1; i >= Math.max(0, max - 8); i--) {
+    if ('，、：,.'.includes(head[i]!)) {
+      cut = i;
+      break;
+    }
+  }
+  return cut > 0 ? `${head.slice(0, cut).trim()}…` : `${head.trim()}…`;
 }
 
 /**
@@ -560,13 +612,25 @@ export function openingText(c: CharacterProfile, m: Module, genreId = 'coc'): st
   return `${body}\n\n${lines.join('\n')}`;
 }
 
+/**
+ * 读主题。
+ *
+ * 两套：**羊皮纸（浅，默认）** + **午夜（深）**。
+ * 2026-09-26 主人重申口径后恢复读盘 —— 我上一轮误读成"只留一套"还删了两套。
+ *
+ * 老玩家如果存过已并入的 `'ash'`：**回落到默认羊皮纸**，不做静默迁移 ——
+ * 让他自己再点一次「午夜」就好，硬映射反而是替他做决定。
+ *
+ * 保留函数（而不是把默认值写死在 `store.ts`）是为了：
+ * 以后加主题时，改这里一处即可，调用方（`store.ts` 的初始值）不动。
+ */
 export function loadTheme(): ThemeName {
-  const t = localStorage.getItem('trpg.theme');
-  return t === 'ash' || t === 'parchment' ? t : 'midnight';
+  const t = readLocal('trpg.theme');
+  return t === 'midnight' ? 'midnight' : 'parchment';
 }
 
 export function loadRulesetId(): string {
-  const id = localStorage.getItem('trpg.rulesetId');
+  const id = readLocal('trpg.rulesetId');
   // 只有注册过的规则包 id 才算数，否则回退 COC
   return id && listRulesets().some((r) => r.id === id) ? id : 'coc7';
 }
@@ -578,13 +642,13 @@ export function loadCustomGenres(): Genre[] {
 }
 
 export function loadGenreId(): string {
-  const id = localStorage.getItem('trpg.genreId');
+  const id = readLocal('trpg.genreId');
   return id && listGenres(loadCustomGenres()).some((g) => g.id === id) ? id : 'coc';
 }
 
 export function loadTypography(): Typography {
   try {
-    const raw = localStorage.getItem('trpg.typography');
+    const raw = readLocal('trpg.typography');
     if (raw) return { ...DEFAULT_TYPOGRAPHY, ...JSON.parse(raw) };
   } catch {
     /* 忽略 */
@@ -611,7 +675,7 @@ export function loadTypography(): Typography {
  */
 export function loadCareer(): Career {
   try {
-    const raw = localStorage.getItem('trpg.career');
+    const raw = readLocal('trpg.career');
     if (!raw) return emptyCareer();
     const p = JSON.parse(raw) as Partial<Career>;
     const base = emptyCareer();
@@ -635,7 +699,7 @@ export function loadCareer(): Career {
  */
 export function loadWorlds(): Record<string, World> {
   try {
-    const raw = localStorage.getItem('trpg.worlds');
+    const raw = readLocal('trpg.worlds');
     if (!raw) return {};
     const p = JSON.parse(raw) as Record<string, World>;
     if (!p || typeof p !== 'object') return {};
@@ -661,7 +725,7 @@ export function loadWorlds(): Record<string, World> {
 /** 当前选中的世界名（空＝还没选过，界面按"跟着模组名走"处理） */
 export function loadWorldName(): string {
   try {
-    return localStorage.getItem('trpg.worldName') ?? '';
+    return readLocal('trpg.worldName') ?? '';
   } catch {
     return '';
   }
@@ -673,7 +737,7 @@ export function loadWorldName(): string {
  */
 export function loadArchive(): ArchivedCharacter[] {
   try {
-    const raw = localStorage.getItem('trpg.archive');
+    const raw = readLocal('trpg.archive');
     if (!raw) return [];
     const p = JSON.parse(raw) as ArchivedCharacter[];
     return Array.isArray(p) ? p.filter((c) => c && c.id && c.profile) : [];
@@ -690,7 +754,7 @@ export function loadArchive(): ArchivedCharacter[] {
  */
 export function loadImageJobs(): ImageJob[] {
   try {
-    const raw = localStorage.getItem('trpg.imageJobs');
+    const raw = readLocal('trpg.imageJobs');
     if (!raw) return [];
     const p = JSON.parse(raw) as ImageJob[];
     if (!Array.isArray(p)) return [];
@@ -702,7 +766,7 @@ export function loadImageJobs(): ImageJob[] {
 
 /** 读一个布尔开关（缺省 / 读坏都退回 `fallback`，绝不因为一个坏值把启动弄挂） */
 export function loadFlag(key: string, fallback: boolean): boolean {  try {
-    const raw = localStorage.getItem(key);
+    const raw = readLocal(key);
     if (raw == null) return fallback;
     const v = JSON.parse(raw);
     return typeof v === 'boolean' ? v : fallback;
@@ -713,7 +777,7 @@ export function loadFlag(key: string, fallback: boolean): boolean {  try {
 
 export function loadGmVoice(): GmVoice {
   try {
-    const raw = localStorage.getItem('trpg.gmVoice');
+    const raw = readLocal('trpg.gmVoice');
     if (raw) {
       const id = JSON.parse(raw);
       if (typeof id === 'string') return gmVoiceOf(id).id;
@@ -726,7 +790,7 @@ export function loadGmVoice(): GmVoice {
 
 export function loadConfig(): ApiConfig {
   try {
-    const raw = localStorage.getItem('trpg.config');
+    const raw = readLocal('trpg.config');
     if (raw) return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
   } catch {
     /* 忽略损坏的配置 */
@@ -768,6 +832,9 @@ export function migrateCharacter(p: Record<string, unknown>): CharacterProfile {
     portrait?: string;
     background?: string;
     items?: string[];
+    /* `G21`：后来加的可选字段也在这里列一遍，否则"存了、界面却不显示" */
+    appearance?: string;
+    itemDetails?: { name: string; desc?: string; kind?: string; damage?: string; skill?: string }[];
   };
   const description =
     l.description ??
@@ -790,11 +857,19 @@ export function migrateCharacter(p: Record<string, unknown>): CharacterProfile {
     address: l.address,
     portrait: l.portrait ?? '',
     items: Array.isArray(l.items) ? l.items : [],
+    /*
+     * 🔴 `G21`：**后来加的可选字段不能在这里丢**（`P2-10` 的兄弟款，一次扫完）。
+     * 漏哪个都表现成"界面某一栏永远是空的" —— AI 卡的外貌栏空掉就是这么来的：
+     * 生成时有值、`localStorage` 里也有值，只是读档时被这个 return 吞了。
+     */
+    ...(typeof l.scenario === 'string' ? { scenario: l.scenario } : {}),
+    ...(typeof l.appearance === 'string' ? { appearance: l.appearance } : {}),
+    ...(Array.isArray(l.itemDetails) ? { itemDetails: l.itemDetails } : {}),
   };
 }
 
 export function loadCharacter(): CharacterProfile {
-  return mergeCharacter(localStorage.getItem('trpg.character'));
+  return mergeCharacter(readLocal('trpg.character'));
 }
 
 /**
@@ -836,6 +911,14 @@ export function mergeModule(raw: string | null): Module {
       ...(Array.isArray(s.monsters) ? { monsters: s.monsters } : {}),
       // 模组自带的世界书：丢了它就等于"套用内置模组后世界观不跟着走"
       ...(Array.isArray(s.worldbook) ? { worldbook: s.worldbook } : {}),
+      /*
+       * 🔴 `P2-10`（协28 打回）：**这两个键一直在白名单外面**。
+       * 生成侧写了、`startNewGame` 也读了，可读档时被这里吞掉 →
+       * 表现就是"模组申报了开局时刻/期限，刷新之后全回到默认值"。
+       * 与下面 `migrateCharacter` 的 `appearance` 是同一个病（`G21`）：**后来加的字段不能在这里丢**。
+       */
+      ...(s.startClock !== undefined ? { startClock: s.startClock } : {}),
+      ...(s.deadlineIn !== undefined ? { deadlineIn: s.deadlineIn } : {}),
     };
   } catch {
     return DEFAULT_MODULE;
@@ -844,7 +927,7 @@ export function mergeModule(raw: string | null): Module {
 
 export function loadModule(): Module {
   // 读盘时也过一遍占位符：老存档里可能残留 {{称呼}}
-  return sanitizeModuleTokens(mergeModule(localStorage.getItem('trpg.module')), loadCharacter());
+  return sanitizeModuleTokens(mergeModule(readLocal('trpg.module')), loadCharacter());
 }
 
 /**

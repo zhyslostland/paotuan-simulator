@@ -23,6 +23,36 @@
  * 主题通过 <html data-theme> 切换。
  * @theme inline 让 Tailwind 生成的类名引用 CSS 变量而不是写死颜色值，
  * 这样换主题只需改一处的 data-theme，无需重新构建。
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * ⚠️ 加新颜色变量前先读这段（2026-09-25 统一整理时立的规矩）
+ *
+ * **2026-09-26 起共两套主题：羊皮纸（浅）+ 午夜（深）**。
+ * 主人 2026-09-26 重申口径：「羊皮纸是改进字体…另外两套是优化合并成一套，
+ * 所以最终主题还是两套，简单加法」。
+ * （⚠️ 我上一轮把这句读成了"只留羊皮纸"还删了两套 —— 是误读，已恢复。）
+ *
+ * 变量名与语义是**两套共用**的契约，下面这张表就是契约：
+ *
+ *   --c-bg        页面底          最深/最亮的一层
+ *   --c-surface   内容区底         比 bg 高一档（卡片会落在它上面）
+ *   --c-panel     面板 / 弹层底     比 surface 再高一档
+ *   --c-elevated  抬起元素底       输入框、代码块等
+ *   --c-border    常规边框         **有意低对比**（1.2~1.5），它不该抢戏
+ *   --c-border-strong 强边框 / 分隔  略强于 border，仍低于 2
+ *   --c-text      正文            最高对比（≥ 9:1）
+ *   --c-text-2    次要文字          ≥ 6:1
+ *   --c-text-3    辅助文字          ≥ 4.5:1
+ *   --c-muted     最弱文字 / 占位    ≥ 4.5:1
+ *   --c-accent    主题强调色        羊皮纸＝古籍金 / 午夜＝暗金
+ *   --c-arcane    次级强调（紫系）
+ *   --c-danger    危险 / 失败
+ *   --c-success   成功 / 安全
+ *
+ * **验收线统一**：除 `--c-border*` 外，所有颜色在**三个底色中最难的那个**
+ * 上都必须 ≥ 4.5:1（正文档另有更高线）。
+ * 这条由 `tests/themeContrast.test.ts` 自动守 —— 改色值前先跑它。
+ * ─────────────────────────────────────────────────────────────────────
  */
 @theme inline {
   --color-ink-950: var(--c-bg);
@@ -33,64 +63,55 @@
   --color-ink-600: var(--c-border-strong);
   --color-ink-500: var(--c-text-3);
 
+  /*
+   * ⚠️ 文字色阶**必须在这里列全**（2026-09-26 的教训）。
+   *
+   * Tailwind v4 下，**没在这里定义的色类不会生成任何 CSS** ——
+   * 用了它的元素就**继承父色**。界面上看着"淡"，但没有任何报错、也没有任何
+   * 测试会红（我的对比度守门当时只测变量之间的比值，压根没覆盖这一类）。
+   *
+   * 实测：`mist-200`（属性值）/ `gold-300`（成就名称）等 **8 个档位共 126 处**
+   * 全是静默失效的 —— 主人点名的那几处淡色就是这么来的。
+   * 现在补齐，并且**每一档都指向一个已验证达标的标准变量**：
+   * 浅底上"越亮＝越看不见"，所以不玩花活，同一个语义就用同一个值。
+   * 守门＝`tests/themeContrast.test.ts` 的「用到的色类必须已定义」。
+   */
   --color-mist-100: var(--c-text);
+  --color-mist-200: var(--c-text-2);
   --color-mist-300: var(--c-text-2);
   --color-mist-400: var(--c-text-3);
   --color-mist-500: var(--c-muted);
+  --color-mist-600: var(--c-text-3);
 
+  /*
+   * 金 / 紫 / 红 / 绿各档位统一指向对应的语义色 ——
+   * 两套主题下都成立（浅底是深金、暗底是亮金，变量自己会切）。
+   */
+  --color-gold-100: var(--c-accent);
+  --color-gold-200: var(--c-accent);
+  --color-gold-300: var(--c-accent);
   --color-gold-400: var(--c-accent);
   --color-gold-500: var(--c-accent);
   --color-gold-600: var(--c-accent);
 
+  --color-arcane-300: var(--c-arcane);
   --color-arcane-400: var(--c-arcane);
   --color-arcane-600: var(--c-arcane);
+
+  --color-blood-300: var(--c-danger);
   --color-blood-400: var(--c-danger);
+  --color-blood-700: var(--c-danger);
+
   --color-moss-400: var(--c-success);
 
   --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-serif: 'Songti SC', 'Noto Serif SC', Georgia, serif;
 }
 
-/* 午夜 · 暗金（默认） */
+/*
+ * ── 羊皮纸（浅色 · 默认） ─────────────────────────────────────────────
+ */
 :root,
-:root[data-theme='midnight'] {
-  --c-bg: #0b0d11;
-  --c-surface: #0e1014;
-  --c-panel: #14171d;
-  --c-elevated: #191d25;
-  --c-border: #262c37;
-  --c-border-strong: #39414f;
-  --c-text: #eef1f7;
-  --c-text-2: #ccd4e2;
-  --c-text-3: #a9b3c6;
-  --c-muted: #8b94a8;
-  --c-accent: #c9a44c;
-  --c-arcane: #a99bfb;
-  --c-danger: #f0706f;
-  --c-success: #6cc98a;
-  color-scheme: dark;
-}
-
-/* 冷灰 · 无彩 */
-:root[data-theme='ash'] {
-  --c-bg: #0a0a0b;
-  --c-surface: #111113;
-  --c-panel: #17171a;
-  --c-elevated: #1f1f24;
-  --c-border: #2c2c33;
-  --c-border-strong: #41414a;
-  --c-text: #f1f1f4;
-  --c-text-2: #d0d0d8;
-  --c-text-3: #adadb8;
-  --c-muted: #8f8f9b;
-  --c-accent: #9cc2fa;
-  --c-arcane: #b6c2fd;
-  --c-danger: #fb8a8a;
-  --c-success: #86eeb2;
-  color-scheme: dark;
-}
-
-/* 羊皮纸 · 浅色 */
 :root[data-theme='parchment'] {
   --c-bg: #f2ece0;
   --c-surface: #faf7f0;
@@ -100,13 +121,75 @@
   --c-border-strong: #c9bda3;
   --c-text: #2b2620;
   --c-text-2: #574f43;
-  --c-text-3: #7a7062;
-  --c-muted: #948a7a;
-  --c-accent: #9a6b2f;
-  --c-arcane: #6d5ce0;
-  --c-danger: #b3403c;
-  --c-success: #3f7d4f;
+  --c-text-3: #665c4f;
+  --c-muted: #746a5e;
+  --c-accent: #7a5214;
+  --c-arcane: #543fc0;
+  --c-danger: #9e2f2b;
+  --c-success: #2a6336;
   color-scheme: light;
+
+  /*
+   * 纸感（阶段 1-2）：羊皮纸**专属**。
+   *
+   * ## 为什么是内联 SVG，不是位图贴图
+   * 计划里 1-2 原本写的是"AI 生成九宫格底纹"。改走这条路，三条理由：
+   * 1. **不增体积**：这串 data URI 只有几十字节；一张位图底纹几百 KB，手机端白付；
+   * 2. **无缝**：`stitchTiles='stitch'` 让噪声在平铺边界上接得上；
+   * 3. **可微调**：浓淡就是改 `opacity='0.04'` 这一个数字，不用重出图。
+   *
+   * ## ⚠️ 强度是**可读性**问题，不是口味问题
+   * 纸纹会轻微改变背景实际亮度，压到正文的对比度上。所以：
+   * **`opacity` 不许超过 0.06** —— 有断言钉着（`tests/themeContrast.test.ts`）。
+   * 觉得不够"纸"就往**暖色晕染**那层加，别去噪点那个数字上使劲。
+   *
+   * 两个容易踩的坑（都钉了断言）：
+   * - `stitchTiles='stitch'` 不加 → 平铺出**方格接缝**；
+   * - `feColorMatrix saturate=0` 不加 → feTurbulence 默认吐**彩色**噪点，
+   *   铺在米色纸上像撒了一层彩砂。
+   */
+  --paper-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23g)' opacity='0.04'/%3E%3C/svg%3E");
+  /*
+   * 暖色晕染：两团极淡的赭色，让纸面**不均匀**。
+   * 纯噪点看着像"脏"，加点不均匀才像"纸"。
+   */
+  --paper-wash:
+    radial-gradient(ellipse 70% 50% at 18% 8%, rgba(122, 82, 20, 0.035), transparent 70%),
+    radial-gradient(ellipse 60% 45% at 88% 92%, rgba(122, 82, 20, 0.028), transparent 70%);
+}
+
+/*
+ * ── 午夜（深色 ＝ 原「午夜 · 暗金」主干 + 「冷灰」的中性灰阶） ──────────
+ *
+ * 合并的取舍：
+ * - **底与灰阶**取「冷灰」的中性路线 —— 不带蓝调，长时间看不累；
+ * - **强调色**取「午夜 · 暗金」的 `#c9a44c` —— 那是这套主题的灵魂；
+ * - 紫 arcane / 红 danger / 绿 success 沿用「午夜 · 暗金」的亮色版（暗底上要亮才看得见）。
+ */
+:root[data-theme='midnight'] {
+  --c-bg: #0c0c0e;
+  --c-surface: #121214;
+  --c-panel: #18181b;
+  --c-elevated: #1f1f23;
+  --c-border: #2c2c32;
+  --c-border-strong: #41414a;
+  --c-text: #f0f0f3;
+  --c-text-2: #cfcfd6;
+  --c-text-3: #acacb6;
+  --c-muted: #8e8e99;
+  --c-accent: #c9a44c;
+  --c-arcane: #a99bfb;
+  --c-danger: #f0706f;
+  --c-success: #6cc98a;
+  color-scheme: dark;
+
+  /*
+   * 纸感是**羊皮纸专属**（它是"纸"，暗色不是）。
+   * 显式设为 none：不设的话会**继承**羊皮纸的值 ——
+   * 暗底上叠暖赭色晕染会非常怪。
+   */
+  --paper-grain: none;
+  --paper-wash: none;
 }
 
 html,
@@ -117,7 +200,13 @@ body,
 
 body {
   margin: 0;
-  background: var(--c-bg);
+  /*
+   * ⚠️ 这里必须是 `background-color`（**不是简写 `background`**）——
+   * 简写会把下面的 `background-image` 一起重置掉，纸纹就没了。
+   */
+  background-color: var(--c-bg);
+  background-image: var(--paper-wash), var(--paper-grain);
+  background-attachment: fixed;
   color: var(--c-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;

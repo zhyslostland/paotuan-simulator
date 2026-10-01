@@ -58,7 +58,8 @@ describe('成就：一次性、不刷、判据看并账之后的数', () => {
   it('第一局就解锁"开过一次团"', () => {
     const { unlocked, career } = recordRun(emptyCareer(), run());
     expect(unlocked.map((a) => a.id)).toContain('first_run');
-    expect(career.achievements.first_run).toBeTruthy();
+    // 🔴 真判据：成就**真的落进台账**（键存在），而不只是"这一次的解锁列表里有它"
+    expect(Object.keys(career.achievements)).toContain('first_run');
   });
 
   it('**同一局重复结算不会再解锁**、也不刷新时间（防刷）', () => {
@@ -135,7 +136,8 @@ describe('派生计算', () => {
 
   it('每种结局都有中文说法（界面上不能出现裸英文 key）', () => {
     for (const k of ['success', 'failure', 'death', 'insanity', 'grey', 'other'] as const) {
-      expect(OUTCOME_LABEL[k]).toBeTruthy();
+      // 🔴 真判据：界面上不能出现裸英文 key，所以必须是**中文**说法
+      expect(OUTCOME_LABEL[k], `${k} 没有中文说法`).toMatch(/[\u4e00-\u9fa5]/);
     }
   });
 });

@@ -761,3 +761,33 @@ describe('角色卡生成提示词（要把模组与自洽要求喂进去）', (
     expect(p).toContain('每一项都必须给 desc');
   });
 });
+
+/* ============================================================
+ * 🔴 `G6` / `G7`（协28 §F① 第 11 / 15 条）：正文残渣两道。
+ * ============================================================ */
+describe('G6：删完引号留下的空引用块（协28 §F① 第 11 条）', () => {
+  it('🔴 去掉引号内容后剩下的 `> ` 整行不留', () => {
+    const body = '老周抬起头。\n\n> “风要起来了”\n\n他转身走了。';
+    const out = dedupeNpcLines(body, [{ line: '风要起来了' }] as never);
+    expect(out).not.toMatch(/^[ \t]*>/m);
+    expect(out).toContain('他转身走了。');
+  });
+
+  it('`> ****`（加粗空壳）也一并去掉', () => {
+    const out = dedupeNpcLines('（空白）\n\n> ****\n\n继续。', []);
+    expect(out).not.toContain('****');
+    expect(out).toContain('继续。');
+  });
+});
+
+describe('G7：末尾的第二人称复述小结（协28 §F① 第 15 条）', () => {
+  it('🔴 分隔线 + 加粗小结挂在末尾 → 掐掉', () => {
+    const raw = '甲板上很冷。\n\n---\n\n**你推开门，看到甲板上没有人。**';
+    expect(stripMeta(raw)).toBe('甲板上很冷。');
+  });
+
+  it('正文中段的分隔线是分场，不许吃', () => {
+    const raw = '甲板上很冷。\n\n---\n\n雾里有个影子。';
+    expect(stripMeta(raw)).toBe(raw);
+  });
+});

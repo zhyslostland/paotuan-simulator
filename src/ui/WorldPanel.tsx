@@ -10,14 +10,16 @@ import {
   type StoryClock,
 } from '../core/clock.js';
 import { ImageField } from './ImageField';
+import { ICONS, type IconName } from './icons';
 import { checksOf } from './runSummary.js';
 import { playerLinesByRound } from './exportGame.js';
-import { INSANITY_TURNS_FLAG } from '../core/insanity.js';
+import { declaredStatusLines } from '../core/statusEffects.js';
 import { NpcCardModal, npcProfileOf, type NpcProfile } from './NpcCard';
 import { BestiaryPanel } from './Bestiary';
 import { AnchorList } from './EndingScreen';
 import { mapImagePrompt, sceneImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
+import { getRuleset } from '../core/rulesets/index.js';
 
 const INITIATIVE_LABEL: Record<string, string> = {
   reactive: '被动',
@@ -102,17 +104,36 @@ function CompanionCard({
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/**
+ * 世界面板里的一节（标题 + 内容）。
+ *
+ * `icon` 是可选的 —— 但**实际每一处都传了**：这些区块（场景 / 同行者 / 线索 / 检定记录…）
+ * 在一条长滚动里挨着，光靠小字标题容易看混，图标能帮忙扫。
+ * 图标是同一套手写 SVG（`ui/icons.tsx`），颜色跟随标题文字色。
+ */
+function Section({
+  title,
+  icon,
+  children,
+}: {
+  title: string;
+  icon?: IconName;
+  children: React.ReactNode;
+}) {
+  const Icon = icon ? ICONS[icon] : null;
   return (
     <section>
-      <h3 className="mb-2 text-[11px] tracking-wider text-mist-500">{title}</h3>
+      <h3 className="mb-2 flex items-center gap-1.5 text-[11px] tracking-wider text-mist-500">
+        {Icon && <Icon size={13} className="shrink-0" />}
+        {title}
+      </h3>
       {children}
     </section>
   );
 }
 
 function Empty({ text }: { text: string }) {
-  return <p className="text-[12px] text-mist-500/70">{text}</p>;
+  return <p className="text-[12px] text-mist-500">{text}</p>;
 }
 
 /**
@@ -140,13 +161,23 @@ function ActSection({
   const [revealed, setRevealed] = useState(false);
   const cur = actAt(acts, index);
   if (!cur) return null;
+  // `G5`：没有独立幕名时 `title` 就是摘要的前 10 字 —— 两行都渲染＝同一句话印两遍
+  const showTitle = cur.titled !== false && cur.title.trim().length > 0;
   return (
-    <Section title={`这一幕（第 ${index + 1} / ${acts.length} 幕）`}>
+    <Section icon="book" title={`这一幕（第 ${index + 1} / ${acts.length} 幕）`}>
       <div className="rounded-md border-l-2 border-arcane-400/60 bg-ink-850 px-2.5 py-1.5">
-        <span className="block text-[12px] text-mist-200">{cur.title}</span>
-        {cur.summary && (
-          <span className="mt-0.5 block text-[11px] leading-relaxed text-mist-500">
-            {cur.summary}
+        {showTitle ? (
+          <>
+            <span className="block text-[12px] text-mist-200">{cur.title}</span>
+            {cur.summary && (
+              <span className="mt-0.5 block text-[11px] leading-relaxed text-mist-500">
+                {cur.summary}
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="block text-[12px] leading-relaxed text-mist-200">
+            {cur.summary || cur.title}
           </span>
         )}
       </div>
@@ -155,7 +186,7 @@ function ActSection({
         revealed ? (
           <div className="mt-1.5 rounded-md border border-ink-700 bg-ink-900/70 px-2.5 py-2">
             <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="text-[10px] tracking-wider text-blood-300/90">
+              <span className="text-[10px] tracking-wider text-blood-300">
                 导演稿 · 给守密人看的，含剧透
               </span>
               {/*
@@ -236,7 +267,7 @@ function ClockSection({
               over ? 'text-blood-300' : urgent ? 'text-gold-300' : 'text-mist-400'
             }`}
           >
-            <span className="text-arcane-400/90">
+            <span className="text-arcane-400">
               {over ? '期限已到：' : '期限：'}
             </span>
             {deadline.label || '这件事'}
@@ -283,13 +314,13 @@ function GoalSection({
           <div className="mt-2 space-y-1.5 border-t border-gold-600/25 pt-2">
             {stakes && (
               <p className="text-[11px] leading-relaxed text-mist-400">
-                <span className="text-gold-500/80">赌注：</span>
+                <span className="text-gold-500">赌注：</span>
                 {stakes}
               </p>
             )}
             {urgency && (
               <p className="text-[11px] leading-relaxed text-mist-400">
-                <span className="text-gold-500/80">紧迫：</span>
+                <span className="text-gold-500">紧迫：</span>
                 {urgency}
               </p>
             )}
@@ -671,6 +702,7 @@ function MapSection({
   const streaming = useStore((s) => s.streaming);
   const setMapImage = useStore((s) => s.setMapImage);
   const genreId = useStore((s) => s.genreId);
+  const rulesetId = useStore((s) => s.rulesetId);
   const customGenres = useStore((s) => s.customGenres);
   const [showMap, setShowMap] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -754,13 +786,13 @@ function MapSection({
                 }`}
               >
                 {nd.name}
-                {isCurrent && <span className="ml-1 text-[9px] text-gold-500/80">你在这里</span>}
+                {isCurrent && <span className="ml-1 text-[9px] text-gold-500">你在这里</span>}
               </button>
             );
           })}
       </div>
 
-      <p className="mt-1.5 text-[10px] leading-relaxed text-mist-500/70">
+      <p className="mt-1.5 text-[10px] leading-relaxed text-mist-500">
         {hasLinks
           ? '连线表示走得通。拖动可平移，右上角加减缩放（按住 Ctrl 滚滚轮也行）。' +
             '实心地点的你去过，虚线的只是听说过。' +
@@ -801,6 +833,8 @@ export function WorldPanel({
   onRewind: (msgId: string) => void;
 }) {
   const gameState = useStore((s) => s.gameState);
+  // P3-8：判据要看规则包（它声明了哪些状态）
+  const rulesetId = useStore((s) => s.rulesetId);
   const snapshots = useStore((s) => s.snapshots);
   const chronicle = useStore((s) => s.chronicle);
   const summary = useStore((s) => s.summary);
@@ -836,19 +870,35 @@ export function WorldPanel({
    */
 
   /*
-   * 剧情标记是给玩家看的，只显示中文键名；模型漏填的英文 key 直接藏起来。
+   * H16 / H20：`<名字>轮数` 是**引擎自己记的账**，不是玩家的状态 ——
+   * 甩一句「疯狂轮数：2」「中毒轮数：2」等于让玩家自己拼"还剩几轮"。
+   * 以前这里只认字面 `INSANITY_TURNS_FLAG`，于是中毒那类照样漏出来（H20）。
+   * 现在统一走 `statusFlagLines()`：过滤**所有**「轮数」结尾的键，
+   * 与 `CharacterSheet` 的状态栏、与 `statusNote` 三处共用同一份判据。
    *
-   * H16：`疯狂轮数` 是**引擎自己记的账**，不是玩家的状态 ——
-   * 甩一句「疯狂轮数：2」等于让玩家自己拼"还剩几轮"。
-   * 判据与 `CharacterSheet` 的状态栏共用 `INSANITY_TURNS_FLAG`，别各写一份。
+   * 🔴 `P3-7`（协作方第 26 版）：这里**曾经多一层「只留含汉字的键」的过滤** ——
+   * 规则包给 `poisoned` / `bleeding` 这类 ASCII 状态名时，世界页**一条都不显**，
+   * 而角色卡照显 —— 同一状态两处一有一无，`H16·残留` 换个方向复发。
+   * 键名用什么语言是**写法**问题，不构成隐藏理由（`SEVERE_FLAG_TONE` 只影响配色）。
+   * 两侧必须同一份：这里不再自己加过滤。
+   */
+  /*
+   * 🔴 `P3-8`（主人 2026-09-28 拍板「按是不是状态过滤」）：这一份按**语义**过滤，不按语言。
+   *
+   * `P3-7` 撤掉「只留中文键」是对的，但那层过滤顺带还在挡"模型顺手写进 flags 的
+   * 非状态键"（`notes:`、`quest:` 这类）。判据＝声明过 / 有配对轮数 / 引擎自己写的 /
+   * 布尔真 —— 四条任一；规则包没有状态表时一律显示（安全阀，见 `statusEffects.ts`）。
+   *
+   * ⚠️ 角色卡状态栏**刻意不走这一份**：那里永远显示玩家的全部状态
+   * （早期痛点就是"流血状态界面不显示"，宁可多显示也不能藏）。
    */
   const flags = useMemo(
-    () =>
-      Object.entries(gameState.flags).filter(
-        ([k]) => /[\u4e00-\u9fa5]/.test(k) && k !== INSANITY_TURNS_FLAG
-      ),
-    [gameState.flags]
+    () => declaredStatusLines(gameState.flags, getRuleset(rulesetId)),
+    [gameState.flags, rulesetId]
   );
+
+
+
   const location = gameState.location?.trim();
 
   /* R14：幕结构。解析是纯函数，包在 useMemo 里（`parseActs` 每次返回新数组，不进选择器） */
@@ -976,7 +1026,7 @@ export function WorldPanel({
       )}
 
       {(gameState.threads ?? []).length > 0 && (
-        <Section title="进行中的线">
+        <Section icon="quest" title="进行中的线">
           <ul className="space-y-1.5">
             {(gameState.threads ?? []).map((t) => (
               <li
@@ -1009,7 +1059,7 @@ export function WorldPanel({
        * 结档页里能回溯，但平常也得有个入口——不然玩家只记得"某一步好像走错了"，
        * 却要在一百多条消息里翻。这里只列被标为关键的那几个岔路口。
        */}
-      <Section title={`关键抉择${anchors.length ? `（${anchors.length}）` : ''}`}>
+      <Section icon="warning" title={`关键抉择${anchors.length ? `（${anchors.length}）` : ''}`}>
         {anchors.length > 0 ? (
           <AnchorList anchors={anchors} onRewind={onRewind} />
         ) : (
@@ -1018,14 +1068,14 @@ export function WorldPanel({
       </Section>
 
       {module.premise && (
-        <Section title="剧情简介">
+        <Section icon="book" title="剧情简介">
           <p className="rounded-md border-l-2 border-ink-500 bg-ink-850/70 px-2.5 py-2 text-[12px] leading-relaxed text-mist-400">
             {module.premise}
           </p>
         </Section>
       )}
 
-      <Section title="场景">
+      <Section icon="location" title="场景">
         {location ? (
           <ImageField
             label={location}
@@ -1045,7 +1095,7 @@ export function WorldPanel({
       </Section>
 
       {gameState.companions.length > 0 && (
-        <Section title="同行者">
+        <Section icon="companions" title="同行者">
           <div className="space-y-1.5">
             {gameState.companions.map((c) => (
               <CompanionCard
@@ -1063,13 +1113,13 @@ export function WorldPanel({
               />
             ))}
           </div>
-          <p className="mt-2 text-[10px] leading-relaxed text-mist-500/70">
+          <p className="mt-2 text-[10px] leading-relaxed text-mist-500">
             点击队友可在输入框中唤起 TA
           </p>
         </Section>
       )}
 
-      <Section title="在地人物">
+      <Section icon="profile" title="在地人物">
         <ul className="space-y-1">
           <li className="rounded-md border-l-2 border-gold-600/60 bg-ink-850 px-2.5 py-1.5 text-[12px] text-mist-300">
             {character.name}（你）
@@ -1095,12 +1145,12 @@ export function WorldPanel({
             </li>
           ))}
         </ul>
-        <p className="mt-2 text-[10px] leading-relaxed text-mist-500/70">
+        <p className="mt-2 text-[10px] leading-relaxed text-mist-500">
           点击人物可看他是什么人
         </p>
       </Section>
 
-      <Section title="线索">
+      <Section icon="clue" title="线索">
         {gameState.clues.length === 0 ? (
           <Empty text="尚未发现任何线索" />
         ) : (
@@ -1120,7 +1170,7 @@ export function WorldPanel({
       {/* 图鉴（R38）。模组没设敌对者表时 BestiaryPanel 自己 return null，不会占位 */}
       <BestiaryPanel />
 
-      <Section title="检定记录">
+      <Section icon="dice" title="检定记录">
         {(() => {
           /*
            * P2-1：读 `checksOf(m)` 而不是只读 `m.check`。
@@ -1150,12 +1200,12 @@ export function WorldPanel({
         })()}
       </Section>
 
-      <Section title="剧情标记">
+      <Section icon="quest" title="剧情标记">
         {flags.length === 0 ? (
           <Empty text="无" />
         ) : (
           <ul className="space-y-1">
-            {flags.map(([key, value]) => {
+            {flags.map(({ key, text, severe }) => {
               /*
                * H16·残留（协作方第 23 版）：同一状态不许两种说法。
                *
@@ -1172,16 +1222,15 @@ export function WorldPanel({
                   key={key}
                   className="flex items-center justify-between rounded-md bg-ink-850 px-2.5 py-1.5"
                 >
+                  {/* H20：`text` 已经是"拼好轮数的人话"，布尔状态不会露出 `true` */}
                   <span className="font-mono text-[11px] text-mist-400">
-                    {mad ? insanity().label : key}
+                    {mad ? insanity().label : text}
                   </span>
                   {!mad && (
                     <span
-                      className={`text-[11px] ${
-                        value ? 'text-moss-400' : 'text-mist-500'
-                      }`}
+                      className={`text-[11px] ${severe ? 'text-moss-400' : 'text-mist-500'}`}
                     >
-                      {String(value)}
+                      {severe ? '生效中' : '已记下'}
                     </span>
                   )}
                 </li>
@@ -1191,7 +1240,7 @@ export function WorldPanel({
         )}
       </Section>
 
-      <Section title={`编年史${chronicle.length ? `（${chronicle.length}）` : ''}`}>
+      <Section icon="book" title={`编年史${chronicle.length ? `（${chronicle.length}）` : ''}`}>
         {summary && (
           <div className="mb-2.5 rounded-md border-l-2 border-ink-500 bg-ink-850/70 px-2.5 py-2">
             <div className="mb-0.5 text-[10px] tracking-wider text-mist-500">
@@ -1211,13 +1260,13 @@ export function WorldPanel({
                 </span>
                 <div className="min-w-0 flex-1 border-l border-ink-700 pl-2.5">
                   {saidByTurn.get(c.turn) && (
-                    <p className="mb-1 border-l-2 border-gold-600/50 pl-2 text-[11px] leading-relaxed text-gold-400/85">
+                    <p className="mb-1 border-l-2 border-gold-600/50 pl-2 text-[11px] leading-relaxed text-gold-400">
                       我说：{saidByTurn.get(c.turn)}
                     </p>
                   )}
                   <p className="text-[12px] leading-relaxed text-mist-300">{c.text}</p>
                   {c.location && (
-                    <p className="mt-0.5 text-[10px] text-mist-500/70">{c.location}</p>
+                    <p className="mt-0.5 text-[10px] text-mist-500">{c.location}</p>
                   )}
                 </div>
               </li>

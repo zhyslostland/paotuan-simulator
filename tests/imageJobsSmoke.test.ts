@@ -12,32 +12,11 @@
  * （队列本来就是从那儿读回来的），再 `vi.resetModules()` 重新加载一次。
  */
 import { describe, expect, it, vi } from 'vitest';
+import { MemStorage } from './setup.js';
 
-class MemStorage {
-  private m = new Map<string, string>();
-  getItem(k: string) {
-    return this.m.has(k) ? this.m.get(k)! : null;
-  }
-  setItem(k: string, v: string) {
-    this.m.set(k, String(v));
-  }
-  removeItem(k: string) {
-    this.m.delete(k);
-  }
-  clear() {
-    this.m.clear();
-  }
-  get length() {
-    return this.m.size;
-  }
-  key(i: number) {
-    return [...this.m.keys()][i] ?? null;
-  }
-}
 
 const storage = new MemStorage();
 vi.stubGlobal('localStorage', storage);
-vi.stubGlobal('indexedDB', undefined);
 vi.mock('virtual:pwa-register', () => ({ registerSW: () => () => {} }));
 
 const { createElement } = await import('react');

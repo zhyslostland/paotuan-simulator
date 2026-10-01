@@ -167,10 +167,39 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     target: 'es2022',
+    rollupOptions: {
+      output: {
+        /**
+         * **第三方库单独成块**（2026-09-30 架构体检 §3 · S5）。
+         *
+         * 体检实测：入口 chunk **817 KB**，构建器自己都在警告「some chunks are larger than 500 kB」。
+         * 拆开的好处有两条，第二条才是真正在意的：
+         * 1. 首屏并行拉两块，比一块 800 KB 略快；
+         * 2. **改业务代码不再让玩家重下整个 React** —— 现在入口 chunk 的 hash 里混着 react-dom，
+         *    每次改一行玩法，PWA 的 precache 就得重下整包（这是手机上"更新很慢"的来源之一）。
+         *
+         * 拆法：`node_modules` 一律进 `vendor`——包名可能随依赖树变，硬编码名单会漂。
+         * 模块 id 里带 `node_modules` 是最稳的判据（Windows 上可能是正斜杠也可能是反斜杠）。
+         */
+        advancedChunks: {
+          groups: [{ name: 'vendor', test: /node_modules[\\/]/ }],
+        },
+      },
+    },
   },
   // 云端托管用 `vite preview` 起服务；preview 也要同样的 host 放行，否则点开链接是 403
   preview: {
     host: true,
     allowedHosts: true,
+  },
+  /**
+   * 测试配置（2026-09-30 基础完善 · 批次 C）。
+   *
+   * `setupFiles` 里装内存版 `localStorage` —— 必须在**测试文件 import store 之前**就位，
+   * 因为 `ui/store.ts` / `ui/state/loaders.ts` 在模块加载时就会读盘。
+   * 以前 9 个测试文件各自复制一份桩，现在是**一处**（`tests/setup.ts`）。
+   */
+  test: {
+    setupFiles: ['tests/setup.ts'],
   },
 });

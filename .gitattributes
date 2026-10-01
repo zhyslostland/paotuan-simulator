@@ -1,0 +1,20 @@
+# 行尾：**全仓库一律 LF**（协作方 E4）
+#
+# 为什么要有这个文件：本机 `core.autocrlf=true`（Windows 上检出成 CRLF），
+# 而仓库里存的一直是 LF —— 同一份代码"磁盘上"和"仓库里"行尾不一样。
+# 于是拿两份代码包直接 diff 时，整个文件都会被判成改动过（20 来个文件），
+# 真正的改动被行尾噪声盖住，`--strip-trailing-cr` 才看得清。
+# 这里把行尾钉死：检出也是 LF，磁盘与仓库一致。
+
+* text=auto eol=lf
+
+# 二进制不参与换行转换（text=auto 通常能自己认出来，显式钉死更保险）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary

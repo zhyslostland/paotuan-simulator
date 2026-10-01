@@ -29,6 +29,7 @@ import {
   parseElapsed,
   phaseOf,
   tickClock,
+  waitTargetMinutes,
 } from '../src/core/clock.js';
 
 describe('normalizeClock / 时刻规整', () => {
@@ -268,5 +269,73 @@ describe('tickClock / 一次推进做三件事', () => {
     expect(r.elapsedMinutes).toBe(5);
     expect(r.clock.minute).toBe(9 * 60 + 5);
     expect(r.deadline!.remain).toBe(995);
+  });
+});
+
+
+/* ============================================================
+ * 🔴 `G17`（协28 §F① 第 8 条）：玩家说「我等到 X」时，**引擎给一个时钟下限**。
+ * 以前完全没有落点 —— 时钟走多少全看守密人填的 `elapsed`，
+ * 于是"等到"这个动作在引擎侧等于不存在。
+ * ============================================================ */
+describe('G17：等到某个时刻 → 时钟下限', () => {
+  it('「等到午夜」：那个点已经过了就顺延到之后', () => {
+    // 基准与 absoluteMinutes 同一套（第 1 天 00:00 = 0）：09:00 = 540 → 今天的 0 点已过
+    // → 顺延到「第 2 天 00:00」= 1440
+    expect(waitTargetMinutes('我在钟楼里等到午夜。', { day: 1, minute: 9 * 60 })).toBe(1440);
+  });
+
+  it('「睡到天亮」：按当天凌晨 5 点算', () => {
+    // 第 1 天 23:00 = 1380；天亮 = 300（已过）→ 顺延到第二天 05:00 = 1740
+    expect(waitTargetMinutes('我睡到天亮再说。', { day: 1, minute: 23 * 60 })).toBe(1740);
+  });
+
+  it('没有"等"的意思就不认（叙事里出现"午夜"不算）', () => {
+    expect(waitTargetMinutes('午夜的海面很平静。', { day: 1, minute: 9 * 60 })).toBeNull();
+  });
+
+  it('认不出时刻词也不认（宁可交给模型）', () => {
+    expect(waitTargetMinutes('我一直等到他回来。', { day: 1, minute: 9 * 60 })).toBeNull();
+  });
+
+  it('🔴 tickClock 带下限：只抬不压', () => {
+    const raised = tickClock({ day: 1, minute: 9 * 60 }, null, '一会儿', { floorMinutes: 1440 });
+    expect(raised.clock.day).toBe(2);
+    expect(raised.clock.minute).toBe(0);
+    // 模型报的更久 → 照它的（下限不反过来把时间压短）
+    const kept = tickClock({ day: 1, minute: 9 * 60 }, null, '一整天', { floorMinutes: 1440 });
+    expect(kept.clock.day).toBe(2);
+    expect(kept.clock.minute).toBe(9 * 60);
+  });
+});
+
+/* ============================================================
+ * 🔴 `G17` 的另一半（协30 §2.4）：玩家申报的目标时刻**既是下限也是上限**。
+ *
+ * 真机：15:00 说等到傍晚六点，下限算对了，但模型报的 `elapsed` 更久就照它的 ——
+ * 时钟一路走到**次日 14:30**（+23.5 小时），而叙事只过了 1～3 小时。
+ * 玩家说"我等到六点"，他就该在六点。
+ * ============================================================ */
+describe('G17：等到 X ＝ 上下限（不许提前，也不许冲过头）', () => {
+  // 第 1 天 15:00 = 900；目标 18:00 = 1080
+  const at = { day: 1, minute: 15 * 60 };
+  const target = 18 * 60;
+
+  it('🔴 模型报的 `elapsed` 更久 → 压到目标时刻（不再冲到次日）', () => {
+    const r = tickClock(at, null, '一整夜', { floorMinutes: target, capMinutes: target });
+    expect(r.clock.day).toBe(1);
+    expect(r.clock.minute).toBe(18 * 60);
+  });
+
+  it('模型报得更短 → 抬到目标（下限那一半仍在）', () => {
+    const r = tickClock(at, null, '一会儿', { floorMinutes: target, capMinutes: target });
+    expect(r.clock.day).toBe(1);
+    expect(r.clock.minute).toBe(18 * 60);
+  });
+
+  it('没申报目标时刻（只有 elapsed）→ 维持"只抬不压"的老口径', () => {
+    const r = tickClock(at, null, '三个小时');
+    expect(r.clock.day).toBe(1);
+    expect(r.clock.minute).toBe(18 * 60); // 15:00 + 3h
   });
 });

@@ -23,7 +23,7 @@
  */
 
 /** 当前版本。改动玩家能感知的东西就往上走一位。 */
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.8.0';
 
 /**
  * 构建号（构建时由 vite 注入的那串时间戳）。

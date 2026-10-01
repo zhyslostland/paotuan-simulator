@@ -12,30 +12,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
-class MemStorage {
-  private m = new Map<string, string>();
-  getItem(k: string) {
-    return this.m.has(k) ? this.m.get(k)! : null;
-  }
-  setItem(k: string, v: string) {
-    this.m.set(k, String(v));
-  }
-  removeItem(k: string) {
-    this.m.delete(k);
-  }
-  clear() {
-    this.m.clear();
-  }
-  get length() {
-    return this.m.size;
-  }
-  key(i: number) {
-    return [...this.m.keys()][i] ?? null;
-  }
-}
 
-vi.stubGlobal('localStorage', new MemStorage());
-vi.stubGlobal('indexedDB', undefined);
 
 // 与设置页同一条：图里可能有 `virtual:pwa-register`，node 测试里挡掉
 vi.mock('virtual:pwa-register', () => ({
@@ -45,7 +22,9 @@ vi.mock('virtual:pwa-register', () => ({
 const { createElement } = await import('react');
 // 用 browser 版：node 版在本机 Node 22 下会因相对路径读自身文件而抛错（见设置页冒烟）
 const { renderToString } = await import('react-dom/server.browser');
-const { Preparation } = await import('../src/ui/Preparation.js');
+const { Preparation, modulePackPartialNote, modulePackStoppedNote } = await import(
+  '../src/ui/Preparation.js'
+);
 
 const noop = () => {};
 
@@ -161,5 +140,42 @@ describe('准备页能被画出来（冒烟）', () => {
     expect(html.indexOf('投入战斗')).toBeGreaterThan(0);
     // 且是遮罩外那一块专属的说明文字
     expect(html).toContain('这里只给操作、不给名字与数值');
+  });
+});
+
+/*
+ * 🔴 `H23`（协28 §F① 第 19 条 · 协29 补裁）：模组包是**两通**，
+ * 界面不许在第一通落盘时就说"已生成"。
+ *
+ * 真机：第一通出骨架（约 80 秒）→ 界面报「已生成，记得检查并微调」，
+ * 而第二通（世界书 + 队友）还在跑、失败还静默 —— 玩家的印象是
+ * "已生成，但世界书是空的、同行者没生成"。
+ *
+ * 这里钉的是**语义**：第二通没成时，那句话里**不许出现"已生成"**，
+ * 而且必须点名是谁没生成上、并告诉他下一步能做什么。
+ */
+describe('H23：模组包第二通没成时，不许说"已生成"', () => {
+  it('🔴 第二通失败 → 明说世界书/队友没生成上，并给下一步', () => {
+    const note = modulePackPartialNote('模型返回的不是合法 JSON');
+    expect(note).toContain('模组已好'); // 骨架确实在，先说清楚
+    expect(note).toContain('世界书');
+    expect(note).toContain('队友');
+    expect(note).toContain('模型返回的不是合法 JSON'); // 原因要带上，别吞
+    expect(note).toContain('再点一次');
+    // 最要紧的一条：不许出现那句"全好了"
+    expect(note).not.toContain('已生成，记得检查并微调');
+  });
+
+  it('没带原因时也不许空口（仍然说明是谁没成）', () => {
+    const note = modulePackPartialNote();
+    expect(note).toContain('世界书');
+    expect(note).not.toContain('已生成，记得检查并微调');
+  });
+
+  it('被停下（超时 / 点停止）与"失败"分开说 —— 免得像坏了', () => {
+    const stopped = modulePackStoppedNote();
+    expect(stopped).toContain('停下了');
+    expect(stopped).toContain('模组已好');
+    expect(stopped).not.toContain('已生成，记得检查并微调');
   });
 });

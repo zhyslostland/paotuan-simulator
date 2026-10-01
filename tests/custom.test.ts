@@ -5,6 +5,7 @@ import {
   listRulesets,
   registerCustomRuleset,
   unregisterCustomRuleset,
+  registerCustomRulesetsFrom,
   parseStatusLines,
   parseWeaponLines,
 } from '../src/core/rulesets/index.js';
@@ -166,5 +167,49 @@ describe('自建规则包的注销', () => {
     unregisterCustomRuleset(cfg.id);
     expect(() => listRulesets().find((r) => r.id === cfg.id)).not.toThrow();
     expect(listRulesets().find((r) => r.id === cfg.id)).toBeUndefined();
+  });
+});
+
+/**
+ * 🔴 **边界迁移的断言（2026-09-30 架构体检 · 阶段 1）**
+ *
+ * 原来 `loadCustomRulesets()` 自己住在 `core/rulesets/index.ts` 里、自己读 `localStorage`
+ * —— 而同一个文件第 45 行还写着「core 不许有 IO」。铁律只写在注释里，编译器看不见，
+ * 于是它一直这么活着（体检报告 §3 · S4）。
+ *
+ * 现在拆成两半：**UI 层读盘**（`readLocal('trpg.customRulesets')`），
+ * **core 只做纯注册**（`registerCustomRulesetsFrom(raw)`）。
+ * 这一组断言把新的接缝钉住：读盘那一半必须在 UI，core 这半必须能脱离浏览器跑。
+ */
+describe('自定义规则包：读盘在 UI 层，core 只做纯注册（边界迁移的钉子）', () => {
+  const ping = {
+    id: 'custom-boundary',
+    name: '边界测试包',
+    mainDice: '1d100',
+    mode: 'under' as const,
+    characteristics: [{ key: '力量', label: '力量', default: 50 }],
+    skills: [{ name: '侦查', base: 20 }],
+    vitals: [{ key: '生命', label: '生命', default: 12 }],
+  };
+
+  it('喂一段原始 JSON 串就能注册（core 不需要 localStorage）', () => {
+    registerCustomRulesetsFrom(JSON.stringify([ping]));
+    expect(listRulesets().some((r) => r.id === ping.id)).toBe(true);
+    unregisterCustomRuleset(ping.id);
+  });
+
+  it('null / 空串 / 坏 JSON / 非法条目：一律安静跳过，不抛', () => {
+    expect(() => registerCustomRulesetsFrom(null)).not.toThrow();
+    expect(() => registerCustomRulesetsFrom('')).not.toThrow();
+    expect(() => registerCustomRulesetsFrom('{不是 JSON')).not.toThrow();
+    expect(() => registerCustomRulesetsFrom(JSON.stringify([{ nope: 1 }, null, 42]))).not.toThrow();
+    // 坏数据不许在注册表里留下半个条目
+    expect(listRulesets().some((r) => r.id === 'custom-boundary')).toBe(false);
+  });
+
+  it('坏条目夹在好条目中间时，好的照样注册（一条坏的别把整份名单带走）', () => {
+    registerCustomRulesetsFrom(JSON.stringify([{ nope: 1 }, ping]));
+    expect(listRulesets().some((r) => r.id === ping.id)).toBe(true);
+    unregisterCustomRuleset(ping.id);
   });
 });

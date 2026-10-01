@@ -238,3 +238,42 @@ export function skillBudget(
   }
   return { total, spent, remaining: total - spent };
 }
+
+/**
+ * `G10` + `G22`（协30 §2.5）：**AI 生成的技能表在落盘前按预算封顶**。
+ *
+ * ## 病在哪
+ * 手工加点走 `setSkillValue` 的 `skillBudget` 封顶，**AI 生成那条路没有走**——
+ * 真机生成出来的是「已用 333 / 剩余 −23」（预算 310）。与 `P2-10` / `G1` 同一类坑：
+ * **写了约束 ≠ 引擎在执行**（v1.7.9 只加了提示词"用尽但绝不超支"）。
+ *
+ * ## 怎么削
+ * 投入点数（值 − 该技能在规则包里的基础值）**从多到少**依次削，削到不超为止；
+ * 最多把某一项削回它的基础值（不会把它削到基础值以下 —— 那等于改了这张卡的设定）。
+ * 已经在预算内的原样返回（不动一个字）。
+ */
+export function capSkillsToBudget(
+  skills: Record<string, number>,
+  characteristics: Record<string, number>,
+  rulesetId: string
+): Record<string, number> {
+  const rs = getRuleset(rulesetId);
+  const total = skillBudget({ characteristics, skills }, rulesetId).total;
+  const baseMap = new Map(rs.skillCatalog.map((s) => [s.name, s.base]));
+  const rows = Object.entries(skills).map(([name, value]) => {
+    const base = baseMap.get(canonicalSkillName(name, rs)) ?? 0;
+    return { name, value, spent: Math.max(0, value - base) };
+  });
+  let over = rows.reduce((sum, r) => sum + r.spent, 0) - total;
+  if (over <= 0) return skills;
+
+  const out: Record<string, number> = { ...skills };
+  for (const r of [...rows].sort((a, b) => b.spent - a.spent)) {
+    if (over <= 0) break;
+    if (r.spent <= 0) continue;
+    const cut = Math.min(r.spent, over);
+    out[r.name] = r.value - cut;
+    over -= cut;
+  }
+  return out;
+}

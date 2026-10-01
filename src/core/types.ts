@@ -9,6 +9,8 @@
  * `ui/store.ts` 仍把这些名字 re-export 出去，**调用点一行都不用改**。
  */
 import type { Companion, GameState } from './state/gameState.js';
+// clock.ts 不依赖 types.ts，所以这里 import 它不会成环
+import type { StoryClock } from './clock.js';
 
 /**
  * 模组篇幅（短篇 / 中篇 / 长篇）。
@@ -194,6 +196,16 @@ export interface CharacterProfile {
   mes_example: string;
   /** 开局处境：开局时人在何处、正在做什么（V2 字段；也用作开局地点的兜底） */
   scenario?: string;
+  /**
+   * 外貌锚点：只写长相（发型发色、眼神、衣着、一眼能记住的特征），供**生图**用。
+   *
+   * 为什么要从 `description` 里单独拆一个字段：`description` 里混着身份与来历
+   * （"曾是战地记者"这类进不了画面），而队友以前连这段都没有 ——
+   * 拆出来之后"画什么脸"有唯一一处说法（见 `core/appearance.ts`）。
+   *
+   * 可选字段：没有它时生图按老样子兜底，所以**不升 `SAVE_VERSION`**。
+   */
+  appearance?: string;
 
   // —— 数值层（规则驱动）——
   /** 属性，键由规则包的 characteristicDefs 决定（COC 是 str/con/…） */
@@ -278,6 +290,22 @@ export interface Module {
   stakes?: string;
   /** 紧迫感：为什么是现在，不能再等（推着玩家往前走，避免站着聊半天） */
   urgency?: string;
+  /**
+   * 开局时刻（1.0 阶段 C 补的第四块，P2-10）。
+   *
+   * 兑现 `core/clock.ts` 头注释里**承诺了但从没实现**的那条：
+   * 「模组可以给 `clock.start`（故事从哪天几点开始），引擎只负责往前走」。
+   * 留空则退回 `DEFAULT_CLOCK`（第 1 天上午九点）—— 老模组不受影响。
+   */
+  startClock?: StoryClock;
+  /**
+   * 期限还剩多久（P2-10）：分钟数。
+   *
+   * ⚠️ **不解析 `urgency` 或 `opening` 的文本去猜日期** ——
+   * `clock.ts` 自己写着"猜日期必错"。这里给的是**模组显式申报**的期限，
+   * 申报了就用它，没申报才退回现有的正则（老模组兼容）。
+   */
+  deadlineIn?: number;
   /** 来源说明：这张卡是"按原版还原"还是"AI 自创"（生成时由模型诚实标注） */
   sourceNote?: string;
   /** 题材标签（内置模组用）：决定"选了某题材时，哪些模组最合适" */
@@ -343,7 +371,20 @@ export interface ModuleItem {
   effect?: string;
   kind?: 'weapon' | 'tool' | 'clue' | 'consumable' | 'other';
 }
-export type ThemeName = 'midnight' | 'ash' | 'parchment';
+/**
+ * 主题名。
+ *
+ * ⚠️ 2026-09-25 主人定：**只留羊皮纸一套**。
+ * ⚠️ **2026-09-26 主人重申口径，我上一轮读错了**：
+ * 「羊皮纸是改进字体…另外两套是优化合并成一套，所以最终主题还是**两套**，简单加法」。
+ * 我曾把这句读成"只留羊皮纸"并把两套删了 —— 已恢复。
+ *
+ * 现在 = **羊皮纸（浅，默认）** + **午夜（深 ＝ 原「午夜 · 暗金」主干 +「冷灰」灰阶）**。
+ *
+ * 保留成联合类型是为了：以后加主题时，**改这一行 + `theme.css` 加一段**就能接上，
+ * 其余代码（`loadTheme` / `setTheme` / `App.tsx` 的 `data-theme`）不用动。
+ */
+export type ThemeName = 'midnight' | 'parchment';
 /** 正文排版设置 */
 export interface Typography {
   /** 正文缩放（0.9 – 1.4） */

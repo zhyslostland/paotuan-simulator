@@ -40,7 +40,14 @@ tracked = [l.strip() for l in out.stdout.splitlines() if l.strip()]
 genie = []
 
 # 仓库根的构建产物（.gitignore 忽略的那些）—— 确保绝不进包
-BANNED_PREFIX = ("assets/", "dist/", "node_modules/", ".git/", ".workbuddy/")
+# 🔴 **大体积资产不进包**（2026-09-26）：
+#    `generated-images/` 是**画风比对用的平台生图**（5 张 ≈ 7 MB，占全仓体积七成）。
+#    ① 它们**带水印、不可作正式资产**（见 `美术制作计划.md` 的「阶段 0-1 实测结论」）；
+#    ② 协作方要的是**代码与文档**，比图的结论已经写进 `美术制作计划.md` 的文字里，不必再给原图；
+#    ③ 不排除的话包必定 8 MB，超出 2 MB 的约定上限。
+#    ⚠️ 改这里要同步改 `scripts/audit-pack.py` 的 BANNED_PREFIX —— 两边口径不一致，对账会报「漏」。
+BANNED_PREFIX = ("assets/", "dist/", "node_modules/", ".git/", ".workbuddy/",
+                 "generated-images/")
 BANNED_EXACT = {"index.html", "version.json", "sw.js", "sw-v2.js",
                 "manifest.webmanifest", "icon.svg", "entry-redirect.js"}
 # 📌 **文档一律打进包**（2026-09-20 主人定，推翻当天早些时候"协作清单不打"那条）：

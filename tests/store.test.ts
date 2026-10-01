@@ -1,32 +1,12 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getRuleset } from '../src/core/rulesets/index.js';
 import { getGenre, type Genre } from '../src/core/genres.js';
+import { MemStorage } from './setup.js';
 
 /**
  * 回溯/重掷依赖 localStorage。node 环境没有它，这里放一个最小桩，
  * 必须在 import store 之前装好——store 在模块加载时就会读盘。
  */
-class MemStorage {
-  private m = new Map<string, string>();
-  getItem(k: string) {
-    return this.m.has(k) ? this.m.get(k)! : null;
-  }
-  setItem(k: string, v: string) {
-    this.m.set(k, String(v));
-  }
-  removeItem(k: string) {
-    this.m.delete(k);
-  }
-  clear() {
-    this.m.clear();
-  }
-  key(i: number) {
-    return [...this.m.keys()][i] ?? null;
-  }
-  get length() {
-    return this.m.size;
-  }
-}
 
 let store: typeof import('../src/ui/store.js').useStore;
 let deriveAddress: typeof import('../src/ui/store.js').deriveAddress;
@@ -55,14 +35,56 @@ let openingText: typeof import('../src/ui/store.js').openingText;
 let starterSkillsFor: typeof import('../src/ui/store.js').starterSkillsFor;
 let characteristicBudget: typeof import('../src/ui/store.js').characteristicBudget;
 let loadGameState: typeof import('../src/ui/state/loaders.js').loadGameState;
-let INSANITY_TURNS_FLAG: typeof import('../src/core/insanity.js').INSANITY_TURNS_FLAG;
+/*
+ * `P4-4`：这里以前 import 的是 `INSANITY_TURNS_FLAG` 这个**死常量**（src 里没人用它），
+ * 断言也只是"常量等于那个字面值"—— 同义反复，什么都没守住。
+ * 现在断的是真正的那条链：**引擎写进去的键，必须被状态过滤认出来**。
+ */
+let turnsKeyOf: typeof import('../src/core/statusEffects.js').turnsKeyOf;
+let isTurnsKey: typeof import('../src/core/statusEffects.js').isTurnsKey;
+let statusFlagLines: typeof import('../src/core/statusEffects.js').statusFlagLines;
+let resetStatusTickForTest: typeof import('../src/ui/store.js').resetStatusTickForTest;
+let resetCheckGrantForTest: typeof import('../src/ui/store.js').resetCheckGrantForTest;
+let capSkillsToBudget: typeof import('../src/core/skills.js').capSkillsToBudget;
+let migrateCharacter: typeof import('../src/ui/state/loaders.js').migrateCharacter;
+
+/**
+ * 🔴 `G25`（协28 §F① 第 6b 条 · 主人 2026-09-29「**动我属性都要检定的**」）：
+ * **要动玩家属性，得先真的掷过一次检定。**
+ *
+ * 下面若干组用例验的是"血归零 / 疯狂 / 伤口"这条**下游行为**，不是闸门本身 ——
+ * 所以先给它们一张通行证。闸门自己的判据在 `state.test.ts`（核心层）与
+ * `statusEffects.test.ts`（接线层），那两处才是"没掷就该拒"的地方。
+ */
+const grantHarmCheck = () => {
+  const spy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+  store.getState().skillCheck('格斗（斗殴）');
+  spy.mockRestore();
+};
+
+/**
+ * 🔴 `N2`（协30 §2.3）之后，"一轮"由**玩家行动**定义（不再是"调一次 `applyModelDeltas`"）。
+ * 下面这几组用例原本靠"调一次"当一轮 —— 现在得真的落一条玩家消息，引擎才认这一轮。
+ * 与 `grantHarmCheck` 一样，这是**前提**，不是被测的东西。
+ */
+const actThen = (deltas: unknown[] = []) => {
+  store.getState().addMessage({ role: 'player', content: '我继续行动。' });
+  return store.getState().applyModelDeltas(deltas as never);
+};
+
 
 beforeAll(async () => {
-  vi.stubGlobal('localStorage', new MemStorage());
   const mod = await import('../src/ui/store.js');
   loadGameState = (await import('../src/ui/state/loaders.js')).loadGameState;
-  INSANITY_TURNS_FLAG = (await import('../src/core/insanity.js')).INSANITY_TURNS_FLAG;
+  migrateCharacter = (await import('../src/ui/state/loaders.js')).migrateCharacter;
+  const se = await import('../src/core/statusEffects.js');
+  turnsKeyOf = se.turnsKeyOf;
+  isTurnsKey = se.isTurnsKey;
+  statusFlagLines = se.statusFlagLines;
   store = mod.useStore;
+  resetStatusTickForTest = mod.resetStatusTickForTest;
+  resetCheckGrantForTest = mod.resetCheckGrantForTest;
+  capSkillsToBudget = (await import('../src/core/skills.js')).capSkillsToBudget;
   deriveAddress = mod.deriveAddress;
   addressOf = mod.addressOf;
   mergeCharacter = mod.mergeCharacter;
@@ -108,6 +130,30 @@ const setSan = (v: number) =>
       vitals: { ...store.getState().gameState.vitals, san: v },
     },
   });
+
+/**
+ * 🔴 **可见降级通道**（2026-09-30 加）。
+ *
+ * 起因：`App.tsx` 的纠正回路用尽后，正文照给（玩家不能空等），但若它仍推翻玩家操作，
+ * 必须让玩家知道 —— 原来 `uiNotice` 只有**内部写**（生图那四处 `set({uiNotice})`），
+ * 别的模块想说一句人话只能 `useStore.setState(...)`（绕过 store 的暗门）。
+ * 现在补成正式 action：`notify` 写、`takeNotice` 取。
+ */
+describe('给玩家的一句话：notify / takeNotice', () => {
+  it('notify 写进去，takeNotice 取走并清空（取完即清，不重复弹）', () => {
+    store.getState().notify('这一段可能在替你改剧情，可以点「回溯」退回这一步。');
+    expect(store.getState().uiNotice).toContain('回溯');
+    expect(store.getState().takeNotice()).toBeUndefined(); // action 返回 void
+    expect(store.getState().uiNotice).toBeNull();
+    expect(store.getState().takeNotice()).toBeUndefined();
+  });
+
+  it('空串也能写（由调用方决定要不要给玩家看）—— 但取走后必须回到 null', () => {
+    store.getState().notify('');
+    store.getState().takeNotice();
+    expect(store.getState().uiNotice).toBeNull();
+  });
+});
 
 describe('回合快照与回溯', () => {
   it('回溯会恢复当时的状态，并截断其后所有消息', () => {
@@ -726,8 +772,9 @@ describe('示例角色', () => {
   it('经典克苏鲁与剑与魔法各有一份，且都带姓名与描述', () => {
     for (const id of ['coc', 'fantasy']) {
       const c = starterCharacterOf(id);
-      expect(c?.name).toBeTruthy();
-      expect(c?.description).toBeTruthy();
+      // 🔴 真判据：不是"有值就行"，是**真的填了非空白的文字**（挡住 `" "` / 空串）
+      expect(c?.name, `${id} 的示例角色没名字`).toMatch(/\S/);
+      expect(c?.description, `${id} 的示例角色没描述`).toMatch(/\S/);
     }
   });
 
@@ -1047,22 +1094,26 @@ describe('生命归零 → 结档信号（App 的"结档唯一出口"依赖这�
       vitalsMax: { hp: 10, san: 99, mp: 10 },
     });
 
-  it('第一次归零只进"濒死"，不给 ending（留一轮演出的机会）', () => {
+  // `G25`：属性变更要有检定授权，这些用例只关心归零之后的下游
+  beforeEach(() => grantHarmCheck());
+
+  it('🔴 `G27`：打光剩余的那一下**当场结档**（不再挂一轮濒死等人来救）', () => {
     store.setState({ gameState: base() });
     store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 0 }] as never);
-    expect(store.getState().gameState.vitals.hp).toBe(0);
-    expect(store.getState().gameState.dying).toBe(true);
-    expect(store.getState().gameState.ending).toBeNull();
+    const gs = store.getState().gameState;
+    expect(gs.vitals.hp).toBe(0);
+    // 主人原话：「该死的时候能死，守密人不要硬找理由拖着不让死」
+    expect(gs.ending?.kind).toBe('death');
+    expect(gs.dying).toBe(false);
   });
 
-  it('第二次结算才给出 ending，且**正文留空**（由 App 去要结局）', () => {
+  it('致命一击给出的 ending **正文留空**（等守密人写结局），`at` 能被解析', () => {
     store.setState({ gameState: base() });
     store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 0 }] as never);
-    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 1 }] as never);
     const gs = store.getState().gameState;
-    expect(gs.ending?.kind).toBe('death');
     expect(gs.ending?.text).toBe('');
-    expect(gs.ending?.at).toBeTruthy();
+    // 🔴 真判据：结档时间必须是个**能被解析的时间戳**（生涯页要按它排序）
+    expect(Number.isFinite(Date.parse(gs.ending?.at ?? ''))).toBe(true);
   });
 
   it('理智归零直接结档（不给缓冲）', () => {
@@ -1071,9 +1122,8 @@ describe('生命归零 → 结档信号（App 的"结档唯一出口"依赖这�
     expect(store.getState().gameState.ending?.kind).toBe('insanity');
   });
 
-  it('回血能解除濒死', () => {
-    store.setState({ gameState: base() });
-    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 0 }] as never);
+  it('回血能解除濒死（濒死态显式构造 —— 那是引擎给施救留的窗口）', () => {
+    store.setState({ gameState: { ...base(), dying: true, vitals: { hp: 0, san: 60, mp: 10 } } });
     store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'set', value: 5 }] as never);
     expect(store.getState().gameState.dying).toBe(false);
     expect(store.getState().gameState.ending).toBeNull();
@@ -1081,6 +1131,9 @@ describe('生命归零 → 结档信号（App 的"结档唯一出口"依赖这�
 });
 
 describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 滴血太刺激"', () => {
+  // `G25`：属性变更要有检定授权（这些用例关心的是伤口与失血）
+  beforeEach(() => grantHarmCheck());
+
   const base = (hp = 8, extra: Record<string, unknown> = {}) =>
     createInitialState({
       vitals: { hp, san: 60, mp: 10 },
@@ -1091,7 +1144,7 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
 
   it('主生命条一次掉 2 点以上 → 记一处伤口，并进状态栏 flags', () => {
     store.setState({ gameState: base() });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被咬中小臂' },
     ] as never);
     const gs = store.getState().gameState;
@@ -1104,7 +1157,7 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
 
   it('掉 1 点不算伤口（小磕碰不该变成持续掉血）', () => {
     store.setState({ gameState: base() });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 1, reason: '擦了一下' },
     ] as never);
     expect(store.getState().gameState.wounds).toHaveLength(0);
@@ -1113,7 +1166,7 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
 
   it('一次掉 4 点以上 → 重伤档（每轮 -2）', () => {
     store.setState({ gameState: base(10) });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 5, reason: '斧头劈进肩膀' },
     ] as never);
     expect(store.getState().gameState.wounds![0]!.tier).toBe('severe');
@@ -1123,25 +1176,25 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
   it('有伤口后**每一轮**自动失血，且额度固定不变', () => {
     store.setState({ gameState: base(8) });
     // 第一轮：造成伤口 —— 当轮**不再**补失血（那几点已经付过账了）
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
     expect(store.getState().gameState.vitals.hp).toBe(5);
     // 第二轮：什么都不做，也该因伤口掉 1 点
-    store.getState().applyModelDeltas([] as never);
+    actThen([] as never);
     expect(store.getState().gameState.vitals.hp).toBe(4);
     // 第三轮：还是 1 点（不加速）
-    store.getState().applyModelDeltas([] as never);
+    actThen([] as never);
     expect(store.getState().gameState.vitals.hp).toBe(3);
   });
 
   it('失血会写进"状态变化"提示（玩家看得见"为什么又掉血了"）', () => {
     store.setState({ gameState: base(8) });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
     store.setState({ lastChanges: null });
-    store.getState().applyModelDeltas([] as never);
+    actThen([] as never);
     const lines = store.getState().lastChanges?.lines ?? [];
     // 数值条的变化本来就有一条；这里确认"伤口失血"这句也进去了
     expect(lines.length).toBeGreaterThan(0);
@@ -1149,10 +1202,12 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
   });
 
   it('已经濒死就不再因伤口失血（倒地的人不该被继续放血）', () => {
-    store.setState({ gameState: base(1) });
-    store.getState().applyModelDeltas([
-      { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
-    ] as never);
+    /*
+     * ⚠️ `G27` 之后，"被划中"这类**模型申报的一击**打光剩余血是**当场结档**了，
+     * 不再落到濒死态。所以这条用例显式构造濒死（那是引擎自己的账 —— 如伤口渗血 ——
+     * 把血磨到 0 时的状态），再验"倒地之后不该被继续放血"这个真正的判据。
+     */
+    store.setState({ gameState: { ...base(), dying: true, vitals: { hp: 0, san: 60, mp: 10 } } });
     const after = store.getState().gameState;
     expect(after.dying).toBe(true);
     // 就算硬塞一处伤口，也不该再往下扣
@@ -1160,13 +1215,13 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
       gameState: { ...after, wounds: [{ id: 'x', text: '伤口', tier: 'wound', turns: 0 }] },
     });
     const before = store.getState().gameState.vitals.hp;
-    store.getState().applyModelDeltas([] as never);
+    actThen([] as never);
     expect(store.getState().gameState.vitals.hp).toBe(before);
   });
 
   it('守密人显式申报 flags.受伤 也会被记下来（旧伤 / 环境所致）', () => {
     store.setState({ gameState: base() });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'flags.受伤', op: 'set', value: '左腿的旧伤裂开了' },
     ] as never);
     const gs = store.getState().gameState;
@@ -1178,25 +1233,26 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
 
   it('引擎自己写的 flags.伤口 不会被读回来（否则伤口一轮接一轮自我复制）', () => {
     store.setState({ gameState: base(10) });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
     expect(store.getState().gameState.wounds).toHaveLength(1);
     // 连跑三轮空 delta：伤口数必须一直是 1
-    for (let i = 0; i < 3; i++) store.getState().applyModelDeltas([] as never);
+    for (let i = 0; i < 3; i++) actThen([] as never);
     expect(store.getState().gameState.wounds).toHaveLength(1);
   });
 
   it('两样都没有 → 包扎也止不住（用户报的原场景）', () => {
     store.setState({ gameState: base(), character: { ...store.getState().character, skills: {} } });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'flags.伤口处理', op: 'set', value: true },
     ] as never);
     expect(store.getState().gameState.wounds!.length).toBeGreaterThan(0);
-    expect(store.getState().gameState.flags['伤口']).toBeTruthy();
+    // 🔴 真判据：伤口 flag 写的是**一句话**（界面直接显示它），不是 `true`
+    expect(store.getState().gameState.flags['伤口']).toBeTypeOf('string');
   });
 
   it('有医疗物品 + 有急救技能 → 处理到位就真正止住，flag 一并消失', () => {
@@ -1204,11 +1260,11 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
       gameState: base(8, { inventory: [{ id: '绷带', name: '绷带', qty: 2 }] }),
       character: { ...store.getState().character, skills: { 急救: 60 } },
     });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
     expect(store.getState().gameState.wounds).toHaveLength(1);
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'flags.伤口处理', op: 'set', value: true },
     ] as never);
     const gs = store.getState().gameState;
@@ -1222,11 +1278,11 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
       gameState: base(10, { inventory: [{ id: '绷带', name: '绷带', qty: 2 }] }),
       character: { ...store.getState().character, skills: {} },
     });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 5, reason: '斧头劈进肩膀' },
     ] as never);
     expect(store.getState().gameState.wounds![0]!.tier).toBe('severe');
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'flags.伤口处理', op: 'set', value: true },
     ] as never);
     const gs = store.getState().gameState;
@@ -1236,20 +1292,20 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
 
   it('多轮下来伤口会累计轮数（供界面显示"流了多久"）', () => {
     store.setState({ gameState: base(9) });
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
     // 出生那一轮不算流逝（它没流）
     expect(store.getState().gameState.wounds![0]!.turns).toBe(0);
-    store.getState().applyModelDeltas([] as never);
-    store.getState().applyModelDeltas([] as never);
+    actThen([] as never);
+    actThen([] as never);
     expect(store.getState().gameState.wounds![0]!.turns).toBe(2);
   });
 
   it('woundStatus() 的提示与引擎判据同源（不各算一遍）', () => {
     store.setState({ gameState: base(8, { inventory: [{ id: '绷带', name: '绷带', qty: 1 }] }) });
     expect(store.getState().woundStatus().note).toBeNull();
-    store.getState().applyModelDeltas([
+    actThen([
       { target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' },
     ] as never);
     const st = store.getState().woundStatus();
@@ -1260,6 +1316,9 @@ describe('伤口 / 流血（引擎侧 DOT）：用户"包扎了还掉血、10 �
 });
 
 describe('临时疯狂：有界可恢复的数值惩罚（R37，用户 09-16 拍板）', () => {
+  // `G25`：掉理智同样要先过检定（这些用例关心的是疯狂本身）
+  beforeEach(() => grantHarmCheck());
+
   const base = () =>
     createInitialState({
       vitals: { hp: 10, san: 60, mp: 10 },
@@ -1269,7 +1328,8 @@ describe('临时疯狂：有界可恢复的数值惩罚（R37，用户 09-16 拍
   it('理智骤降 ≥5 → 进临时疯狂，并且**检定目标值真的被减了**', () => {
     store.setState({ gameState: base() });
     store.getState().applyModelDeltas([{ target: 'vitals.san', op: 'dec', amount: 6 }] as never);
-    expect(store.getState().gameState.flags['临时疯狂']).toBeTruthy();
+    // 🔴 真判据：引擎写的是**一句描述**（界面显示的是它），不是布尔 `true`
+    expect(store.getState().gameState.flags['临时疯狂']).toBeTypeOf('string');
     const ins = store.getState().insanity();
     expect(ins.active).toBe(true);
     expect(ins.penalty).toBe(-20); // 当前规则包是 COC（d100）
@@ -1405,7 +1465,8 @@ describe('怪物图鉴与战斗投放（R38）', () => {
     const b = store.getState().bestiary();
     const card = b.cards.find((c) => c.name === '雾中的巨影')!;
     expect(card.level).toBe('seen');
-    expect(card.look).toBeTruthy();
+    // 🔴 真判据：给的是**表里那句原话**（'湿漉漉的一团'），不是"有东西就行"
+    expect(card.look).toBe(TABLE[0]!.look);
     expect(card.weakness).toBeUndefined();
   });
 
@@ -1740,8 +1801,14 @@ describe('存档迁移（旧档必须能读）', () => {
     }
   });
 
-  it('H16：`疯狂轮数` 常量与引擎写入的键名一致（状态栏靠它过滤）', () => {
-    expect(INSANITY_TURNS_FLAG).toBe('疯狂轮数');
+  it('H16：引擎写进去的轮数键，状态过滤必须认得出来（界面不许露"疯狂轮数：2"）', () => {
+    // 引擎（store.ts）自己记的轮数是 `flags['疯狂轮数']`；过滤要认得这一族键
+    expect(isTurnsKey('疯狂轮数')).toBe(true);
+    expect(isTurnsKey(turnsKeyOf('中毒'))).toBe(true);
+    // 端到端：带着记账键走一遍过滤，键要消失、状态本身要留下
+    expect(statusFlagLines({ 临时疯狂: '他抓着自己的头发', 疯狂轮数: 2 }).map((l) => l.key)).toEqual(
+      ['临时疯狂']
+    );
   });
 
   it('已有的图鉴台账不会被迁移清掉（只补不删）', () => {
@@ -1847,14 +1914,13 @@ describe('战役数据必须整进整出（B3：消灭半持久化字段）', ()
 });
 
 describe('结档：死亡 / 理智归零（用户定调：死亡 = 结档）', () => {
-  it('生命归零先算濒死，下一个结算点仍是 0 才结档', () => {
+  // `G25`：属性变更要有检定授权
+  beforeEach(() => grantHarmCheck());
+
+  it('🔴 `G27`：足以打光剩余的一击 → 当场结档（正文留空 = 等守密人写结局）', () => {
     store.setState({ gameState: createInitialState({ vitals: { hp: 5, san: 60, mp: 10 } }) });
     store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 5 }]);
     expect(store.getState().gameState.vitals.hp).toBe(0);
-    expect(store.getState().gameState.dying).toBe(true);
-    expect(store.getState().gameState.ending ?? null).toBeNull();
-
-    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 1 }]);
     const ending = store.getState().gameState.ending;
     expect(ending?.kind).toBe('death');
     // 正文留空 = "结论已定、等守密人写结局"的信号
@@ -1868,8 +1934,13 @@ describe('结档：死亡 / 理智归零（用户定调：死亡 = 结档）', (
   });
 
   it('救回来会解除濒死，不结档', () => {
-    store.setState({ gameState: createInitialState({ vitals: { hp: 5, san: 60, mp: 10 } }) });
-    store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'dec', amount: 5 }]);
+    // 濒死态显式构造（`G27` 之后模型的一击不会再落到这里，那是引擎的账磨出来的）
+    store.setState({
+      gameState: {
+        ...createInitialState({ vitals: { hp: 0, san: 60, mp: 10 } }),
+        dying: true,
+      },
+    });
     expect(store.getState().gameState.dying).toBe(true);
     store.getState().applyModelDeltas([{ target: 'vitals.hp', op: 'inc', amount: 3 }]);
     expect(store.getState().gameState.dying).toBe(false);
@@ -1955,14 +2026,72 @@ describe('结痂：轻伤自己收口，不再流到死（§2.2）', () => {
 
   it('擦伤第 3 轮自己结痂，伤口清空', () => {
     withWound('scratch');
-    for (let i = 0; i < 3; i++) store.getState().applyModelDeltas([] as never);
+    for (let i = 0; i < 3; i++) actThen([] as never);
     expect(store.getState().gameState.wounds ?? []).toHaveLength(0);
   });
 
   it('重伤第 6 轮仍在（要有人处理才止得住）', () => {
     withWound('severe');
-    for (let i = 0; i < 6; i++) store.getState().applyModelDeltas([] as never);
+    for (let i = 0; i < 6; i++) actThen([] as never);
     expect(store.getState().gameState.wounds ?? []).toHaveLength(1);
+  });
+});
+
+/* ============================================================
+ * 🔴 主人 2026-09-27 真机：「敌人血量与状态不符」。
+ *
+ * 病根在补值：守密人"记一笔血量"时只写 `hp`（他写的是"现在还剩多少"），
+ * 而老代码用 `max: givenMax ?? hp` 把**上限补成了当前值** → 血条渲染成 `8/8` 满格，
+ * 玩家刚打掉的伤害在界面上凭空消失。
+ * 判据改成：上限优先取**表里的满血值**（作者填的、不随战斗漂），最后才退到当前 hp。
+ * ============================================================ */
+describe('敌人数值兜底，血量与状态必须对得上（主人 2026-09-27 真机）', () => {
+  const TABLE = [{ id: 'm1', name: '雾中的巨影', hp: 20 }];
+  const setup = () =>
+    store.setState({
+      gameState: createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+      module: { ...store.getState().module, monsters: TABLE },
+    });
+  const foes = () => store.getState().gameState.combat.foes;
+
+  it('🔴 打掉血之后守密人只报当前血量 → 上限**不能**塌成当前值（8/20，不是 8/8）', () => {
+    setup();
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '雾中的巨影' } },
+    ] as never);
+    expect(foes()[0]!.max).toBe(20);
+
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'dec', value: '雾中的巨影', amount: 12 },
+    ] as never);
+    expect(foes()[0]!.hp).toBe(8);
+
+    // 下一轮，守密人"记一笔血量"，只写 hp
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '雾中的巨影', hp: 8 } },
+    ] as never);
+    expect(foes()[0]!.hp).toBe(8);
+    expect(foes()[0]!.max).toBe(20); // ← 老代码这里是 8
+    // 血条要的是"打掉了多少"，上限塌了就等于把伤害还回去了
+    expect(foes()[0]!.hp / foes()[0]!.max).toBeCloseTo(0.4, 5);
+  });
+
+  it('模型给了上限就用它的（不抢）', () => {
+    setup();
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '雾中的巨影', hp: 6, max: 30 } },
+    ] as never);
+    expect(foes()[0]!.hp).toBe(6);
+    expect(foes()[0]!.max).toBe(30);
+  });
+
+  it('表里没有的敌人、只给 hp → 上限兜底成当前值，但绝不倒挂', () => {
+    setup();
+    store.getState().applyModelDeltas([
+      { target: 'combat.foes', op: 'add', value: { name: '不知名的东西', hp: 5 } },
+    ] as never);
+    expect(foes()[0]!.hp).toBe(5);
+    expect(foes()[0]!.max).toBe(5);
   });
 });
 
@@ -2400,5 +2529,351 @@ describe('期限归引擎：模型只许定初值，不许改现值（P2-5）', 
     expect(store.getState().gameState.deadline).toBeNull();
     store.getState().setDeadlineDays(undefined);
     expect(store.getState().gameState.deadline).toBeNull();
+  });
+});
+
+/* ============================================================
+ * 🔴 `G26`（协28 §F① 第 1 条）：结档必须**立刻**落盘，重开不许复活。
+ *
+ * 真机：走「主动求死」→ 确认 → `ending` 出现；**一重开，`ending` 变回 `null`**，
+ * 结档页不在、故事接着跑 —— 而生涯数据却记住了（成就到手、跑过的局 +1）。
+ *
+ * 根因：`forceEnding` / `setEnding` / `clearEnding` 走的是**节流 800ms** 的 `saveJson`。
+ * 结档是结构性操作（与"清空 / 回溯 / 开新团 / 导入"同类）——必须走 `saveJsonNow`。
+ * ============================================================ */
+describe('G26：结档立刻落盘，重开不许复活', () => {
+  it('🔴 forceEnding 当场写盘（不等节流窗口），重载后仍是已结档', () => {
+    localStorage.clear();
+    store.getState().forceEnding('death');
+    // 直接读盘：没有 flush、没等 800ms —— 旧写法这里读出来是 null
+    const raw = localStorage.getItem('trpg.gameState');
+    expect(raw, 'forceEnding 没有立刻落盘').toBeTruthy();
+    expect(JSON.parse(raw!).ending?.kind).toBe('death');
+    expect(Boolean(loadGameState().ending)).toBe(true);
+  });
+
+  it('🔴 空正文的 ending 也算已结档（判据不能是"结局正文写好了没"）', () => {
+    localStorage.clear();
+    store.getState().forceEnding('insanity');
+    const gs = loadGameState();
+    expect(gs.ending?.text).toBe('');
+    expect(Boolean(gs.ending)).toBe(true);
+  });
+
+  it('setEnding / clearEnding 同样立刻落盘', () => {
+    localStorage.clear();
+    store.getState().forceEnding('death');
+    store.getState().setEnding('death', '你沉进了黑水里。');
+    expect(JSON.parse(localStorage.getItem('trpg.gameState')!).ending.text).toBe(
+      '你沉进了黑水里。'
+    );
+    store.getState().clearEnding();
+    expect(JSON.parse(localStorage.getItem('trpg.gameState')!).ending).toBe(null);
+  });
+});
+
+/* ============================================================
+ * 🔴 `G1`（协28 §F① 第 2 条）：**一次玩家行动只推一轮**。
+ *
+ * 旧判据是「距上次推进够 4 秒了吗」——一次行动里只要有两个相隔 >4 秒的结算点
+ * （正文一轮 ＋ 漏契约时"只补契约"的兜底），轮次就 +2。真机跑出 `1→3→5→7`。
+ * 现在按**行动**计：玩家消息落盘时置标记，结算点消费。
+ * ============================================================ */
+describe('G1：一次玩家行动只推一轮', () => {
+  const seed = () => {
+    resetStatusTickForTest();
+    store.setState({
+      gameState: {
+        ...store.getState().gameState,
+        combat: { active: true, round: 1, foes: [{ name: '怪物', hp: 20, max: 20 }] },
+      },
+    });
+  };
+  /*
+   * 一次"结算"＝守密人回话落地那一刻。**故意不带任何会动到 combat 的 delta** ——
+   * 这里要验的是"引擎自己推的轮次"，别让探针自己把 round 改回去。
+   */
+  const settle = () => store.getState().applyModelDeltas([] as never);
+
+  it('🔴 同一次行动的第二次结算不再 +1（旧写法这里会变 3）', () => {
+    seed();
+    store.getState().addMessage({ role: 'player', content: '我开枪' });
+    settle();
+    expect(store.getState().gameState.combat.round).toBe(2);
+    settle();
+    expect(store.getState().gameState.combat.round).toBe(2);
+  });
+
+  it('下一次行动照常 +1', () => {
+    seed();
+    store.getState().addMessage({ role: 'player', content: '我开枪' });
+    settle();
+    store.getState().addMessage({ role: 'player', content: '我再打一枪' });
+    settle();
+    expect(store.getState().gameState.combat.round).toBe(3);
+  });
+
+  it('玩家没行动时（引擎自己补一次结算）不推轮次', () => {
+    seed();
+    settle();
+    expect(store.getState().gameState.combat.round).toBe(1);
+  });
+});
+
+
+/* ============================================================
+ * 🔴 `P2-10`（协28 打回）+ `G21`：**后来加的字段不许在读档时丢掉**。
+ *
+ * 两个白名单漏键，同一个病：生成侧写了、运行时也读了，
+ * 可读档那一步把它们吞了 → 表现成"模组申报的开局时刻/期限刷新后回默认值"、
+ * "AI 卡的外貌栏永远是空的"。这就是 `P2-10` 反复复现的根子。
+ * ============================================================ */
+describe('P2-10 + G21：白名单不许吞掉后来加的字段', () => {
+  it('🔴 mergeModule 保住 startClock / deadlineIn', () => {
+    const raw = JSON.stringify({
+      title: 'T',
+      startClock: { day: 3, minute: 15 * 60 },
+      deadlineIn: 20160,
+    });
+    const m = mergeModule(raw);
+    expect(m.startClock).toEqual({ day: 3, minute: 15 * 60 });
+    expect(m.deadlineIn).toBe(20160);
+  });
+
+  it('🔴 migrateCharacter 透传 appearance（外貌栏空掉的那个）', () => {
+    const c = migrateCharacter({ name: '测试员', appearance: '黑发，左眉一道旧疤' });
+    expect(c.appearance).toBe('黑发，左眉一道旧疤');
+  });
+
+  it('没给这些字段时不凭空造（老档照旧）', () => {
+    const m = mergeModule(JSON.stringify({ title: 'T' }));
+    expect(m.startClock).toBeUndefined();
+    expect(m.deadlineIn).toBeUndefined();
+  });
+});
+
+/* ============================================================
+ * 🔴 `G17`（store 层）：玩家说「我等到 X」，守密人只报「一会儿」也不许糊弄过去。
+ * 纯函数对 ≠ 接上了线 —— 这里走真实通道：落消息 → 结算 → 看时钟。
+ * ============================================================ */
+describe('G17：等到某个时刻，时钟真的走到那', () => {
+  it('🔴 守密人只报「一会儿」，时钟仍被抬到午夜之后', () => {
+    resetStatusTickForTest();
+    store.setState({
+      gameState: { ...store.getState().gameState, clock: { day: 1, minute: 9 * 60 } },
+    });
+    store.getState().addMessage({ role: 'player', content: '我在钟楼里等到午夜。' });
+    store.getState().applyModelDeltas([], { elapsed: '一会儿' } as never);
+    const c = store.getState().gameState.clock!;
+    expect(c.day * 1440 + c.minute).toBeGreaterThanOrEqual(2880);
+  });
+
+  it('没写「等到」的普通行动不受影响（照模型报的走）', () => {
+    resetStatusTickForTest();
+    store.setState({
+      gameState: { ...store.getState().gameState, clock: { day: 1, minute: 9 * 60 } },
+    });
+    store.getState().addMessage({ role: 'player', content: '我推开门看看里面。' });
+    store.getState().applyModelDeltas([], { elapsed: '一会儿' } as never);
+    const c = store.getState().gameState.clock!;
+    expect(c.day * 1440 + c.minute).toBe(1980 + 10);
+  });
+});
+
+/* ============================================================
+ * 🔴 `G25` + `G27` **接线**（协28 §F① 第 6b 条）：
+ * 纯函数对 ≠ 接上了线 —— 这里走真实通道：掷骰（或没掷）→ 模型申报扣血 → 看引擎收不收。
+ * ============================================================ */
+describe('G25/G27 接线：没掷检定，模型扣不动玩家', () => {
+  const blood = (hp = 10) =>
+    store.setState({
+      gameState: createInitialState({
+        vitals: { hp, san: 60, mp: 10 },
+        vitalsMax: { hp: 10, san: 99, mp: 10 },
+      }),
+    });
+  const hit = (amount: number, extra: Record<string, unknown> = {}) =>
+    store.getState().applyModelDeltas([
+      { target: 'vitals.hp', op: 'dec', amount, ...extra },
+    ] as never);
+
+  it('🔴 这一轮没掷过检定 → 申报的伤害被拒，而且玩家看得见那句理由', () => {
+    resetCheckGrantForTest();
+    blood();
+    hit(5);
+    expect(store.getState().gameState.vitals.hp).toBe(10);
+    const lines = store.getState().lastChanges?.lines ?? [];
+    expect(lines.some((l) => l.text.includes('检定'))).toBe(true);
+  });
+
+  it('🔴 掷过之后 → 放行（血真的掉）', () => {
+    resetCheckGrantForTest();
+    blood();
+    grantHarmCheck();
+    hit(5);
+    expect(store.getState().gameState.vitals.hp).toBe(5);
+  });
+
+  it('🔴 大失败 → 一次掉到位，并且**当场结档**（不再等下一轮）', () => {
+    resetCheckGrantForTest();
+    blood();
+    // 两颗骰都掷 0 → 百分骰 = 100 = 大失败
+    const spy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    store.getState().skillCheck('格斗（斗殴）');
+    spy.mockRestore();
+    hit(1); // 数字很小，但大失败就是"死定了"
+    const gs = store.getState().gameState;
+    expect(gs.vitals.hp).toBe(0);
+    expect(gs.ending?.kind).toBe('death');
+  });
+
+  it('环境伤害写清 reason 就不必先掷检定（坠落 / 窒息这类）', () => {
+    resetCheckGrantForTest();
+    blood();
+    hit(4, { reason: '从楼梯上滚下去' });
+    expect(store.getState().gameState.vitals.hp).toBe(6);
+  });
+});
+
+/* ============================================================
+ * 🔴 `G10`+`G22`（协30 §2.5）：**AI 生成的技能表落盘前要按预算封顶**。
+ *
+ * 真机：生成出来「已用 333 / 剩余 −23」（预算 310）。手工加点早有封顶，
+ * AI 这条路没有 —— 又一次"写了约束 ≠ 引擎在执行"。
+ * ============================================================ */
+describe('G10：生成的技能表超支时，落盘前削到预算内', () => {
+  // 预算 = edu×4 + int×2 = 50×4 + 50×2 = 300
+  const ch = { str: 50, con: 50, siz: 50, dex: 50, app: 50, int: 50, pow: 50, edu: 50 };
+
+  it('🔴 超支的卡会被削到不超（挑投入最多的那些削）', () => {
+    // 「会计」基础 5、「图书馆使用」基础 20 —— 都写满 90，投入远超 300
+    const wild = { 会计: 90, 图书馆使用: 90, 侦查: 90, 聆听: 90 };
+    const capped = capSkillsToBudget(wild, ch, 'coc7');
+    // 判据用**同一份"已用"定义**（`skillBudget`）—— 手写减法会把各技能的基础值算错
+    const { remaining, total } = skillBudget({ characteristics: ch, skills: capped }, 'coc7');
+    expect(remaining).toBeGreaterThanOrEqual(0);
+    expect(total).toBe(300);
+    // 削的是"投入"，不是把技能清零 —— 每一项都还在，也都没掉到基础值以下
+    expect(Object.keys(capped)).toHaveLength(4);
+    for (const k of Object.keys(wild)) expect(capped[k]!).toBeGreaterThan(0);
+  });
+
+  it('没超支的原样不动（一个数都不改）', () => {
+    const ok = { 侦查: 60, 聆听: 40 };
+    expect(capSkillsToBudget(ok, ch, 'coc7')).toEqual(ok);
+  });
+});
+
+/* ============================================================
+ * 🔴 `N2` **接线**（协30 §2.3）：一次玩家行动里，状态结算与伤口失血**各只算一次**。
+ *
+ * 真机：`伤口·每轮 -1` 实际一轮掉 2～3 点，因为一轮里 `applyModelDeltas` 会被调多次
+ * （正文一次、地点一次、漏契约补一次），而旧判据是"距上次够 4 秒吗"。
+ * 更要紧的是协30 那句提醒：**三个标记要分开消费** —— 共用的话先消费的会把后到的饿死。
+ * ============================================================ */
+describe('N2 接线：一次行动只算一次（还要求两样都不饿死）', () => {
+  it('🔴 一次行动里连调三次 → 伤口只掉 1 点（不是 3 点）', () => {
+    resetStatusTickForTest();
+    grantHarmCheck();
+    // 先造一处伤口（当轮不再补失血：那几点已经付过账了）
+    actThen([{ target: 'vitals.hp', op: 'dec', amount: 3, reason: '被划中' }]);
+    expect(store.getState().gameState.wounds ?? []).toHaveLength(1);
+
+    const before = store.getState().gameState.vitals.hp ?? 0;
+    // 一次玩家行动 → 同一轮的三次结算点
+    store.getState().addMessage({ role: 'player', content: '我继续往前走。' });
+    store.getState().applyModelDeltas([] as never);
+    store.getState().applyModelDeltas([{ target: 'location', op: 'set', value: '别处' }] as never);
+    store.getState().applyModelDeltas([] as never);
+
+    expect(before - (store.getState().gameState.vitals.hp ?? 0)).toBe(1);
+  });
+
+  it('🔴 状态与伤口**各算一次**（分开消费，谁也不把谁饿死）', () => {
+    resetStatusTickForTest();
+    grantHarmCheck();
+    // 干净的基座（带 vitalsMax）—— 免得 hp 被上限裁到 0 而落进濒死冻结
+    store.setState({
+      gameState: {
+        ...createInitialState({
+          vitals: { hp: 10, san: 60, mp: 10 },
+          vitalsMax: { hp: 10, san: 99, mp: 10 },
+        }),
+        flags: {},
+      },
+    });
+    // 先把中毒与伤口都摆上（扣 2 点：够留一道伤口，又不至于落到濒死）
+    actThen([
+      { target: 'flags.中毒', op: 'set', value: true },
+      { target: 'flags.中毒轮数', op: 'set', value: 3 },
+      { target: 'vitals.hp', op: 'dec', amount: 2, reason: '被划中' },
+    ] as never);
+
+    const hpBefore = store.getState().gameState.vitals.hp ?? 0;
+    store.getState().addMessage({ role: 'player', content: '我继续。' });
+    // 场景一：状态那次先跑
+    store.getState().applyModelDeltas([] as never);
+    // 场景二：同一轮里伤口那一段（地点那次）也要能轮到
+    store.getState().applyModelDeltas([{ target: 'location', op: 'set', value: '别处' }] as never);
+    store.getState().applyModelDeltas([] as never);
+
+    const dropped = hpBefore - (store.getState().gameState.vitals.hp ?? 0);
+    // 中毒 −1 与伤口 −1 都要发生（各一次），而不是"先到的把标记吃掉、另一个永远是 0"
+    expect(dropped).toBeGreaterThanOrEqual(2);
+    expect(store.getState().gameState.flags['中毒轮数']).toBe(2);
+  });
+});
+
+/* ============================================================
+ * 🔴 `N2-余`（协31 §F① 第 1 条 · P3）：**时钟推进也改成一次行动只算一次**。
+ *
+ * 14.38 自己报备的遗留：`N2` 把状态与伤口改成了行动标记，时钟还留着 4 秒窗。
+ * 判据（协31）：同一行动内多次 `applyModelDeltas`（**间隔 >4 秒**）时钟只推一次；
+ * 「等到 X」的上下限行为不变（那条在 `clock.test.ts` 单独钉着）。
+ * ============================================================ */
+describe('N2-余：时钟推进也是一次行动只算一次', () => {
+  const minuteOf = () => {
+    const c = store.getState().gameState.clock!;
+    return c.day * 1440 + c.minute;
+  };
+
+  it('🔴 同一行动内两次结算、间隔超过旧的 4 秒窗 → 时钟只走一次', () => {
+    vi.useFakeTimers();
+    try {
+      resetStatusTickForTest();
+      store.setState({
+        gameState: {
+          ...createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+          clock: { day: 1, minute: 9 * 60 },
+        },
+      });
+      store.getState().addMessage({ role: 'player', content: '我出门往码头走。' });
+      store.getState().applyModelDeltas([] as never, { elapsed: '十分钟' } as never);
+      const after1 = minuteOf();
+      expect(after1).toBeGreaterThan(9 * 60); // 这一轮真的走了
+
+      // 同一行动的第二个结算点，**隔了 10 秒**（旧实现的 4 秒窗在这里会放行第二次）
+      vi.advanceTimersByTime(10_000);
+      store.getState().applyModelDeltas([], { elapsed: '十分钟' } as never);
+      expect(minuteOf()).toBe(after1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('下一次玩家行动照常推进（别把时钟锁死）', () => {
+    resetStatusTickForTest();
+    store.setState({
+      gameState: {
+        ...createInitialState({ vitals: { hp: 10, san: 60, mp: 10 } }),
+        clock: { day: 1, minute: 9 * 60 },
+      },
+    });
+    store.getState().addMessage({ role: 'player', content: '我等着。' });
+    store.getState().applyModelDeltas([], { elapsed: '十分钟' } as never);
+    const after1 = minuteOf();
+    store.getState().addMessage({ role: 'player', content: '我继续等。' });
+    store.getState().applyModelDeltas([], { elapsed: '十分钟' } as never);
+    expect(minuteOf()).toBeGreaterThan(after1);
   });
 });

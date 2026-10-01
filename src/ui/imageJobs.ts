@@ -21,16 +21,14 @@
  * 与 `snapshotPrune` / `archive` 同一条口径：**纯函数单独成文件**，判据能单测。
  */
 
+import type { ArtKind } from '../core/artSpec.js';
+
 /** 一张图是给谁画的。决定结果落到哪个位置 */
-export type ImageJobKind =
-  /** 某条消息的插画（第三视角，配那一段叙事） */
-  | 'action'
-  /** 某个地点的场景图 */
-  | 'scene'
-  /** 整个世界的地图 */
-  | 'map'
-  /** 角色立绘（`target` ＝ 'character' 或队友 id） */
-  | 'portrait';
+/*
+ * 类型定义在 `core/artSpec.ts`（那边还要按 kind 给尺寸）。这里只做别名，
+ * 方向是 ui → core —— 铁律：core 不许反向依赖 ui。
+ */
+export type ImageJobKind = ArtKind;
 
 export interface ImageJob {
   id: string;
@@ -46,6 +44,8 @@ export interface ImageJob {
   error?: string;
   /** 排队时刻（毫秒）。列表按它排，只有展示意义 */
   at: number;
+  /** 开始生成那一刻（毫秒）。**只有 `running` 时有值** —— 超时回收拿它算"已经飞了多久" */
+  startedAt?: number;
 }
 
 /**
@@ -116,9 +116,29 @@ export function pruneJobs(list: readonly ImageJob[], limit: number = MAX_JOBS): 
   return out;
 }
 
-/** 标成"正在跑"（推队列时调用） */
-export function beginJob(list: readonly ImageJob[], id: string): ImageJob[] {
-  return list.map((j) => (j.id === id ? { ...j, status: 'running' as const } : j));
+/**
+ * 标成"正在跑"（推队列时调用）。
+ *
+ * 顺手记下**开始时刻** —— 超时回收（`stalledJobs`）要靠它算"这一条已经飞了多久"；
+ * 记的是 `begin` 而不是 `enqueue`，排队等待的时间不该算进请求耗时。
+ */
+export function beginJob(list: readonly ImageJob[], id: string, now = Date.now()): ImageJob[] {
+  return list.map((j) => (j.id === id ? { ...j, status: 'running' as const, startedAt: now } : j));
+}
+
+/**
+ * 回收**飞太久**的任务（主人 2026-09-27 真机那条："一直不成功也不失败，第二天的才显示失败"）。
+ *
+ * 每条 `runImageJob` 自己带一道硬超时，所以正常情况下走不到这里；
+ * 这一份是**兜底**：定时器被浏览器节流（后台标签页）、或者某个 promise 泄漏到倾泻之外，
+ * 那条任务就会永远挂在 `running` —— 占着并发槽不让后面的图开工，
+ * 玩家看见的是"还在排队"四个字和一格永远不动的进度。
+ *
+ * 判据：`running` 且**有开始时刻**且已超过 `limitMs`。
+ * 没记 `startedAt` 的老任务**不回收**（不知道它飞了多久，宁可不判也不误杀正在跑的请求）。
+ */
+export function stalledJobs(list: readonly ImageJob[], now: number, limitMs: number): ImageJob[] {
+  return list.filter((j) => j.status === 'running' && j.startedAt !== undefined && now - j.startedAt > limitMs);
 }
 
 /** 标成失败，并把原因记下来（界面直接显示这句话） */

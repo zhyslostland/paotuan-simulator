@@ -13,6 +13,14 @@ import { consumeLoadError } from './state/loaders.js';
 import { statusNote as statusEffectsNote } from '../core/statusEffects.js';
 import { Chat } from './Chat';
 import { ImageJobsBadge } from './ImageJobsBadge';
+import {
+  ICONS,
+  IconFlask,
+  IconHelp,
+  IconStop,
+  IconVolumeOff,
+  IconVolumeOn,
+} from './icons';
 import { CharacterSheet, CheckDialog, type Difficulty } from './CharacterSheet';
 import { WorldPanel } from './WorldPanel';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -52,6 +60,14 @@ import {
   CHECK_RETRY_NOTE,
   CONTRACT_ONLY_NOTE,
 } from '../orchestrator/prompt.js';
+/*
+ * 叙述一致性（2026-09-30 · 用户亲报「守密人替玩家做决定 / 检定通过却说我打歪了」）。
+ *
+ * 提示词里有六条"绝不替玩家…"的红线，但**没人核** —— 引擎对骰子与状态有裁决权，
+ * 对**叙述**完全没有。这里补的就是那一核：正文若推翻了玩家的操作或引擎的裁决，
+ * 就带着**具体证据**重写一次（与 `RETRY_NOTE` / `CHECK_RETRY_NOTE` 同一条回路）。
+ */
+import { verifyNarration, NARRATION_RETRY_NOTE } from '../orchestrator/narration.js';
 import { playSfx, resumeAudio, startAmbience, startBgm, stopBgm, stopAmbience, stopSfx } from './audio.js';
 import {
   canInstall,
@@ -69,7 +85,9 @@ import {
 import { EndingScreen } from './EndingScreen';
 import { applyUpdate, checkForUpdate, watchForUpdates } from '../update.js';
 import { anchorReasons } from './anchorReasons.js';
-import { parseActs, normalizeActIndex } from '../core/acts.js';
+import { actAt, parseActs, normalizeActIndex } from '../core/acts.js';
+// `G23`+`G19` 阶段 A：收束自检引导（一次性，模块级，不落盘）
+import { consumeSelfCheckNote, setSelfCheckNote } from './store.js';
 import { ChangelogDialog, hasUnreadChangelog, markChangelogRead } from './Changelog';
 import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
@@ -77,15 +95,28 @@ import { getGenre } from '../core/genres.js';
 import type { Ending } from '../core/state/gameState.js';
 import { encumbranceNote } from '../core/encumbrance.js';
 import { isHealOnlyConsumable, itemsMentionedIn } from '../core/items.js';
+import { readLocal, writeLocal } from './state/storage.js';
 
 type Panel = 'chat' | 'character' | 'world';
 
 /**
- * 主动求死的识别。
- * 刻意偏窄——必须明确表达"要结束自己的角色"，单纯的冒险/试探（"我跳河看看"）不算。
+ * 主动求死的那条**捷径**（不再是唯一入口 —— `G27` · 主人 2026-09-29 拍板）。
+ *
+ * ## 以前是什么样
+ * 这个正则曾经是**结档的唯一门**：命中就弹确认、直接结档；不命中就什么都不发生。
+ * 于是「我放弃抵抗，任他们处置」这类**完全说得通的求死**因为差一个字而不生效
+ * （真机撞过），而"死"这件事整体上几乎不可达（62 轮 hp 一次没动）。
+ *
+ * ## 现在
+ * - **收窄到"明确要了结自己"**：`自杀 / 自尽 / 自我了断 / 轻生 / 了结自己`。
+ *   命中 → 弹一次确认 → 引擎直接结档（不给模型劝诫或"刚好救人"的机会）——
+ *   模型对自杀有安全对齐，这条路仍然由引擎说了算。
+ * - 其余的表达（`放弃抵抗 / 不再挣扎 / 我不想活了 / 求死 / 任由自己沉下去`…）
+ *   **不再走这里**，当作**普通的故事行动**发给守密人：走检定、走伤害 ——
+ *   主人原话：「靠关键词判断根本就不靠谱，穷举不完」。
+ *   它们现在能致死，是因为引擎认"打光剩余血 = 死"（`G27`），不是因为说对了词。
  */
-const SUICIDE_RE =
-  /(自杀|自尽|寻死|想死|不想活|活不下去|了结自己|了结这一切|结束这一切|放弃抵抗|不再挣扎|任由(自己)?沉|求死|自我了断)/;
+const SUICIDE_RE = /(自杀|自尽|自我了断|轻生|了结自己)/;
 
 /** 结局正文要不来时的兜底：必须是"故事里的句子"，不能变成程序提示 */
 const FALLBACK_ENDING: Record<string, string> = {
@@ -167,9 +198,9 @@ export default function App() {
   const [installable, setInstallable] = useState(false);
   /** 安装提示被玩家关掉后就不再烦他（记在 localStorage） */
   const [installHintHidden, setInstallHintHidden] = useState(
-    () => localStorage.getItem('trpg.installHint') === '1'
+    () => readLocal('trpg.installHint') === '1'
   );
-  const [welcome, setWelcome] = useState(() => !localStorage.getItem('trpg.welcomed'));
+  const [welcome, setWelcome] = useState(() => !readLocal('trpg.welcomed'));
   const abortRef = useRef<AbortController | null>(null);
   /*
    * P3-2：没填 Key 时**自动弹设置页**，整个会话只许弹一次。
@@ -240,7 +271,7 @@ export default function App() {
    * 跳过"全新用户"——那种情况欢迎页更重要，两个弹窗叠在一起很烦。
    */
   useEffect(() => {
-    if (localStorage.getItem('trpg.welcomed') !== '1') return;
+    if (readLocal('trpg.welcomed') !== '1') return;
     if (hasUnreadChangelog()) setShowChangelog(true);
   }, []);
 
@@ -257,6 +288,16 @@ export default function App() {
   useEffect(() => {
     if (endedText) setShowEnding(true);
   }, [endedText]);
+  /*
+   * 🔴 `G26`：**重开页面时，只要已结档就把结档页顶上来**（哪怕结局正文还是空的）。
+   *
+   * 以前这条只认"正文也写好了"，于是求死/濒死那条路留下的空正文 ending，
+   * 重开后结档页进不去 —— 玩家看到的正是「结局看过了、成就到手了，一关一开故事又活着」。
+   * 只做**挂载那一次**：进行中被引擎判死时不弹窗打断叙事（正文写好后上面那条会顶上来）。
+   */
+  useEffect(() => {
+    if (useStore.getState().gameState.ending) setShowEnding(true);
+  }, []);
 
   /*
    * 新版本检测，两条独立的路都汇到同一个横幅：
@@ -281,9 +322,9 @@ export default function App() {
     const COOLDOWN = 10 * 60 * 1000;
     const maybeAutoUpdate = () => {
       try {
-        const last = Number(localStorage.getItem(AUTO_KEY) ?? 0);
+        const last = Number(readLocal(AUTO_KEY) ?? 0);
         if (Date.now() - last < COOLDOWN) return;
-        localStorage.setItem(AUTO_KEY, String(Date.now()));
+        writeLocal(AUTO_KEY, String(Date.now()));
       } catch {
         return; // 存不了就别自动了，交给手动
       }
@@ -343,9 +384,9 @@ export default function App() {
     const s = useStore.getState();
     const hasProgress = s.messages.length > 5 || s.chronicle.length > 0;
     if (!hasProgress) return;
-    const last = Number(localStorage.getItem('trpg.backupRemind') || 0);
+    const last = Number(readLocal('trpg.backupRemind') || 0);
     if (Date.now() - last < 7 * 86400_000) return;
-    localStorage.setItem('trpg.backupRemind', String(Date.now()));
+    writeLocal('trpg.backupRemind', String(Date.now()));
     setToast('进度存在本机浏览器里，建议去「设置 → 存档与记录」导出备份');
     setTimeout(() => setToast(''), 5200);
   }, []);
@@ -534,7 +575,42 @@ export default function App() {
      * 协作方第 24 版把这条点名了：C 的风险不在掷骰，在双计。
      */
     const statusNote = statusEffectsNote(rs, useStore.getState().gameState.flags);
-    const notes = [engineNote, dyingNote, loadNote, woundNote, madNote, statusNote].filter(
+    /*
+     * `G23`+`G19`（仅阶段 A）**收束自检**：一次性，取走即清。
+     * 放最前面 —— 它问的是"这一局 / 这一幕该不该收"，比别的都要紧。
+     */
+    const selfCheckNote = consumeSelfCheckNote();
+    /*
+     * 🔴 `G2`（协28 §F① 第 7 条）：**把这一轮的检定结果提成一条事实**。
+     *
+     * 数值半边（v1.7.5）已经把"没掷中不许扣血"接上了，可真机里同一轮正文仍会
+     * 先写"打中"、再写"没打中" —— 因为骰子只落在历史消息里，容易被当成背景。
+     * 这里把它拎出来、写明"不可改写"，并直接点出正文该怎么写。
+     */
+    const lastBadges = [
+      ...(lastPlayer?.checks ?? []),
+      ...(lastPlayer?.check ? [lastPlayer.check] : []),
+    ];
+    const checkFact = lastBadges.length
+      ? `🎲 本轮检定（**事实，不可改写**）：${lastBadges
+          .map(
+            (b) =>
+              `${b.skill} ${b.success ? '成功' : '失败'}（掷 ${b.roll} / 目标 ${b.target}${
+                b.label ? ` · ${b.label}` : ''
+              }）`
+          )
+          .join('；')}。正文必须与它一致：成功的写成打中 / 做到了，失败的写成没打中 / 没做到 —— **不许一边说成功一边写失败**。`
+      : null;
+    const notes = [
+      selfCheckNote,
+      checkFact,
+      engineNote,
+      dyingNote,
+      loadNote,
+      woundNote,
+      madNote,
+      statusNote,
+    ].filter(
       Boolean
     ) as string[];
     const finalNote = notes.length ? notes.join('\n\n') : undefined;
@@ -610,9 +686,25 @@ export default function App() {
 
       let { body, contract } = extractContract(full);
 
-      // 兜底：模型偶尔会拒绝玩家，或抢在引擎前把"检定结果"写进正文。
-      // 这两类都破坏沉浸感，这里追加纠正指令重新生成一次。
-      // 同样**不清屏**：新内容长过旧内容才替换。
+      /*
+       * 🔴 兜底回路（2026-09-30 扩容：从"一次性两分支"改成**有界循环 + 多类违规**）。
+       *
+       * 原来只有 if/else-if 两条：拒绝、检定结论泄漏 —— 各重写**一次**，且**重写后不再校验**。
+       * 于是"第二次仍然拒绝/仍然推翻玩家"就照样端给玩家。
+       *
+       * 现在：
+       *   - 违规判定覆盖**三类**（新增"叙述推翻了玩家操作或引擎裁决"）；
+       *   - 每轮重写**只针对第一处违规**（一次说清一件，模型才改得动）；
+       *   - 最多 `CORRECTION_ROUNDS` 轮，**次数是硬上限** —— 模型可以一直不听话，
+       *     但不能让玩家无限等；
+       *   - 用尽仍违规：正文照给（玩家不能空等），交给后面的"可见降级"处理。
+       *
+       * 仍然**不清屏**（B4 的既有约定）：新内容长过旧内容才替换。
+       */
+      const CORRECTION_ROUNDS = 2;
+      /** 已就"缺契约"单独要过一次 —— 那一路不重写正文，只补 JSON。 */
+      let contractOnlyTried = false;
+
       const retryWith = async (note: string) => {
         let buf = '';
         const retryTurns = [...turns, { role: 'user' as const, content: note }];
@@ -649,13 +741,73 @@ export default function App() {
         }
       };
 
-      if (isRefusal(stripMeta(body))) {
-        await retryWith(RETRY_NOTE);
-      } else if (isCheckLeak(stripMeta(body))) {
-        await retryWith(CHECK_RETRY_NOTE);
-      } else if (!contract && stripMeta(body).trim()) {
-        const only = await requestContractOnly(stripMeta(body));
-        if (only) contract = only;
+      /*
+       * 有界纠正回路：每轮只针对**第一处**违规重写（一次说清一件，模型才改得动）。
+       *
+       * 判定顺序有讲究：先说"拒绝/说教"（最伤沉浸），再说"叙述推翻了玩家"（本题），
+       * 最后才是"泄漏了检定术语"（最轻，且最容易在重写中被带出来）。
+       */
+      for (let round = 0; round <= CORRECTION_ROUNDS; round += 1) {
+        const prose = stripMeta(body);
+        if (isRefusal(prose)) {
+          if (round === CORRECTION_ROUNDS) break;
+          await retryWith(RETRY_NOTE);
+          continue;
+        }
+        /*
+         * 玩家这一轮**声明了什么** + 引擎**裁决了什么** → 核正文有没有推翻它。
+         *
+         * `lastPlayer.content` 里有玩家的原文（含 `engineNote` 那类系统说明，
+         * 但核判据只做词面矛盾，多一点上下文不影响），
+         * `lastBadges` 是这一轮的检定结果（与 `checkFact` 同源）。
+         */
+        const violations = verifyNarration(
+          prose,
+          lastPlayer?.content ?? null,
+          lastBadges.map((b) => ({ skill: b.skill, success: b.success, fumble: b.tier === 'fumble' }))
+        );
+        if (violations.length > 0) {
+          if (round === CORRECTION_ROUNDS) break;
+          // 把**证据**带进纠正指令：只说"你错了"模型改不动
+          const evidence = violations.map((v) => `- ${v.evidence}`).join('\n');
+          await retryWith(`${NARRATION_RETRY_NOTE}\n\n本轮具体问题：\n${evidence}`);
+          continue;
+        }
+        if (isCheckLeak(prose)) {
+          if (round === CORRECTION_ROUNDS) break;
+          await retryWith(CHECK_RETRY_NOTE);
+          continue;
+        }
+        // 三类都过；只剩"缺契约"那一条独立的路（只补 JSON，不重写正文）
+        if (!contract && prose.trim() && !contractOnlyTried) {
+          contractOnlyTried = true;
+          const only = await requestContractOnly(prose);
+          if (only) contract = only;
+        }
+        break;
+      }
+
+      /*
+       * 🔴 **可见降级**：纠正回路用尽后，正文要照给（玩家不能空等），
+       * 但如果它**仍然推翻玩家的操作或引擎的裁决**，必须让玩家知道 ——
+       * 否则他只会以为"我明明成功了，怎么变成这样"，而且不知道该信哪一段。
+       *
+       * 说清两件事：**发生了什么** + **你现在能做什么**（可回溯，不是死局）。
+       */
+      {
+        const residual = verifyNarration(
+          stripMeta(body),
+          lastPlayer?.content ?? null,
+          lastBadges.map((b) => ({ skill: b.skill, success: b.success, fumble: b.tier === 'fumble' }))
+        );
+        if (residual.length > 0) {
+          useStore
+            .getState()
+            .notify(
+              '这一段可能在替你改剧情（它把你说过的动作或已经定下的结果写成了别的样子）。' +
+                '你可以点「回溯」退回这一步再试一次。'
+            );
+        }
       }
 
       const npcLines = contract?.npc_lines ?? [];
@@ -747,6 +899,37 @@ export default function App() {
         if (acts.length > 0 && curIdx + 1 < acts.length) {
           useStore.getState().setActIndex(curIdx + 1);
           void useStore.getState().expandAct(curIdx + 1);
+        }
+      }
+
+      /*
+       * 🔴 `G23` + `G19`（协28 §F① 第 6 条 · **仅阶段 A**）：结算点**强制自检一次**。
+       *
+       * 病：模组写了 `endings`、导演稿也写了"这一幕的收束条件"，但收束**全靠守密人主动声明** ——
+       * 他忘了，玩家就永远走不到结档（真机 62 轮，正常收束一次都没触发过）。
+       * 阶段 A 只**补通道**：这一轮既没说结档、也没说推幕时，把「模组 endings ＋ 当前幕原文」
+       * 重新塞回提示词，逼他下一轮对照着自检一遍。
+       * **阶段 B（引擎本地判剧情结局）不做** —— 硬判剧情会误杀沉浸（主人 2026-09-29 拍板）。
+       */
+      if (contract && contract.ending === undefined && contract.act_done !== true) {
+        const mod = useStore.getState().module;
+        const acts = parseActs(mod.acts);
+        const curAct = actAt(acts, normalizeActIndex(useStore.getState().gameState.actIndex));
+        const bits: string[] = [];
+        if (String(mod.endings ?? '').trim()) {
+          bits.push(`模组预设的结局与失败条件：\n${mod.endings.trim()}`);
+        }
+        if (curAct) {
+          bits.push(
+            `当前这一幕（第 ${curAct.index + 1} 幕）的原文：\n${curAct.summary || curAct.title}`
+          );
+        }
+        if (bits.length > 0) {
+          setSelfCheckNote(
+            `⚠️ 上一轮你**没有声明是否收束**。请先对照下面的原文自检一遍：\n\n${bits.join('\n\n')}\n\n` +
+              `如果这一局确实到了结局，就在 JSON 里给 \`ending\`；如果只是这一幕收束了，给 \`act_done: true\`。` +
+              `**确实还没到就照常往下写**，别为了"给个交代"硬收束。`
+          );
         }
       }
 
@@ -1268,21 +1451,32 @@ export default function App() {
     void handleSend(`（意图：前往「${location}」）`);
   };
 
-  const panelBtn = (key: Panel, label: string, hint: string) => (
-    <button
-      key={key}
-      onClick={() => setMobilePanel(key)}
-      className={`relative flex-1 py-3 text-[13px] transition ${
-        mobilePanel === key ? 'text-gold-400' : 'text-mist-400'
-      }`}
-    >
-      {label}
-      <span className="ml-1 hidden text-[10px] text-mist-500/70 sm:inline">{hint}</span>
-      {mobilePanel === key && (
-        <span className="absolute inset-x-6 top-0 h-0.5 rounded-full bg-gold-500" />
-      )}
-    </button>
-  );
+  /**
+   * 移动端的三个主页面签。
+   *
+   * 加图标是因为在手机上它们是**唯一的导航** —— 而 `hint`（快捷键提示）
+   * 在窄屏是 `hidden sm:inline`，等于手机上只剩三个光秃秃的词。
+   * 图标跟着按钮文字色走（`currentColor`），选中态自动分得清。
+   */
+  const panelBtn = (key: Panel, label: string, hint: string, icon: 'profile' | 'book' | 'map') => {
+    const Icon = ICONS[icon];
+    return (
+      <button
+        key={key}
+        onClick={() => setMobilePanel(key)}
+        className={`relative flex flex-1 items-center justify-center gap-1.5 py-3 text-[13px] transition ${
+          mobilePanel === key ? 'text-gold-400' : 'text-mist-400'
+        }`}
+      >
+        <Icon size={15} />
+        {label}
+        <span className="ml-0.5 hidden text-[10px] text-mist-500 sm:inline">{hint}</span>
+        {mobilePanel === key && (
+          <span className="absolute inset-x-6 top-0 h-0.5 rounded-full bg-gold-500" />
+        )}
+      </button>
+    );
+  };
 
   return (
     <div className="flex h-full flex-col bg-ink-950">
@@ -1307,40 +1501,40 @@ export default function App() {
           {/* 常驻帮助入口：别只依赖"首次进入"那一次弹窗（协作方 R42） */}
           <button
             onClick={() => setShowHelp(true)}
-            className="rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
+            className="flex items-center justify-center rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
             title="怎么玩（随时可看）"
           >
-            ?
+            <IconHelp size={15} />
           </button>
           {/* 音频控制坞：玩的时候不用翻设置就能一键静音 / 掐掉正在播的音效 */}
           <button
             onClick={toggleAudio}
-            className={`rounded-md border px-2 py-1.5 text-[12px] transition ${
+            className={`flex items-center justify-center rounded-md border px-2 py-1.5 text-[12px] transition ${
               audioOn
                 ? 'border-gold-600/50 text-gold-400 hover:bg-gold-500/10'
                 : 'border-ink-600 text-mist-500 hover:text-mist-300'
             }`}
             title={audioOn ? '静音（背景音与音效一起）' : '打开音频'}
           >
-            {audioOn ? '🔊' : '🔈'}
+            {audioOn ? <IconVolumeOn size={15} /> : <IconVolumeOff size={15} />}
           </button>
           {audioOn && (
             <button
               onClick={() => stopSfx()}
-              className="rounded-md border border-ink-600 px-2 py-1.5 text-[12px] text-mist-500 transition hover:text-mist-300"
+              className="flex items-center justify-center rounded-md border border-ink-600 px-2 py-1.5 text-[12px] text-mist-500 transition hover:text-mist-300"
               title="掐掉正在播的音效（上传了整首歌时很有用）"
             >
-              ⏹
+              <IconStop size={14} />
             </button>
           )}
           {/* 开发者模式：一键把测试环境摆好，省得每次测功能都从头建角色想模组 */}
           {devMode && (
             <button
               onClick={() => setShowSandbox(true)}
-              className="rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+              className="flex items-center justify-center rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
               title="测试沙盒：灌入测试存档 / 脚本化模组 / 调数值 / 触发结档"
             >
-              🧪
+              <IconFlask size={15} />
             </button>
           )}
           {/* 结档后常驻一个入口：关掉结档页看记录之后，还回得去（协作方 I） */}
@@ -1370,7 +1564,10 @@ export default function App() {
             className="rounded-md border border-ink-600 px-3 py-1.5 text-[13px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
             title="快捷键：Cmd/Ctrl + ,"
           >
-            设置
+            <span className="flex items-center gap-1.5">
+              <ICONS.settings size={14} />
+              设置
+            </span>
           </button>
         </div>
       </header>
@@ -1427,9 +1624,9 @@ export default function App() {
       </div>
 
       <nav className="safe-bottom flex shrink-0 border-t border-ink-700 bg-ink-900 lg:hidden">
-        {panelBtn('character', '角色', '⌘1')}
-        {panelBtn('chat', '故事', '⌘2')}
-        {panelBtn('world', '世界', '⌘3')}
+        {panelBtn('character', '角色', '⌘1', 'profile')}
+        {panelBtn('chat', '故事', '⌘2', 'book')}
+        {panelBtn('world', '世界', '⌘3', 'map')}
       </nav>
 
       {/*
@@ -1535,7 +1732,7 @@ export default function App() {
               onClick={async () => {
                 const ok = await promptInstall();
                 if (!ok) {
-                  localStorage.setItem('trpg.installHint', '1');
+                  writeLocal('trpg.installHint', '1');
                   setInstallHintHidden(true);
                 }
               }}
@@ -1545,7 +1742,7 @@ export default function App() {
             </button>
             <button
               onClick={() => {
-                localStorage.setItem('trpg.installHint', '1');
+                writeLocal('trpg.installHint', '1');
                 setInstallHintHidden(true);
               }}
               className="shrink-0 text-[11px] text-mist-500"
@@ -1560,7 +1757,7 @@ export default function App() {
           firstTime={welcome}
           onClose={() => {
             if (welcome) {
-              localStorage.setItem('trpg.welcomed', '1');
+              writeLocal('trpg.welcomed', '1');
               setWelcome(false);
             }
             setShowHelp(false);
@@ -1589,13 +1786,13 @@ export default function App() {
           onConfirm={() => {
             const text = pendingSuicide;
             setPendingSuicide(null);
-            // 引擎直接结算，不给模型劝诫或"刚好救人"的机会
+            /*
+             * 引擎直接结档，不给模型劝诫或"刚好救人"的机会。
+             * ⚠️ 这里**不再自己** `requestEnding` —— 下面那个"结档唯一出口"的 effect
+             * 只要看到"没有正文的 ending"就会去要一段（`at` 去重）。两处都调等于白花一次请求。
+             */
             useStore.getState().forceEnding('death');
             useStore.getState().addMessage({ role: 'player', content: text });
-            void (async () => {
-              await requestEnding('death');
-              setShowEnding(true);
-            })();
           }}
         />
       )}

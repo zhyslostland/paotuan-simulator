@@ -92,6 +92,43 @@ describe('非法变更一律拒绝，不抛异常', () => {
     expect(state.clock).toEqual({ day: 1, minute: 9 * 60 });
   });
 
+  /**
+   * 🔴 **`wounds` 不许由模型自带** —— 2026-09-30 基础完善（批次 A）补的闸门行为断言。
+   *
+   * 收口前的真实形态（取证脚本跑出来的）：`wounds` 在 `ALLOWED_ROOTS` 里，
+   * 而 `applyDeltas` **没有任何 `wounds` 分支** → 它掉进"自由字段"兜底，
+   * 把模型给的值**整包照抄**进 `state.wounds`，绕过 `core/wounds.ts` 的档位/流失量真源。
+   * 也就是说：白名单写着"可以写"，引擎其实只会照抄。
+   *
+   * 现在它归 `ENGINE_ONLY_ROOTS`：**拒掉，并且告诉模型该走哪条路**（`flags.伤口`）。
+   * 后半句同样重要 —— 只说"不允许"会让模型反复试同一个错根（`P2-10` 家族就是这么磨的）。
+   */
+  it('模型不许自带 wounds：拒掉，且提示它改用 flags.伤口', () => {
+    const { state, rejected } = applyDeltas(base(), [
+      { target: 'wounds', op: 'set', value: [{ tier: 'grievous' }] },
+      { target: 'wounds.0', op: 'set', value: { tier: 'grievous' } },
+    ]);
+    expect(rejected).toHaveLength(2);
+    expect(state.wounds ?? []).toEqual([]);
+    for (const r of rejected) {
+      expect(r.reason).toContain('不允许修改的路径根');
+      expect(r.reason).toContain('flags.伤口');
+    }
+  });
+
+  it('引擎独占的其他根也一律拒（clock / deadline / 图鉴台账）', () => {
+    const { rejected } = applyDeltas(base(), [
+      { target: 'clock.minute', op: 'set', value: 600 },
+      { target: 'deadline.remain', op: 'set', value: 1 },
+      { target: 'encountered', op: 'add', value: '雾中的巨影' },
+      { target: 'fought', op: 'add', value: '雾中的巨影' },
+    ]);
+    expect(rejected).toHaveLength(4);
+    // 每条都要给出路，而不是一句干巴巴的"不允许"
+    expect(rejected[0]!.reason).toContain('elapsed');
+    expect(rejected[2]!.reason).toContain('图鉴');
+  });
+
   it('拒绝数值条上的非法操作', () => {
     const { rejected } = applyDeltas(base(), [
       { target: 'vitals.san', op: 'add', value: 1 },
@@ -312,29 +349,39 @@ describe('战斗轮', () => {
     expect(createInitialState().combat).toEqual({ active: false, round: 0, foes: [] });
   });
 
-  it('可以开关战斗并推进轮次', () => {
+  it('可以开打与收场（收场要看理由）', () => {
     let s = base();
     ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '怪物', hp: 5, max: 5 } },
       { target: 'combat.active', op: 'set', value: true },
-      { target: 'combat.round', op: 'set', value: 1 },
     ]));
-    expect(s.combat).toEqual({ active: true, round: 1, foes: [] });
+    expect(s.combat.active).toBe(true);
+    expect(s.combat.foes).toHaveLength(1);
 
-    ({ state: s } = applyDeltas(s, [{ target: 'combat.round', op: 'set', value: 2 }]));
-    expect(s.combat.round).toBe(2);
+    // 有活敌人在场要关战斗 → 必须带说得通的理由（`G24` 正面）
+    const noReason = applyDeltas(s, [{ target: 'combat.active', op: 'set', value: false }]);
+    expect(noReason.rejected).toHaveLength(1);
+    expect(noReason.state.combat.active).toBe(true);
 
-    ({ state: s } = applyDeltas(s, [{ target: 'combat.active', op: 'set', value: false }]));
-    expect(s.combat.active).toBe(false);
+    const fled = applyDeltas(s, [
+      { target: 'combat.active', op: 'set', value: false, reason: '它夺路逃走了' },
+    ] as never);
+    expect(fled.state.combat.active).toBe(false);
   });
 
-  it('轮次会被强制收敛为非负整数', () => {
-    const { state } = applyDeltas(base(), [
-      { target: 'combat.round', op: 'set', value: 3.7 },
+  it('🔴 `G1`：模型写的 `combat.round` 一律被忽略（轮次是引擎独占的）', () => {
+    /*
+     * 真机 `0 → 2 → 4` 的第二个成因：模型照抄旧提示词在契约里写了 round，
+     * 引擎在**它写的值**上再 +1。现在模型写什么都无效 —— 轮次只由 store 推进。
+     */
+    const s0 = base();
+    const r = applyDeltas(s0, [
+      { target: 'combat.foes', op: 'add', value: { name: '怪物', hp: 5, max: 5 } },
+      { target: 'combat.round', op: 'set', value: 7 },
     ]);
-    expect(state.combat.round).toBe(3);
-
-    const neg = applyDeltas(base(), [{ target: 'combat.round', op: 'set', value: -5 }]);
-    expect(neg.state.combat.round).toBe(0);
+    expect(r.state.combat.round).toBe(s0.combat.round); // 一位都没动
+    // 也不该当成"被拒的变更"报到玩家脸上（那只是模型多写的一笔，不是玩家的账）
+    expect(r.rejected).toHaveLength(0);
   });
 
   it('只接受 set，且不接受 active/round 以外的字段', () => {
@@ -348,9 +395,29 @@ describe('战斗轮', () => {
   it('旧存档没有 combat 字段时补默认值，不会崩', () => {
     const legacy = { ...base(), combat: undefined } as unknown as GameState;
     const { state } = applyDeltas(legacy, [
+      { target: 'combat.foes', op: 'add', value: { name: '怪物', hp: 5, max: 5 } },
       { target: 'combat.active', op: 'set', value: true },
     ]);
     expect(state.combat.active).toBe(true);
+    expect(state.combat.foes).toHaveLength(1);
+  });
+
+  it('🔴 `G24` 反面：空场不许保持战斗（收口按最终结果归一）', () => {
+    // 开打 → 把最后一个敌人摘走 → 战斗当场收场（横幅该消失）
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'add', value: { name: '怪物', hp: 5, max: 5 } },
+      { target: 'combat.active', op: 'set', value: true },
+    ]));
+    expect(s.combat.active).toBe(true);
+
+    const after = applyDeltas(s, [{ target: 'combat.foes', op: 'remove', value: '怪物' }]);
+    expect(after.state.combat.foes).toHaveLength(0);
+    expect(after.state.combat.active).toBe(false);
+
+    // 空场还硬要开着战斗 → 归一掉（模型绕不过去）
+    const empty = applyDeltas(base(), [{ target: 'combat.active', op: 'set', value: true }]);
+    expect(empty.state.combat.active).toBe(false);
   });
 });
 
@@ -374,7 +441,15 @@ describe('战斗敌人（foes）', () => {
     expect(s.combat.foes).toHaveLength(0);
   });
 
-  it('扣血不会低于 0，且不存在的敌人会被拒绝', () => {
+  /*
+   * 🔴 主人 2026-09-27 真机改了这条的行为：「敌人血量归零还活着」。
+   *
+   * 以前引擎只把数字减到 0 就完事，那条空血的敌人**还留在 `combat.foes` 里** ——
+   * 血条停在 0、战斗不结束、守密人下一轮还在演它行动。
+   * 现在：**打空即移除**（连"少于 0"都不可能存在了，判据比原来更硬）；
+   * 场上最后一个倒下时，引擎顺手收场（`combat.active = false`）。
+   */
+  it('血被打空 → 敌人当场倒下（移出战斗），只剩它一个时战斗同时结束', () => {
     let s = base();
     ({ state: s } = applyDeltas(s, [
       { target: 'combat.foes', op: 'add', value: { name: '怪物', hp: 5, max: 5 } },
@@ -382,12 +457,267 @@ describe('战斗敌人（foes）', () => {
     ({ state: s } = applyDeltas(s, [
       { target: 'combat.foes', op: 'dec', value: '怪物', amount: 99 },
     ]));
-    expect(s.combat.foes[0]!.hp).toBe(0);
+    expect(s.combat.foes).toHaveLength(0);
+    expect(s.combat.active).toBe(false);
+    // 已经倒下的敌人再挨一下 → 拒绝（它不在场上了，不是静默吞掉）
+    const after = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: '怪物', amount: 3 },
+    ]);
+    expect(after.rejected).toHaveLength(1);
+    expect(after.rejected[0]!.reason).toContain('怪物');
 
     const r = applyDeltas(base(), [
       { target: 'combat.foes', op: 'dec', value: '不存在的', amount: 3 },
     ]);
     expect(r.rejected).toHaveLength(1);
+  });
+
+  /* ------------------------------------------------------------
+   * 🔴 `P1-5` 阶段二：命中 ↔ 伤害绑定（主人 2026-09-28 拍板「骰子说了算」）
+   *
+   * 症状原话：「开枪检定成功，描述没打中，敌人血量扣除」「换撬棍打，没触发检定，
+   * 描述没打中，敌人血量扣除了」。伤害是守密人另写一条 dec 申报的，跟掷没掷中毫无关系。
+   * 现在：**带 weapon 的攻击**必须有命中授权；环境类伤害（不带 weapon）照旧。
+   * ------------------------------------------------------------ */
+  const foeBase = () => {
+    let st = base();
+    ({ state: st } = applyDeltas(st, [
+      { target: 'combat.active', op: 'set', value: true },
+      { target: 'combat.foes', op: 'add', value: { name: '怪物', hp: 20, max: 20 } },
+    ]));
+    return st;
+  };
+  const swing = (weapon?: string) => [
+    { target: 'combat.foes', op: 'dec' as const, value: '怪物', amount: 5, ...(weapon ? { weapon } : {}) },
+  ];
+
+  it('🔴 掷了没过（miss）→ 带武器的伤害被拒，理由说人话', () => {
+    const r = applyDeltas(foeBase(), swing('手枪') as never, { ruleset: coc7, foeDamage: 'miss' });
+    expect(r.rejected).toHaveLength(1);
+    /*
+     * ⚠️ **2026-09-30 有意改掉那句旧话术**（不是为了让测试变绿而放宽断言）。
+     *
+     * 原来断言的是 `toContain('没打中')`，因为当时的理由是
+     * 「这一下没打中（攻击检定没过），「怪物」不该掉血」。
+     * 用户随后亲报：「我说我要开枪、**检定通过**，他说我打歪了」——
+     * 那句话把**"这次伤害申报不成立"**说成了**"你没打中"**，
+     * 而玩家卡片上那一掷可能显示**成功**，屏幕上两句话自相矛盾。
+     *
+     * 现在的话术（真源在 `core/state/refusal.ts`）陈述**机制事实**并给出路；
+     * 完整判据在 `tests/refusalWording.test.ts`（含"三种授权话术都不许含判定语言"）。
+     * **别再改回"没打中"** —— 那正是这次要修的 bug。
+     */
+    expect(r.rejected[0]!.reason).toContain('没有落地');
+    expect(r.rejected[0]!.reason).not.toContain('没打中');
+    expect(r.rejected[0]!.reason).toContain('重新掷一次攻击检定');
+    expect(r.state.combat.foes[0]!.hp).toBe(20);
+  });
+
+  it('🔴 这一轮压根没掷（none）→ 也拒，并说清"还没掷过"', () => {
+    const r = applyDeltas(foeBase(), swing('手枪') as never, { ruleset: coc7, foeDamage: 'none' });
+    expect(r.rejected).toHaveLength(1);
+    expect(r.rejected[0]!.reason).toContain('还没掷过');
+  });
+
+  it('🔴 掷中了（hit）→ 放行，伤害照旧由引擎按武器表掷', () => {
+    const r = applyDeltas(foeBase(), swing('手枪') as never, {
+      ruleset: coc7,
+      foeDamage: 'hit',
+      rng: () => 0,
+    });
+    expect(r.rejected).toHaveLength(0);
+    expect(r.applied[0]!.after).toBe(19); // 手枪 1d10，固定骰掷出 1
+  });
+
+  it('不带 weapon 的伤害不吃这一闸（推倒书架砸它、它自己摔下去都照旧）', () => {
+    const r = applyDeltas(foeBase(), swing() as never, { ruleset: coc7, foeDamage: 'miss' });
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.combat.foes[0]!.hp).toBe(15);
+  });
+
+  it('不传 foeDamage（老调用方 / 单测）→ 完全走现状', () => {
+    const r = applyDeltas(foeBase(), swing('手枪') as never, { ruleset: coc7, rng: () => 0 });
+    expect(r.rejected).toHaveLength(0);
+  });
+
+  /* ------------------------------------------------------------
+   * 🔴 `G24`（协28 §F① 第 3 条）：敌人还活着，不许把战斗静默关掉。
+   *
+   * 真机：`combat` 从 `{active:true, foes:[深潜者群 30/40]}` 直接变 `{active:false, 同一个 30/40}`
+   * —— 横幅没了、对面还在满血移动，玩家以为战斗被吞了。
+   * ------------------------------------------------------------ */
+  const closeIt = (reason?: string) => [
+    {
+      target: 'combat.active',
+      op: 'set' as const,
+      value: false,
+      ...(reason ? { reason } : {}),
+    },
+  ];
+
+  it('🔴 G24：场上还有活敌人 → `active=false` 被拒，战斗保持开着', () => {
+    const r = applyDeltas(foeBase(), closeIt() as never, { ruleset: coc7 });
+    expect(r.rejected).toHaveLength(1);
+    expect(r.rejected[0]!.reason).toContain('还有活着的敌人');
+    expect(r.state.combat.active).toBe(true);
+  });
+
+  it('🔴 G24：写明理由（逃走 / 投降 / 脱离）→ 放行', () => {
+    const r = applyDeltas(foeBase(), closeIt('它夺路逃走了') as never, { ruleset: coc7 });
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.combat.active).toBe(false);
+  });
+
+  it('G24：敌人已经清空 → 正常收场不受影响（引擎自己也会关）', () => {
+    const r = applyDeltas(
+      foeBase(),
+      [
+        { target: 'combat.foes', op: 'dec', value: '怪物', amount: 99 },
+        { target: 'combat.active', op: 'set', value: false },
+      ] as never,
+      { ruleset: coc7 }
+    );
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.combat.active).toBe(false);
+  });
+
+  /* ------------------------------------------------------------
+   * 🔴 `G25` + `G27`（协28 §F① 第 6b 条 · 主人 2026-09-29 拍板）：
+   * **动玩家属性要先过检定；死定了就一次掉到位。**
+   *
+   * 病：`vitals.*` 的变更完全由模型申报，引擎从不问"凭什么掉" ——
+   * 真机 62 轮 `hp` 一次没动（模型倾向不扣血 → "死亡 = 结档"几乎不可达），
+   * 反过来它也能随口扣。`ctx.harm` 只有 `applyModelDeltas` 会传，
+   * **引擎自己写的账不传** —— 所以这道闸只管模型。
+   * ------------------------------------------------------------ */
+  const blood = (hp = 10) =>
+    createInitialState({
+      vitals: { hp, san: 60, mp: 10 },
+      vitalsMax: { hp: 10, san: 99, mp: 10 },
+    });
+  const hurt = (amount: number, extra: Record<string, unknown> = {}) =>
+    applyDeltas(
+      blood(),
+      [{ target: 'vitals.hp', op: 'dec', amount, ...extra }] as never,
+      { ruleset: coc7, harm: { checked: true, fumble: false } }
+    );
+  const hurtNoCheck = (amount: number, extra: Record<string, unknown> = {}) =>
+    applyDeltas(blood(), [{ target: 'vitals.hp', op: 'dec', amount, ...extra }] as never, {
+      ruleset: coc7,
+      harm: { checked: false, fumble: false },
+    });
+
+  it('🔴 `G25`：这一轮没掷过检定 → 扣血被拒，并说清"要先过检定"', () => {
+    const r = hurtNoCheck(3);
+    expect(r.rejected).toHaveLength(1);
+    expect(r.rejected[0]!.reason).toContain('检定');
+    expect(r.state.vitals.hp).toBe(10); // 一点没动
+  });
+
+  it('🔴 `G25`：掷过了 → 放行，血真的掉', () => {
+    const r = hurt(3);
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.vitals.hp).toBe(7);
+  });
+
+  it('环境伤害（写明 reason）可以不给检定 —— 与 `G24` 同一条口径', () => {
+    const r = hurtNoCheck(3, { reason: '从二楼的窗户摔下去' });
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.vitals.hp).toBe(7);
+  });
+
+  it('🔴 保底 1：报 0 也得真的掉（「改掉属性就掉」）', () => {
+    const r = hurt(0);
+    expect(r.state.vitals.hp).toBe(9);
+  });
+
+  it('🔴 `G27`：这一下足以打光剩余 → 一次掉到位，并标成致命', () => {
+    const r = hurt(12);
+    expect(r.state.vitals.hp).toBe(0);
+    expect(r.applied[0]!.after).toBe(0);
+    expect(r.lethal).toBe(true);
+  });
+
+  it('🔴 `G27`：大失败 → 即使伤害数字不大也一次掉到位', () => {
+    const r = applyDeltas(
+      blood(),
+      [{ target: 'vitals.hp', op: 'dec', amount: 2 }] as never,
+      { ruleset: coc7, harm: { checked: true, fumble: true } }
+    );
+    expect(r.state.vitals.hp).toBe(0);
+    expect(r.lethal).toBe(true);
+  });
+
+  it('没打光就不是致命一击 —— 照常扣，玩家还有挣扎的余地', () => {
+    const r = hurt(4);
+    expect(r.state.vitals.hp).toBe(6);
+    expect(r.lethal).toBeFalsy();
+  });
+
+  it('🔴 致命一击能跨过"濒死冻结"，挤牙膏不能', () => {
+    // 濒死（还剩 3 点血）：1 点的小扣被冻结拦住（给施救窗口）
+    const nearDeath = { ...blood(3), dying: true };
+    const nibble = applyDeltas(
+      nearDeath,
+      [{ target: 'vitals.hp', op: 'dec', amount: 1 }] as never,
+      { ruleset: coc7, harm: { checked: true, fumble: false } }
+    );
+    expect(nibble.rejected).toHaveLength(1);
+    expect(nibble.lethal).toBeFalsy();
+    // 而"打光剩余"的那一下越过它（死亡不该被那道闸护住）
+    const finisher = applyDeltas(
+      nearDeath,
+      [{ target: 'vitals.hp', op: 'dec', amount: 9 }] as never,
+      { ruleset: coc7, harm: { checked: true, fumble: false } }
+    );
+    expect(finisher.state.vitals.hp).toBe(0);
+    expect(finisher.lethal).toBe(true);
+  });
+
+  it('回血不受这道闸管（往上涨不会让谁莫名送命）', () => {
+    const r = applyDeltas(blood(4), [{ target: 'vitals.hp', op: 'inc', amount: 5 }] as never, {
+      ruleset: coc7,
+      harm: { checked: false, fumble: false },
+    });
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.vitals.hp).toBe(9);
+  });
+
+  it('理智不吃"致命"那一档（归零走疯狂那条路，不是死）', () => {
+    const r = applyDeltas(blood(), [{ target: 'vitals.san', op: 'dec', amount: 99 }] as never, {
+      ruleset: coc7,
+      harm: { checked: true, fumble: true },
+    });
+    expect(r.state.vitals.san).toBe(0);
+    expect(r.lethal).toBeFalsy();
+  });
+
+  it('不传 `harm`（引擎自己的账 / 老调用方）→ 完全走现状', () => {
+    const r = applyDeltas(blood(), [
+      { target: 'vitals.hp', op: 'dec', amount: 3 },
+    ] as never);
+    expect(r.rejected).toHaveLength(0);
+    expect(r.state.vitals.hp).toBe(7);
+  });
+
+  it('还有别的敌人活着 → 倒下一个也不收场（别提前结束）', () => {
+    let s = base();
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.active', op: 'set', value: true },
+      { target: 'combat.foes', op: 'add', value: { name: '甲', hp: 3, max: 3 } },
+      { target: 'combat.foes', op: 'add', value: { name: '乙', hp: 3, max: 3 } },
+    ]));
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: '甲', amount: 5 },
+    ]));
+    expect(s.combat.foes.map((f) => f.name)).toEqual(['乙']);
+    expect(s.combat.active).toBe(true);
+    // 第二个也倒下 → 这时才收场
+    ({ state: s } = applyDeltas(s, [
+      { target: 'combat.foes', op: 'dec', value: '乙', amount: 5 },
+    ]));
+    expect(s.combat.foes).toHaveLength(0);
+    expect(s.combat.active).toBe(false);
   });
 
   /*

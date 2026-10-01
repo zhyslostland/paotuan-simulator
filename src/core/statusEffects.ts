@@ -24,6 +24,45 @@ export function turnsKeyOf(name: string): string {
   return `${name}轮数`;
 }
 
+/* ============================================================
+ * 🔴 「flags 里哪些算**正在生效的状态**」—— **判据全仓只此一份**
+ *
+ * ## 为什么要把这三行抽出来（`H20·残留2`，协作方第 26 版）
+ * 以前 `tickStatusEffects` / `statusNote` / `statusFlagLines` **各写一遍**
+ * 「跳过 `<名字>轮数`」+「跳过没中的值」。三份判据当时口径一致，
+ * 但 `H16·残留` 的成因就是这么来的：改一处、漏两处 → 同一状态两种说法。
+ * 所以过滤本身也被抽成一个函数，谁都别再内联一遍。
+ * ============================================================ */
+
+/** 引擎记账键一律不当状态（`<名字>轮数`） */
+export function isTurnsKey(key: string): boolean {
+  return key.endsWith('轮数');
+}
+
+/** 这个 flag 值算不算"没中"（与 `insanityOf` 同一口径） */
+export function isStatusOff(v: unknown): boolean {
+  return v === false || v === '' || v === 0 || v == null;
+}
+
+/**
+ * 正在生效的状态条目（已滤掉记账键与"没中"的）。
+ *
+ * 结算（`tickStatusEffects`）、给守密人的话（`statusNote`）、
+ * 给玩家的那一行（`statusFlagLines`）**三处都走这一份**。
+ */
+export function liveStatusEntries(
+  flags: Record<string, unknown> | undefined
+): [string, unknown][] {
+  if (!flags) return [];
+  const out: [string, unknown][] = [];
+  for (const [key, value] of Object.entries(flags)) {
+    if (isTurnsKey(key)) continue;
+    if (isStatusOff(value)) continue;
+    out.push([key, value]);
+  }
+  return out;
+}
+
 export interface StatusTick {
   /** 这一轮真正造成的数值变化（key → 增量，负数＝扣） */
   deltas: StateDelta[];
@@ -53,12 +92,8 @@ export function tickStatusEffects(
   const cleared: string[] = [];
   const remaining: { name: string; turns: number }[] = [];
 
-  for (const [key, value] of Object.entries(flags)) {
-    // `false` / 空串 / 0 / null 一律算没中（与 insanityOf 同一口径）
-    if (value === false || value === '' || value === 0 || value == null) continue;
-    // 引擎自己的记账键不是状态
-    if (key.endsWith('轮数')) continue;
-
+  // 判据只有一份：`liveStatusEntries`（滤掉记账键与"没中"的）
+  for (const [key] of liveStatusEntries(flags)) {
     const def = findStatusEffect(rs, key);
     if (!def) continue;
 
@@ -129,9 +164,8 @@ export function statusNote(rs: Ruleset | undefined, flags: Record<string, unknow
   const live: string[] = [];
   const gone: string[] = [];
 
-  for (const [key, value] of Object.entries(flags)) {
-    if (value === false || value === '' || value === 0 || value == null) continue;
-    if (key.endsWith('轮数')) continue;
+  // 与 `tickStatusEffects` / `statusFlagLines` 共用同一份过滤（`H20·残留2`）
+  for (const [key] of liveStatusEntries(flags)) {
     const def = findStatusEffect(rs, key);
     if (!def) continue;
 
@@ -150,6 +184,115 @@ export function statusNote(rs: Ruleset | undefined, flags: Record<string, unknow
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/* ============================================================
+ * 「flags → 玩家看得懂的那一行」
+ *
+ * 🔴 H20（协作方第 25 版）：**判据只许有一份**。
+ *
+ * 以前两个面板各写一份过滤：只认字面 `INSANITY_TURNS_FLAG`（`疯狂轮数`），
+ * 于是别的引擎记账键（`中毒轮数`）照样显示成「中毒轮数：2」，
+ * 而布尔状态 `中毒: true` 还会把 `true` 这个英文字甩到界面上。
+ * `H16·残留` / `§6.4` 反复分叉，教训就是**判据分两份**。
+ *
+ * 现在：过滤所有「轮数」结尾的键；布尔状态若配了轮数就渲染成「（还剩 N 轮）」。
+ * `statusNote` 与两个面板三处共用这一份 —— 过滤本身也是共用的
+ * （`liveStatusEntries`），不再是"三处各写一遍同样的两行"（`H20·残留2`）。
+ * ============================================================ */
+
+export interface StatusFlagLine {
+  /** 状态名 */
+  key: string;
+  /** 给玩家看的一行（已拼好轮数，布尔值不会再露出 `true`） */
+  text: string;
+  /** 是不是引擎/守密人标出的严重状态 */
+  severe: boolean;
+}
+
+/** 能放在界面上显示的状态行（过滤掉记账键与"没中"的） */
+export function statusFlagLines(flags: Record<string, unknown> | undefined): StatusFlagLine[] {  if (!flags) return [];
+  const out: StatusFlagLine[] = [];
+  for (const [key, value] of liveStatusEntries(flags)) {
+    const turns = Number(flags[turnsKeyOf(key)]);
+    const hasTurns = Number.isFinite(turns) && turns > 0;
+    // `true` 是引擎/守密人打的标记 —— 对玩家只显示状态名，绝不显示 `true`
+    const body = value === true ? key : String(value);
+    out.push({
+      key,
+      text: hasTurns ? `${body}（还剩 ${Math.floor(turns)} 轮）` : body,
+      severe: value === true,
+    });
+  }
+  return out;
+}
+
+/* ============================================================
+ * 🔴 `P3-8`（协作方第 27 版 · 主人 2026-09-28 拍板「按是不是状态过滤」）
+ *
+ * ## 病在哪
+ * `P3-7` 撤掉那层「只留中文键」的过滤是对的（语言不该决定藏不藏状态），
+ * 但那层过滤**顺带**还在挡一件事：守密人（模型）顺手写进 `flags` 的**非状态键**
+ * —— `notes: '...'`、`quest: '...'` 这类。撤掉之后它们会当成状态列进世界页「剧情标记」。
+ * 所以要做的是：**删掉"语言"这个错误判据，换成一个说得通的判据**，不是把判据一起删掉。
+ *
+ * ## 判据：什么算"一个状态"
+ * 四条**任一**成立即算（够宽，宁可多认也不漏真状态）：
+ *   ① 规则包声明过（`statusEffects` 里找得到）；
+ *   ② 引擎在给它记账（存在配对的 `<名字>轮数` 键）；
+ *   ③ 是**引擎自己写**的那几个键（`ENGINE_STATUS_KEYS`）—— 它们不是模型即兴写的；
+ *   ④ 值是**布尔真**（`true` 是明确的开关型标记，`notes: '...'` 那种长文本不是）。
+ *
+ * ## 🔴 一道安全阀：规则包没有状态表 → **一律显示**（老行为）
+ * 自定义规则包大多没填 `statusEffects`。那种包下"什么算状态"无从判断，
+ * 这时按老规矩**全部显示**，绝不因为一个判断不了就把它藏了
+ * —— 藏状态是本项目踩过的坑（早期用户的「流血状态界面不显示」）。
+ * ============================================================ */
+
+/**
+ * 引擎自己会写进 `flags` 的状态键（`store.ts` 的结算处）。
+ * 它们必须一律当状态：不是模型即兴键，是引擎的账。
+ */
+export const ENGINE_STATUS_KEYS = ['临时疯狂', '永久疯狂', '濒死', '濒临死亡', '伤口'] as const;
+
+/**
+ * 有没有配对的"轮数"键（`中毒` ← `中毒轮数`）。
+ *
+ * ⚠️ 刻意用**后缀匹配**而不是精确的 `turnsKeyOf(key)`：
+ * `临时疯狂` 的记账键是 `疯狂轮数`，而 `turnsKeyOf('临时疯狂')` 算出来的是
+ * `临时疯狂轮数`（**全仓没人写它**，见 `P4-5`）。只认精确匹配的话，
+ * `H16·残留` 那条"临时疯狂（还剩 N 轮）"就会从世界页消失 —— 那是在修新 bug 的路上踩回旧 bug。
+ */
+function hasTurnsPair(flags: Record<string, unknown> | undefined, key: string): boolean {
+  if (!flags) return false;
+  return Object.keys(flags).some((k) => isTurnsKey(k) && key.endsWith(k.slice(0, -'轮数'.length)));
+}
+
+/** 这个 flag 算不算"一个状态"（判据只有这一份，见上面那段） */
+export function isStatusKey(
+  rs: Ruleset | undefined,
+  flags: Record<string, unknown> | undefined,
+  key: string
+): boolean {
+  if (findStatusEffect(rs, key)) return true;
+  if (hasTurnsPair(flags, key)) return true;
+  if ((ENGINE_STATUS_KEYS as readonly string[]).includes(key)) return true;
+  if (flags?.[key] === true) return true;
+  // 规则包没状态表 → 判断不了 → 按老行为全部显示（安全阀）
+  return !hasStatusTable(rs);
+}
+
+/**
+ * 「剧情标记」那种地方要的那一份：**只列"算状态"的**。
+ *
+ * 与 `statusFlagLines` 共用同一份渲染判据（拼轮数、藏 `true`），
+ * 只是在外面多一道"这是不是状态"。两处用同一个函数，口径不会再分叉。
+ */
+export function declaredStatusLines(
+  flags: Record<string, unknown> | undefined,
+  rs: Ruleset | undefined
+): StatusFlagLine[] {
+  return statusFlagLines(flags).filter((l) => isStatusKey(rs, flags, l.key));
 }
 
 /** 导出给测试用的类型（避免测不到内部行为） */

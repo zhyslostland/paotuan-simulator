@@ -23,13 +23,16 @@
 export const INSANITY_TURNS = 3;
 
 /**
- * 引擎自己记的轮数存在这个键上（**真源**，见下面 `resolveTurns`）。
+ * 引擎自己记的轮数存在 `flags['疯狂轮数']` 这个键上（**真源**，见下面 `resolveTurns`）。
  *
  * ⚠️ 它是**记账用的**，不是给玩家看的状态 ——
  * 状态栏必须把它滤掉（H16），轮数由 `insanityOf().label` 统一说成人话
  * （显示成「临时疯狂（还剩 2 轮）」，而不是甩一个「疯狂轮数：2」让玩家自己拼）。
+ *
+ * 🔴 `P4-4`（协作方第 26 版）：这里**曾经**导出一个 `INSANITY_TURNS_FLAG` 常量。
+ * `H16` 改判据后它一个调用点都没有了（过滤改认 `turnsKeyOf('临时疯狂')` 的衍生键），
+ * 留着只会让下一个人以为它还在用 —— 已删。键名真源＝`turnsKeyOf('临时疯狂')`。
  */
-export const INSANITY_TURNS_FLAG = '疯狂轮数';
 
 /** 目标值修正量：百分比规则（d100） */
 const PENALTY_PERCENT = -20;

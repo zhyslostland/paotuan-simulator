@@ -30,19 +30,26 @@ BANNED_EXACT = {
     'index.html', 'version.json', 'sw.js', 'sw-v2.js',
     'manifest.webmanifest', 'icon.svg', 'entry-redirect.js',
 }
-BANNED_PREFIX = ('assets/', 'dist/', 'node_modules/', '.git/', '.workbuddy/')
+# 🔴 大体积资产同样不进包：`generated-images/` 是画风比对用的平台生图（5 张 ≈ 7 MB，带水印）。
+#    与 `scripts/pack-for-review.py` 的 BANNED_PREFIX **必须一致**，否则这里会报「漏」。
+BANNED_PREFIX = ('assets/', 'dist/', 'node_modules/', '.git/', '.workbuddy/',
+                 'generated-images/')
 
 # 协作方要用的关键文件（少一个就是"漏"）
 MUST_HAVE = [
-    'README.md', '协作方接手.md', '优化审核包.md', '项目台账.md', '协作清单.md',
-    '优化计划.md', '规则包指南.md', '跑团模拟器开发蓝图.md', '进度报告.html',
+    # ⚠️ 这三份 2026-09 起住在 `docs/` 下（写在根路径是历史遗留 → 每次都是假红）
+    'README.md', 'docs/协作/协作方接手.md', 'docs/archive/优化审核包.md', '项目台账.md', '协作清单.md',
+    'docs/archive/优化计划.md', '规则包指南.md', 'docs/archive/跑团模拟器开发蓝图.md', '进度报告.html',
     'index.dev.html', 'package.json', 'package-lock.json', 'tsconfig.json',
     'vite.config.ts', '.gitignore',
     'scripts/use-dev-entry.mjs', 'scripts/publish-root.mjs', 'scripts/check-dist.mjs',
     'scripts/memory-lint.mjs', 'scripts/pack-for-review.py', 'scripts/audit-pack.py',
     'public/entry-redirect.js', 'public/icon.svg',
-    'docs/README.md', 'docs/台账-版本史.md', 'docs/协作存档-2026-09.md',
+    'docs/README.md', 'docs/文档地图.md', 'docs/协作/台账-版本史.md', 'docs/协作/协作存档-2026-09.md',
+    'docs/报告/分次执行报告-战斗修复.md',
 ]
+# ⚠️ 2026-09-28 文档整理：`docs/` 分了 协作/ 报告/ archive/ 三个子目录。
+# 判定按**文件名**比对（见下面 miss2），以后文件再挪位置也不会假红 —— 路径会漂，名字才是锚。
 
 
 def find_pack():
@@ -88,7 +95,8 @@ def main():
     ok2 = not bad
 
     # ---- ③ 关键文件 ----
-    miss2 = [f for f in MUST_HAVE if f not in names]
+    _base = {x.rsplit('/', 1)[-1] for x in names}
+    miss2 = [f for f in MUST_HAVE if f.rsplit('/', 1)[-1] not in _base]
     print('③ 关键文件缺失:', miss2 if miss2 else '无 ✅')
     ok3 = not miss2
 
@@ -105,15 +113,17 @@ def main():
     def rd(f):
         return z.read(f).decode('utf-8', 'replace') if f in names else ''
 
+    # 版本号从 `src/version.ts` 读真源 —— 写死某个值（v0.8.7 / 667 条）每轮都会假红
+    m = re.search(r"APP_VERSION\s*=\s*'([^']+)'", rd('src/version.ts'))
+    ver = m.group(1) if m else ''
+
     checks = [
         ('README 指向包内协作方文档', '协作方接手.md' in rd('README.md')),
-        # 断言"新值在"而不是"旧值不在" —— README 里另有**历史叙述**提到 155（如「136 → 155」），
-        # 那是历史记录不该改，用「旧值不存在」会误报。
-        ('README 的测试数是当前值（667）', '667 个' in rd('README.md')),
-        ('审核包在包内且自带路径说明', '你手上这个 zip' in rd('优化审核包.md')),
-        ('接手文档含三条职责', '减少我（实现方）的 token 消耗' in rd('协作方接手.md')),
-        ('台账版本是最新', 'v0.8.7' in rd('项目台账.md')),
-        ('优化计划含「接手先看」', '接管先看' in rd('优化计划.md') or '接手先看' in rd('优化计划.md')),
+        # README 里不写版本号（以前那条「测试数是当前值 667」早已不适用 → 删）
+        ('审核包在包内且自带路径说明', '你手上这个 zip' in rd('docs/archive/优化审核包.md')),
+        ('接手文档含三条职责', '减少我（实现方）的 token 消耗' in rd('docs/协作/协作方接手.md')),
+        ('台账版本是最新 %s' % (ver or '?'), bool(ver) and ver in rd('项目台账.md')),
+        ('优化计划含「接手先看」', '接管先看' in rd('docs/archive/优化计划.md') or '接手先看' in rd('docs/archive/优化计划.md')),
     ]
     print()
     print('④ 内容抽检')

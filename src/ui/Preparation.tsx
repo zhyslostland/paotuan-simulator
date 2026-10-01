@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { capSkillsToBudget } from '../core/skills.js';
 import { useStore, deriveAddress, addressOf, defaultCharacteristics, characteristicBudget, skillBudget, BUILTIN_MODULES, starterCharacterOf, starterSkillsFor, type CharacterProfile, type Companion, type ModuleItem, type ModuleMonster, type ModuleNpc, type WorldbookEntry } from './store';
 import { getRuleset } from '../core/rulesets/index.js';
 import type { Ruleset } from '../core/rulesets/types.js';
 import { getGenre, listGenres, type Genre } from '../core/genres.js';
 import { stripModuleWorldbook } from '../core/worldbook.js';
+import { normalizeDeadlineIn, normalizeStartClock } from '../core/clock.js';
 import { ImageField } from './ImageField';
 import {
   characterSystemPrompt,
@@ -151,12 +153,12 @@ function SkillPicker({
               onClick={() => onAdd(c.name, c.base)}
               className={`flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-left text-[12px] transition ${
                 has
-                  ? 'border-ink-700 text-mist-500/40'
+                  ? 'border-ink-700 text-mist-500'
                   : 'border-ink-600 text-mist-300 hover:border-gold-600/50 hover:text-mist-100'
               }`}
             >
               <span className="truncate">{c.name}</span>
-              <span className="shrink-0 tabular-nums text-[11px] text-gold-500/70">
+              <span className="shrink-0 tabular-nums text-[11px] text-gold-500">
                 {has ? '已选' : `${c.base}%`}
               </span>
             </button>
@@ -168,7 +170,7 @@ function SkillPicker({
           </p>
         )}
       </div>
-      <p className="mt-2 text-[10px] leading-relaxed text-mist-500/80">
+      <p className="mt-2 text-[10px] leading-relaxed text-mist-500">
         右侧百分比是规则书里的<b>基础值</b>（没专门练过时也有的成功率）。选中即按基础值加入，再往上加点。
       </p>
     </div>
@@ -202,7 +204,7 @@ function DerivedPreview({
           </span>
         ))}
       </div>
-      <p className="mt-1 text-[10px] leading-relaxed text-mist-500/80">
+      <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
         生命值＝(体质＋体型)/10，魔法值＝意志/5，理智起始＝意志。开团时会按这些自动填满状态。
       </p>
     </div>
@@ -235,11 +237,58 @@ function BudgetBar({
           style={{ width: `${Math.max(0, Math.min(100, (spent / total) * 100))}%` }}
         />
       </div>
-      <p className="mt-1 text-[10px] leading-relaxed text-mist-500/80">
+      <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
         技能点＝技能值减掉基础值后的投入。剩余不够时，加点会自动封顶。
       </p>
     </div>
   );
+}
+
+/**
+ * 生成类请求的**兜底超时**（H24）。
+ *
+ * ⚠️ 别定短了：第 9 轮实测长篇模组生成要 **220 秒**，第 12 轮那次更是 200 秒没回。
+ * 定 2 分钟会把正常的慢请求误杀 —— 所以这里给 5 分钟当**兜底**，
+ * 真正给玩家出口的是旁边那个「取消」按钮（随时可点）。
+ */
+const GEN_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * 给**不在 `AiGenBox` 里**的那些生成点（一键生成两张表、整理成模组卡）用的超时兜底。
+ * 用完必须调 `done()`，否则定时器会漏在那儿。
+ */
+function genTimeout() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), GEN_TIMEOUT_MS);
+  return { signal: ctl.signal, done: () => clearTimeout(timer) };
+}
+
+/*
+ * `H23`（协28 §F① 第 19 条 · 协29 补裁）：生成**可以分几通**，界面得跟着说。
+ *
+ * 两通（模组骨架 → 世界书 + 队友）原来只报最后一次结果，而且是在第一通结束时就报
+ * —— 主人看到「已生成，记得检查并微调」，接着发现世界书是空的、同行者没生成。
+ * 所以这里给调用方两个口子：
+ *   - `onStage(msg)`：**进行中的改口**（"模组已好，正在生成世界书与队友…"）；
+ *   - **返回值**：这一趟的收尾话术（不返回就用默认那句"已生成，记得检查并微调"）——
+ *     第二通失败时调用方就能说"模组已好，但世界书/队友没生成上"，而不是假装全成了。
+ */
+/**
+ * `H23`：模组包**第二通没成**时的说法。
+ *
+ * 单独抽出来（而不是内联在 JSX 里）是为了让"**不许说全好了**"这条能被断言 ——
+ * 原来是空 catch，界面上照样写「已生成，记得检查并微调」，
+ * 主人看到的就是"已生成 + 世界书空的 + 同行者没有"。
+ */
+export function modulePackPartialNote(detail?: string): string {
+  return detail
+    ? `模组已好，但世界书 / 队友没生成上（${detail}）。可以再点一次生成，或手填。`
+    : '模组已好，但世界书 / 队友这一次没生成上（模型没给出可用的结果）。可以再点一次生成，或手填。';
+}
+
+/** `H23`：第二通被**停下**（超时 / 玩家点停止）时的说法 —— 与"失败"分开说，免得像坏了 */
+export function modulePackStoppedNote(): string {
+  return '模组已好。世界书 / 队友那一步停下了（你点了停止，或等太久）—— 可以再点一次生成，或手填。';
 }
 
 function AiGenBox({
@@ -249,25 +298,46 @@ function AiGenBox({
 }: {
   label: string;
   placeholder: string;
-  onGenerate: (desc: string) => Promise<void>;
+  onGenerate: (
+    desc: string,
+    signal?: AbortSignal,
+    onStage?: (msg: string) => void
+  ) => Promise<string | void>;
 }) {
   const [open, setOpen] = useState(false);
   const [desc, setDesc] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [ok, setOk] = useState('');
+  /** `H23`：多通生成时"现在进行到哪一步"（一句话，随第一通结束改口） */
+  const [stage, setStage] = useState('');
+  /** 正在跑的那一通（给「取消」按钮用） */
+  const ctlRef = useRef<AbortController | null>(null);
 
   const run = async () => {
+    const ctl = new AbortController();
+    ctlRef.current = ctl;
+    const timer = setTimeout(() => ctl.abort(), GEN_TIMEOUT_MS);
     setBusy(true);
     setErr('');
     setOk('');
+    setStage('');
     try {
-      await onGenerate(desc.trim());
-      setOk('已生成，记得检查并微调');
+      // `H23`：收尾话术由调用方决定（多通生成时它才知道"到哪一步算成了"）
+      const doneMsg = await onGenerate(desc.trim(), ctl.signal, setStage);
+      setOk(doneMsg && doneMsg.trim() ? doneMsg.trim() : '已生成，记得检查并微调');
       setDesc('');
     } catch (e) {
-      setErr(e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`);
+      if (ctl.signal.aborted) {
+        // 超时或玩家点了取消 —— 都要说清楚"不是坏了，是可以再试"
+        setErr('生成时间太长，已经停下了（内容没丢）。可以换个说法重试，或等网络好一点再来。');
+      } else {
+        setErr(e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`);
+      }
     } finally {
+      clearTimeout(timer);
+      ctlRef.current = null;
+      setStage('');
       setBusy(false);
     }
   };
@@ -293,9 +363,25 @@ function AiGenBox({
             <button onClick={run} disabled={busy} className={smallBtn}>
               {busy ? '生成中…' : '开始生成'}
             </button>
+            {/*
+             * H24：**生成时给一个出口**。
+             *
+             * 以前只能干等（第 12 轮实测卡了 200 秒）或刷新脱身 ——
+             * 而刷新会把这一页填好的东西一起丢掉。现在随时能停，且**内容不丢**。
+             */}
+            {busy && (
+              <button
+                onClick={() => ctlRef.current?.abort()}
+                className="shrink-0 rounded-md border border-ink-600 px-2.5 py-1 text-[11px] text-mist-400 transition hover:border-blood-400/60 hover:text-blood-400"
+              >
+                停止
+              </button>
+            )}
             {err && <span className="text-[11px] text-blood-400">{err}</span>}
             {ok && <span className="text-[11px] text-moss-400">{ok}</span>}
           </div>
+          {/* `H23`：多通生成时把"现在到哪一步"写出来，别让玩家以为已经全好了 */}
+          {stage && <p className="text-[11px] text-gold-400">{stage}</p>}
           <p className="text-[10px] leading-relaxed text-mist-500">
             留空则完全由模型自由发挥。生成结果会直接覆盖当前字段。
           </p>
@@ -445,7 +531,7 @@ function CharacterTab() {
             套用示例角色
           </button>
         )}
-        <span className="text-[10px] text-mist-500/70">
+        <span className="text-[10px] text-mist-500">
           酒馆卡只取设定，数值按当前规则重建
         </span>
       </div>
@@ -481,7 +567,7 @@ function CharacterTab() {
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
-          称呼 <span className="text-mist-500/70">（NPC 怎么叫你，留空按姓名+性别推导）</span>
+          称呼 <span className="text-mist-500">（NPC 怎么叫你，留空按姓名+性别推导）</span>
         </span>
         <input
           className={inputCls}
@@ -493,13 +579,26 @@ function CharacterTab() {
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
-          描述 <span className="text-mist-500/70">（外貌、年龄、职业、来历）</span>
+          描述 <span className="text-mist-500">（外貌、年龄、职业、来历）</span>
         </span>
         <textarea
           className={`${inputCls} resize-none`}
           rows={3}
           value={character.description}
           onChange={(e) => setCharacter({ description: e.target.value })}
+        />
+      </label>
+
+      <label className="block">
+        <span className="mb-1 block text-[11px] text-mist-400">
+          外貌 <span className="text-mist-500">（只写长相，角色立绘按这句画；改完要重新生成才生效）</span>
+        </span>
+        <textarea
+          className={`${inputCls} resize-none`}
+          rows={2}
+          value={character.appearance ?? ''}
+          onChange={(e) => setCharacter({ appearance: e.target.value })}
+          placeholder="例如：齐肩的黑发，左眉一道浅疤，常年穿一件洗得发白的风衣"
         />
       </label>
 
@@ -513,7 +612,7 @@ function CharacterTab() {
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
-          性格 <span className="text-mist-500/70">（说话方式、弱点、在意什么）</span>
+          性格 <span className="text-mist-500">（说话方式、弱点、在意什么）</span>
         </span>
         <textarea
           className={`${inputCls} resize-none`}
@@ -525,7 +624,7 @@ function CharacterTab() {
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
-          对话示例 <span className="text-mist-500/70">（可选，给 GM 参考你说话的风格）</span>
+          对话示例 <span className="text-mist-500">（可选，给 GM 参考你说话的风格）</span>
         </span>
         <textarea
           className={`${inputCls} resize-none`}
@@ -539,7 +638,7 @@ function CharacterTab() {
       <div>
         <div className="mb-1.5 flex items-center justify-between gap-2">
           <span className="text-[11px] text-mist-400">
-            属性 <span className="text-mist-500/70">（由规则包「{rs.name}」定义）</span>
+            属性 <span className="text-mist-500">（由规则包「{rs.name}」定义）</span>
           </span>
           <div className="flex shrink-0 items-center gap-3">
             {/*
@@ -555,7 +654,7 @@ function CharacterTab() {
                 title={`规则包「${rs.name}」的属性总额是 ${budget.total} 点`}
               >
                 总计 <b className="text-mist-200">{budget.spent}</b>
-                <span className="text-mist-500/70"> / {budget.total}</span>
+                <span className="text-mist-500"> / {budget.total}</span>
                 {(budget.remaining ?? 0) < 0 && (
                   <span className="ml-1">超 {Math.abs(budget.remaining!)}</span>
                 )}
@@ -610,7 +709,7 @@ function CharacterTab() {
       <div>
         <div className="mb-1.5 flex items-center justify-between gap-2">
           <span className="text-[11px] text-mist-400">
-            技能 <span className="text-mist-500/70">（数值＝成功率，越高越好）</span>
+            技能 <span className="text-mist-500">（数值＝成功率，越高越好）</span>
           </span>
           <div className="flex shrink-0 gap-3">
             <button
@@ -662,7 +761,7 @@ function CharacterTab() {
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
-          随身物品 <span className="text-mist-500/70">（每行一件，开团时会放进背包）</span>
+          随身物品 <span className="text-mist-500">（每行一件，开团时会放进背包）</span>
         </span>
         <textarea
           className={`${inputCls} resize-none`}
@@ -680,11 +779,13 @@ function CharacterTab() {
       <AiGenBox
         label="角色"
         placeholder="例如：一个因伤退役的战地记者，左腿有旧伤，对无法解释的事有偏执的兴趣"
-        onGenerate={async (desc) => {
+        onGenerate={async (desc, signal) => {
           const data = await generateJson<{
             name?: string;
             gender?: string;
             description?: string;
+            /** 外貌锚点：AI 生成时一并产出，画这张卡的立绘就看这一句 */
+            appearance?: string;
             personality?: string;
             scenario?: string;
             characteristics?: Record<string, number>;
@@ -709,7 +810,8 @@ function CharacterTab() {
             {
               ...config,
               maxTokens: 2048,
-            }
+            },
+            signal
           );
           if (!data) throw new Error('模型没有返回合法 JSON，请重试或换个描述');
           /*
@@ -743,6 +845,12 @@ function CharacterTab() {
             gender: data.gender ?? character.gender,
             // 清掉旧的称呼，让它按新姓名/性别重新推导
             address: undefined,
+            /*
+             * 外貌随这一轮的卡走，**不串上一张卡**（与上面 itemDetails 同一条口径）：
+             * 模型没给出外貌＝这一轮没生成好，立绘届时退回 description；
+             * 沿用旧卡的外貌会让"换了个角色、脸还是上一张卡"这种错更难发现。
+             */
+            appearance: data.appearance?.trim() || undefined,
             description: data.description ?? character.description,
             personality: data.personality ?? character.personality,
             scenario: data.scenario ?? character.scenario,
@@ -750,7 +858,22 @@ function CharacterTab() {
               ...character.characteristics,
               ...(data.characteristics ?? {}),
             },
-            skills: data.skills ?? character.skills,
+            /*
+             * 🔴 `G10`+`G22`（协30 §2.5）：**落盘前按预算封顶**。
+             *
+             * 提示词里那条"用尽但绝不超支"只是软约束 —— 真机生成出来的是
+             * 「已用 333 / 剩余 −23」（预算 310）。手工加点走 `setSkillValue` 的
+             * `skillBudget` 封顶，AI 这条路以前没有，所以这里补上：
+             * **写了约束 ≠ 引擎在执行**（与 `P2-10` / `G1` 同一类坑）。
+             * 属性要在同一批里一起算（预算＝教育×4＋智力×2，生成的属性会改它）。
+             */
+            skills: data.skills
+              ? capSkillsToBudget(
+                  data.skills,
+                  { ...character.characteristics, ...(data.characteristics ?? {}) },
+                  rulesetId
+                )
+              : character.skills,
             // 两张表都只认这一轮生成的（名字与详情一一对应，不会串到上一张卡）
             items,
             itemDetails,
@@ -901,11 +1024,24 @@ function CompanionsTab() {
                 onChange={(e) => patch(c, { agenda: e.target.value })}
                 placeholder="他自己的打算（不喧宾夺主）"
               />
+              <textarea
+                className={`${inputCls} resize-none`}
+                rows={2}
+                value={c.appearance ?? ''}
+                onChange={(e) => patch(c, { appearance: e.target.value })}
+                placeholder="外貌：只写长相（发型发色、五官、身形、衣着），立绘按这句画"
+              />
               <ImageField
                 label="队友头像"
                 prompt={characterImagePrompt(
                   {
                     name: c.name,
+                    /*
+                     * 以前这里喂的是 `${role}。${personality}` —— **一个字写长相的都没有**，
+                     * 于是每次重生成都是模型脑补的新脸。
+                     * 现在优先吃 `appearance`；老存档没有它，就还是原来那句（一个字都不变）。
+                     */
+                    appearance: c.appearance,
                     description: `${c.role}。${c.personality}`,
                   },
                   genre
@@ -979,24 +1115,29 @@ function CompanionsTab() {
       <AiGenBox
         label="队友"
         placeholder="例如：一个话不多的老铁路工，怕黑但要面子，不识字"
-        onGenerate={async (desc) => {
+        onGenerate={async (desc, signal) => {
           const data = await generateJson<{
             name?: string;
             role?: string;
             personality?: string;
+            /** 外貌锚点：AI 生成时一并产出，画这名队友的立绘就看这一句 */
+            appearance?: string;
             initiative?: Companion['initiative'];
             skills?: Record<string, number>;
             vitals?: Record<string, number>;
           }>(companionSystemPrompt(genre, getRuleset(rulesetId)), desc || `请自由创作一名适合「${genre.name}」题材的随行同伴。`, {
             ...config,
             maxTokens: 2048,
-          });
+          },
+          signal);
           if (!data?.name) throw new Error('模型没有返回合法 JSON，请重试');
-          upsert({
-            id: uid(),
-            name: data.name,
-            role: data.role ?? '身份未定',
-            personality: data.personality ?? '',
+            upsert({
+              id: uid(),
+              name: data.name,
+              role: data.role ?? '身份未定',
+              personality: data.personality ?? '',
+              // 没有外貌时留空 → 立绘退回 `${role}。${personality}` 的老拼法（见 ImageField 的 prompt）
+              appearance: data.appearance?.trim() || undefined,
             skills: data.skills ?? {},
             vitals: data.vitals ?? { hp: 12, san: 60, mp: 12 },
             initiative:
@@ -1121,7 +1262,7 @@ function WorldbookTab() {
               <span className="text-[11px] text-mist-400">常驻</span>
             </label>
             <span
-              className="text-[10px] text-mist-500/70"
+              className="text-[10px] text-mist-500"
               title="勾上后这一条不看关键词，每轮都在 —— 用来放世界的底层设定"
             >
               （每轮都注入）
@@ -1183,7 +1324,7 @@ function WorldbookTab() {
       <AiGenBox
         label="世界书"
         placeholder="例如：一个封闭的渔业小镇，居民信奉某种海洋信仰，对外人极度警惕"
-        onGenerate={async (desc) => {
+        onGenerate={async (desc, signal) => {
           const data = await generateJson<
             {
               keys?: string[];
@@ -1195,7 +1336,7 @@ function WorldbookTab() {
           >(
             worldbookSystemPrompt(genre),
             desc || `请围绕「${genre.name}」题材自由创作几个世界设定条目。`,
-            { ...config, maxTokens: 3072 }
+            { ...config, maxTokens: 3072 }, signal
           );
           if (!Array.isArray(data) || data.length === 0)
             throw new Error('模型没有返回合法的条目数组，请重试');
@@ -1244,7 +1385,7 @@ function Area({
   return (
     <label className="block">
       <span className="mb-1 block text-[11px] text-mist-400">
-        {label} {hint && <span className="text-mist-500/70">{hint}</span>}
+        {label} {hint && <span className="text-mist-500">{hint}</span>}
       </span>
       <textarea
         className={`${inputCls} resize-none`}
@@ -1282,13 +1423,16 @@ function ModuleTab() {
   const genItems = async () => {
     setGenItemsBusy(true);
     setGenItemsErr('');
+    // H24：给这一通也装个超时兜底（它不在 `AiGenBox` 里，拿不到那边的 controller）
+    const t = genTimeout();
     try {
       const data = await generateJson<{
         items?: { name?: string; look?: string; effect?: string; kind?: string }[];
       }>(
         itemTableSystemPrompt(genre, gameModule, getRuleset(rulesetId)),
         `请为这个模组设计一张道具表：${gameModule.title}\n\n${gameModule.premise}`,
-        { ...config, maxTokens: 2048 }
+        { ...config, maxTokens: 2048 },
+        t.signal
       );
       const items: ModuleItem[] = (data?.items ?? [])
         .filter((it) => it.name?.trim())
@@ -1306,10 +1450,13 @@ function ModuleTab() {
       setGenItemsErr('');
     } catch (e) {
       const msg = e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`;
-      setGenItemsErr(msg);
+      setGenItemsErr(
+        t.signal.aborted ? '生成时间太长，已经停下了（内容没丢）。可以重试一次。' : msg
+      );
       // 往上抛：`genTables()` 要靠它知道"这一半失败了"（会自己 catch 记一笔）
       throw e;
     } finally {
+      t.done();
       setGenItemsBusy(false);
     }
   };
@@ -1327,6 +1474,8 @@ function ModuleTab() {
   const genMonsters = async () => {
     setGenMonstersBusy(true);
     setGenMonstersErr('');
+    // H24：同样装一个超时兜底
+    const t = genTimeout();
     try {
       const data = await generateJson<{
         monsters?: {
@@ -1340,7 +1489,8 @@ function ModuleTab() {
       }>(
         monsterSystemPrompt(genre, getRuleset(rulesetId), gameModule),
         `请为这个模组设计敌对者：${gameModule.title}\n\n${gameModule.premise}`,
-        { ...config, maxTokens: 2048 }
+        { ...config, maxTokens: 2048 },
+        t.signal
       );
       const list: ModuleMonster[] = (data?.monsters ?? [])
         .filter((m) => m.name?.trim())
@@ -1358,10 +1508,13 @@ function ModuleTab() {
       setMonstersRevealed(true);
     } catch (e) {
       const msg = e instanceof ModelError ? e.message : `生成失败：${(e as Error).message}`;
-      setGenMonstersErr(msg);
+      setGenMonstersErr(
+        t.signal.aborted ? '生成时间太长，已经停下了（内容没丢）。可以重试一次。' : msg
+      );
       // 同上：`genTables()` 靠抛出来分辨哪一半失败
       throw e;
     } finally {
+      t.done();
       setGenMonstersBusy(false);
     }
   };
@@ -1516,7 +1669,7 @@ function ModuleTab() {
 
       <div className="rounded-lg border border-ink-700 bg-ink-850/50 p-2.5">
         <span className="mb-1.5 block text-[11px] text-mist-400">
-          内置模组 <span className="text-mist-500/70">（一键套用成品模组）</span>
+          内置模组 <span className="text-mist-500">（一键套用成品模组）</span>
         </span>
         <div className="flex flex-wrap gap-1.5">
           {/* 与当前题材匹配的模组排前面——选了「剑与魔法」就别老把克苏鲁的模组推给玩家 */}
@@ -1553,7 +1706,7 @@ function ModuleTab() {
                   title={match ? `适配当前题材「${genre.name}」` : ''}
                 >
                   {m.title}
-                  {match && <span className="ml-1 text-[9px] text-gold-500/80">适配</span>}
+                  {match && <span className="ml-1 text-[9px] text-gold-500">适配</span>}
                 </button>
               );
             })}
@@ -1598,7 +1751,7 @@ function ModuleTab() {
        */}
       <div>
         <span className="mb-1 block text-[11px] text-mist-400">
-          篇幅 <span className="text-mist-500/70">（决定时间尺度与规模，生成时生效）</span>
+          篇幅 <span className="text-mist-500">（决定时间尺度与规模，生成时生效）</span>
         </span>
         <div className="flex flex-wrap gap-1.5">
           {(['short', 'medium', 'long'] as ModuleScale[]).map((sc) => (
@@ -1615,7 +1768,7 @@ function ModuleTab() {
             </button>
           ))}
         </div>
-        <p className="mt-1 text-[10px] leading-relaxed text-mist-500/70">
+        <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
           {SCALE_LABEL[gameModule.scale ?? 'short']} ——{' '}
           {(gameModule.scale ?? 'short') === 'short'
             ? '时间压力以小时计，三幕，一局跑完。'
@@ -1644,7 +1797,7 @@ function ModuleTab() {
 
       <label className="block">
         <span className="mb-1 block text-[11px] text-mist-400">
-          开局地点 <span className="text-mist-500/70">（第一幕玩家身处何处；开团即写进"当前地点"）</span>
+          开局地点 <span className="text-mist-500">（第一幕玩家身处何处；开团即写进"当前地点"）</span>
         </span>
         <input
           className={inputCls}
@@ -1657,7 +1810,7 @@ function ModuleTab() {
       <div className="space-y-2 rounded-lg border border-gold-600/30 bg-gold-500/5 p-2.5">
         <span className="block text-[11px] text-gold-300">
           玩家目标{' '}
-          <span className="text-gold-500/70">
+          <span className="text-gold-500">
             （回答"我要干嘛"——开场就会展示给玩家，最重要的一项）
           </span>
         </span>
@@ -1691,7 +1844,7 @@ function ModuleTab() {
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] text-mist-400">
             GM 内部资料{' '}
-            <span className="text-mist-500/70">
+            <span className="text-mist-500">
               （真相 / 人物秘密 / 线索链 / 幕结构 / 结局）
             </span>
           </span>
@@ -1723,7 +1876,7 @@ function ModuleTab() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
             <span className="text-[11px] text-gold-300">敌对者与道具</span>
-            <span className="ml-1.5 text-[10px] text-gold-500/70">
+            <span className="ml-1.5 text-[10px] text-gold-500">
               （两张表各自单独生成，内容默认遮住，不剧透）
             </span>
           </div>
@@ -1757,7 +1910,7 @@ function ModuleTab() {
         {genAllErr && <p className="mt-1.5 text-[10px] text-gold-400">{genAllErr}</p>}
         {genMonstersErr && <p className="mt-1.5 text-[10px] text-blood-400">{genMonstersErr}</p>}
         {genItemsErr && <p className="mt-1.5 text-[10px] text-blood-400">{genItemsErr}</p>}
-        <p className="mt-1.5 text-[11px] text-mist-500/70">
+        <p className="mt-1.5 text-[11px] text-mist-500">
           已设定 {monsters.length} 个敌对者、{(gameModule.items ?? []).length} 件道具 ——
           两张表的具体内容在下面「显示剧透」之后可查可改。
         </p>
@@ -1775,7 +1928,7 @@ function ModuleTab() {
          */}
         <div className="mt-2 border-t border-gold-600/20 pt-2">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[10px] text-gold-500/80">投入战斗</span>
+            <span className="text-[10px] text-gold-500">投入战斗</span>
             {namedMonsters.length === 0 ? (
               <span className="text-[10px] text-mist-500">
                 还没有敌对者 —— 先生成敌对者表
@@ -1811,7 +1964,7 @@ function ModuleTab() {
               </>
             )}
           </div>
-          <p className="mt-1 text-[10px] text-mist-500/70">
+          <p className="mt-1 text-[10px] text-mist-500">
             这里只给操作、不给名字与数值 —— 想知道具体是哪一只，到下面「显示剧透 → 查看」。
           </p>
           {castNote && <p className="mt-1 text-[10px] text-blood-300">{castNote}</p>}
@@ -1831,7 +1984,7 @@ function ModuleTab() {
       <div>
         <div className="mb-1.5 flex items-center justify-between">
           <span className="text-[11px] text-mist-400">
-            关键人物 <span className="text-mist-500/70">（动机与秘密不会告诉玩家）</span>
+            关键人物 <span className="text-mist-500">（动机与秘密不会告诉玩家）</span>
           </span>
           <button onClick={addNpc} className="text-[11px] text-gold-400 hover:text-gold-500">
             添加
@@ -1907,7 +2060,7 @@ function ModuleTab() {
         <div className="flex items-center justify-between gap-2">
           <div>
             <span className="text-[11px] text-mist-400">敌对者</span>
-            <span className="ml-1.5 text-[10px] text-mist-500/70">
+            <span className="ml-1.5 text-[10px] text-mist-500">
               （数值定下来后战斗照此演出；含剧透，默认遮住）
             </span>
           </div>
@@ -1927,7 +2080,7 @@ function ModuleTab() {
         {genMonstersErr && <p className="mt-1.5 text-[10px] text-blood-400">{genMonstersErr}</p>}
 
         {!monstersRevealed ? (
-          <p className="mt-2 text-[11px] text-mist-500/70">
+          <p className="mt-2 text-[11px] text-mist-500">
             已设定 {monsters.length} 个敌对者（点「查看」显示，会剧透）
           </p>
         ) : (
@@ -2012,7 +2165,7 @@ function ModuleTab() {
         <div className="flex items-center justify-between gap-2">
           <div>
             <span className="text-[11px] text-mist-400">道具表</span>
-            <span className="ml-1.5 text-[10px] text-mist-500/70">
+            <span className="ml-1.5 text-[10px] text-mist-500">
               （这个模组里会出现的东西；作用写好后，玩家拾取时自动带进背包）
             </span>
           </div>
@@ -2111,7 +2264,7 @@ function ModuleTab() {
         </span>
       </label>
 
-      <p className="text-[10px] leading-relaxed text-mist-500/80">
+      <p className="text-[10px] leading-relaxed text-mist-500">
         一次生成：模组骨架 + 世界书词条（只含公开事实、不剧透）+ 3-4 个队友候选（到「同行者」里挑）。
         生成后会在上方标注<b className="text-mist-300">来源</b>——按原版还原、还是 AI 自创，一眼便知。
       </p>
@@ -2119,7 +2272,7 @@ function ModuleTab() {
       <AiGenBox
         label={canonical ? '模组包（按原版）' : '模组包'}
         placeholder="例如：敦威治恐怖事件　或　1920 年代新英格兰，一名摄影师在小镇失踪"
-        onGenerate={async (desc) => {
+        onGenerate={async (desc, signal, onStage) => {
           const data = await generateJson<{
             title?: string;
             premise?: string;
@@ -2137,15 +2290,32 @@ function ModuleTab() {
             endings?: string;
             notes?: string;
             source_note?: string;
+            /*
+             * P2-10 / H22 的**中段**（第 12 轮测出我漏了这一段）：
+             * 字段在 `types.ts` 里加了、引擎也会读，但**提示词没告诉模型** → 恒为 undefined，
+             * 于是开团时刻永远是上午 9:00（"今夜"的模组在上午开场）。
+             * 现在契约里有，这里就要接住。
+             */
+            start_clock?: { day?: number; minute?: number };
+            deadline_in?: number;
           }>(
             // 篇幅决定时间尺度：短篇以小时计，长篇以周/月计（否则一律被压成 15 分钟）
             moduleSystemPrompt(genre, getRuleset(rulesetId), gameModule.scale ?? 'short'),
             moduleUserPrompt(desc, canonical, genre),
             {
               ...config,
-              // 长篇要给得下分章的幕结构与 8-12 个地点，token 不够会截断
-              maxTokens: (gameModule.scale ?? 'short') === 'long' ? 6144 : 3072,
-            }
+              /*
+               * 长篇要给得下分章的幕结构与 8-12 个地点，token 不够会截断。
+               *
+               * `canonical`（按原版还原）也要多给：它比自创多写一大块
+               * （原版背景 / 关键人物 / 真相 / 线索链），3072 常常不够 ——
+               * 第 12 轮 `A3` 就是勾了「已出版模组」生成 64 秒后**没落地**，
+               * 八成是内容被截断、JSON 就不合法了（`generateJson` 只能返回 null）。
+               */
+              maxTokens:
+                (gameModule.scale ?? 'short') === 'long' ? 6144 : canonical ? 4096 : 3072,
+            },
+            signal
           );
           if (!data) throw new Error('模型没有返回合法 JSON，请重试');
           /*
@@ -2171,6 +2341,13 @@ function ModuleTab() {
             stakes: data.stakes ?? '',
             urgency: data.urgency ?? '',
             truth: data.truth ?? '',
+            /*
+             * P2-10 / H22：开局时刻与期限**由模型申报**（snake → camel）。
+             * 校验要严：给的不是合法数字就当没给，退回引擎的默认值 ——
+             * 宁可用上午九点，也不能让 `day:0 / minute:9999` 把时钟搞乱。
+             */
+            startClock: normalizeStartClock(data.start_clock),
+            deadlineIn: normalizeDeadlineIn(data.deadline_in),
             worldbook: [],
             npcs: (data.npcs ?? [])
               .filter((n) => n?.name)
@@ -2202,7 +2379,13 @@ function ModuleTab() {
             sourceNote: data.source_note ?? '',
           });
 
-          // 模组包：派生公开词条 + 队友候选。失败不影响已生成的模组。
+          /*
+           * 🔴 `H23`：**第一通落盘了，但活还没干完** —— 这时候要改口，不能报"已生成"。
+           * 第二通（世界书 + 队友）还要一分多钟，期间界面得一直写着还在忙。
+           */
+          onStage?.('模组已好，正在生成世界书与队友…（大约还要一分钟）');
+
+          // 模组包：派生公开词条 + 队友候选。失败不影响骨架（但**失败要说出来**，见下面的 catch）
           try {
             const pack = await generateJson<{
               entries?: { keys?: string[]; content?: string; priority?: number }[];
@@ -2227,7 +2410,7 @@ function ModuleTab() {
                 npcs: (data.npcs ?? []).map((n) => n.name).filter(Boolean),
                 notes: data.notes ?? gameModule.notes,
               }),
-              { ...config, maxTokens: 3072 }
+              { ...config, maxTokens: 3072 }, signal
             );
             if (pack) {
               // 世界书：只替换 AI 派生的词条，用户手写的不动
@@ -2278,9 +2461,24 @@ function ModuleTab() {
                   };
                 });
               if (candidates.length) useStore.getState().setCompanionCandidates(candidates);
+            } else {
+              // 模型没给出可用的包（解析失败时 `generateJson` 返回 null）—— 同样是"配套没生成上"
+              return modulePackPartialNote();
             }
-          } catch {
-            /* 配套生成失败不影响模组本身 */
+          } catch (e) {
+            /*
+             * 🔴 `H23`：**配套那一通失败必须翻给人看**。
+             *
+             * 这一格以前是空 catch（"配套生成失败不影响模组本身"）—— 骨架确实还在，
+             * 但玩家零提示，表现就是「已生成，记得检查并微调」+ 世界书空的 + 同行者没有
+             * （主人原话）。与 P1-2 同族：**失败要可见**，哪怕它不影响主体。
+             */
+            if (signal?.aborted) {
+              return modulePackStoppedNote();
+            }
+            return modulePackPartialNote(
+              e instanceof ModelError ? e.message : (e as Error).message
+            );
           }
         }}
       />
@@ -2289,7 +2487,7 @@ function ModuleTab() {
         <div className="mb-1.5 flex items-center justify-between gap-2">
           <span className="text-[11px] text-mist-400">
             从文本导入{' '}
-            <span className="text-mist-500/70">（贴模组原文 / 梗概 / 设定，AI 整理成卡）</span>
+            <span className="text-mist-500">（贴模组原文 / 梗概 / 设定，AI 整理成卡）</span>
           </span>
           {importOpen && (
             <button
@@ -2324,6 +2522,8 @@ function ModuleTab() {
                 if (!importText.trim()) return;
                 setImporting(true);
                 setImportErr('');
+                // H24：这条是第 12 轮实测卡了 200 秒的那条（A11），超时兜底必须装上
+                const t = genTimeout();
                 try {
                   const data = await generateJson<{
                     title?: string;
@@ -2342,10 +2542,13 @@ function ModuleTab() {
                     endings?: string;
                     notes?: string;
                     source_note?: string;
+                    start_clock?: { day?: number; minute?: number };
+                    deadline_in?: number;
                   }>(
                     importSystemPrompt(genre),
                     `请把下面这段文本整理成模组卡：\n\n${importText.trim()}`,
-                    { ...config, maxTokens: 3072 }
+                    { ...config, maxTokens: 3072 },
+                    t.signal
                   );
                   if (!data) throw new Error('模型没有返回合法 JSON，请重试');
                   // 同样是"真的换了模组"——走 applyModule，自带世界书一起装上
@@ -2359,6 +2562,8 @@ function ModuleTab() {
                     stakes: data.stakes ?? '',
                     urgency: data.urgency ?? '',
                     truth: data.truth ?? '',
+                    startClock: normalizeStartClock(data.start_clock),
+                    deadlineIn: normalizeDeadlineIn(data.deadline_in),
                     worldbook: [],
                     npcs: (data.npcs ?? [])
                       .filter((n) => n?.name)
@@ -2387,8 +2592,15 @@ function ModuleTab() {
                   setImportText('');
                   setImportOpen(false);
                 } catch (e) {
-                  setImportErr(e instanceof Error ? e.message : String(e));
+                  setImportErr(
+                    t.signal.aborted
+                      ? '整理时间太长，已经停下了（你贴的原文还在）。可以重试一次。'
+                      : e instanceof Error
+                        ? e.message
+                        : String(e)
+                  );
                 } finally {
+                  t.done();
                   setImporting(false);
                 }
               }}
@@ -2468,7 +2680,7 @@ function WorldTab() {
       {all.length > 0 && (
         <div>
           <p className="mb-1.5 text-[11px] text-mist-400">
-            已经有留档的世界 <span className="text-mist-500/70">（点一下切过去）</span>
+            已经有留档的世界 <span className="text-mist-500">（点一下切过去）</span>
           </p>
           <div className="flex flex-wrap gap-1.5">
             {all.map((w) => (
@@ -2482,7 +2694,7 @@ function WorldTab() {
                 }`}
               >
                 {w.name}
-                <span className="ml-1 text-mist-500/70">{w.runs.length} 局</span>
+                <span className="ml-1 text-mist-500">{w.runs.length} 局</span>
               </button>
             ))}
           </div>
@@ -2519,7 +2731,7 @@ function WorldTab() {
             <li>
               <span className="text-mist-500">这个世界还记得的人：</span>
               {preview.npcs.length === 0 ? (
-                <span className="text-mist-500/70">（没有记下谁）</span>
+                <span className="text-mist-500">（没有记下谁）</span>
               ) : (
                 <>
                   {preview.npcs.join('、')}
@@ -2530,14 +2742,14 @@ function WorldTab() {
             <li>
               <span className="text-mist-500">还挂着的事：</span>
               {preview.threads.length === 0 ? (
-                <span className="text-mist-500/70">（上一局的事了结了）</span>
+                <span className="text-mist-500">（上一局的事了结了）</span>
               ) : (
                 preview.threads.map((t) => t.name).join('、')
               )}
             </li>
           </ul>
         ) : (
-          <p className="mt-3 border-t border-ink-700 pt-2.5 text-[11px] leading-relaxed text-mist-500/80">
+          <p className="mt-3 border-t border-ink-700 pt-2.5 text-[11px] leading-relaxed text-mist-500">
             这个世界还没有留档 —— 跑完一局之后才有东西可带。
             身上带的东西、伤势、疯狂不会带过去：那些是上一局的事，不是世界的事。
           </p>
@@ -2566,9 +2778,9 @@ function WorldTab() {
           <ul className="mt-2 space-y-1">
             {current.runs.slice(0, 4).map((r) => (
               <li key={r.at} className="flex items-baseline gap-2 text-[11px] text-mist-400">
-                <span className="shrink-0 text-mist-500/70">{shortDate(r.at)}</span>
+                <span className="shrink-0 text-mist-500">{shortDate(r.at)}</span>
                 <span className="min-w-0 flex-1 truncate">{runLabel(r)}</span>
-                <span className="shrink-0 text-mist-500/70">{r.turns} 回</span>
+                <span className="shrink-0 text-mist-500">{r.turns} 回</span>
               </li>
             ))}
           </ul>
@@ -2597,7 +2809,7 @@ function WorldTab() {
         </div>
 
         {cards.length === 0 ? (
-          <p className="mt-3 border-t border-ink-700 pt-2.5 text-[11px] text-mist-500/80">
+          <p className="mt-3 border-t border-ink-700 pt-2.5 text-[11px] text-mist-500">
             档案库还是空的。
           </p>
         ) : (
@@ -2610,7 +2822,7 @@ function WorldTab() {
                     {archiveBlurb(c)}
                   </p>
                   {!matchesRuleset(c, rulesetId) && (
-                    <p className="mt-0.5 text-[10px] text-gold-400/80">
+                    <p className="mt-0.5 text-[10px] text-gold-400">
                       这张卡是按另一个规则包捏的，技能名可能对不上。
                     </p>
                   )}
@@ -2635,7 +2847,7 @@ function WorldTab() {
         )}
       </div>
 
-      <p className="text-[10px] leading-relaxed text-mist-500/70">
+      <p className="text-[10px] leading-relaxed text-mist-500">
         这两样都存在单局存档之外：开新团不会清掉它们，回溯更不会。
       </p>
     </div>
@@ -2721,7 +2933,7 @@ export function Preparation({
               </button>
             ))}
           </div>
-          <span className="ml-auto shrink-0 text-[10px] text-mist-500/70">
+          <span className="ml-auto shrink-0 text-[10px] text-mist-500">
             规则：{getRuleset(rulesetId).name}
           </span>
           {/*
@@ -2732,7 +2944,7 @@ export function Preparation({
            *
            * 措辞是主人定的：描述那一栏＝**写你想要一个什么样的故事**（第二人称，对玩家说）。
            */}
-          <p className="w-full text-[10px] leading-relaxed text-mist-500/70">
+          <p className="w-full text-[10px] leading-relaxed text-mist-500">
             题材决定这个<strong className="text-mist-400">世界</strong>长什么样；下面的描述就写你
             <strong className="text-mist-400">想要一个什么样的故事</strong>——
             里面的人名、地名、点子都会保留下来，并翻译进这个世界。想换个世界，改上面的题材。

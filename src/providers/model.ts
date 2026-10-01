@@ -178,6 +178,14 @@ export async function chat(
  */
 export interface ImageGenConfig extends ModelConfig {
   size?: string;
+  /**
+   * 超时/取消用的中止信号。
+   *
+   * 没有它，一个"连上了但永远不回"的请求会**无限挂住** ——
+   * 调用方那一条任务就永远停在"正在画"，占着并发槽，后面排队的图一张也开不了工
+   * （主人 2026-09-27 真机撞到的正是这个）。
+   */
+  signal?: AbortSignal;
 }
 
 export async function generateImage(
@@ -209,6 +217,8 @@ export async function generateImage(
       n: 1,
       response_format: 'b64_json',
     }),
+    // 超时由调用方通过 `signal` 掐掉（见 `ImageGenConfig.signal`）
+    signal: cfg.signal,
   });
   if (!res.ok) {
     throw new ModelError(`生图失败 ${res.status}：${(await res.text()).slice(0, 200)}`, res.status);
