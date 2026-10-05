@@ -524,7 +524,7 @@ ${SCALE_GUIDE[scale]}
 根据描述创作一个${scale === 'long' ? '长篇' : scale === 'medium' ? '中篇' : '短篇'}模组。**只输出 JSON，不要任何解释文字。**
 
 格式：
-{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明","start_clock":{"day":1,"minute":540},"deadline_in":0}
+{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":"","appearance":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明","start_clock":{"day":1,"minute":540},"deadline_in":0}
 
 要求：
 - 全部中文，严格贴合上面题材的世界观、时代与风格。
@@ -541,7 +541,8 @@ ${SCALE_GUIDE[scale]}
   写错尺度会让整局的节奏崩掉（长篇被压进 15 分钟，玩家一出门就"时间到"）。
 - truth 150-250 字：幕后到底发生了什么。语气客观，这是给 GM 的内部真相。
 - npcs：短篇 2-4 个；中篇 3-5 个；长篇 4-6 个（允许分属不同章节）。
-  每个含 name（姓名）/ role（身份）/ motive（动机）/ secret（不为人知的秘密）。**每个都要有可被利用的隐瞒或把柄**。
+  每个含 name（姓名）/ role（身份）/ motive（动机）/ secret（不为人知的秘密）/
+  appearance（**外貌，20-40 字，只写长相**：性别年龄、身形、发式、衣着、显著特征；不许写性格、身份或来历）。**每个都要有可被利用的隐瞒或把柄**。
 - locations：短篇 3-5 个、中篇 5-8 个、长篇 8-12 个，一行一个。
 - **map_nodes 3-6 个**：把上面的地点做成"空间关系图"。每个节点给 name（地点简称，4-6 字）、
   links（**与之能直接走到的地点简称**，双向都要写，比如 A 的 links 里有 B，B 的 links 里也要有 A）、
@@ -623,7 +624,7 @@ export function importSystemPrompt(genre: Genre): string {
 你的任务是：**读懂它，把它整理成一张模组卡**。**只输出 JSON，不要任何解释文字。**
 
 格式：
-{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明","start_clock":{"day":1,"minute":540},"deadline_in":0}
+{"title":"模组名","premise":"前言","opening":"开场白","start_location":"开局地点","goal":"玩家目标","stakes":"赌注","urgency":"紧迫感","truth":"真相","npcs":[{"name":"","role":"","motive":"","secret":"","appearance":""}],"locations":"关键地点","map_nodes":[{"name":"地点名","links":["与之相通的地点"],"note":"一句话"}],"clueChain":"线索链","acts":"幕结构","endings":"结局与失败条件","notes":"GM 备注","source_note":"来源说明","start_clock":{"day":1,"minute":540},"deadline_in":0}
 
 要求：
 - **忠实于原文**。原文写过的人名、地名、真相、线索链，照搬，不要自创替换。
@@ -688,7 +689,7 @@ export function presetSystemPrompt(rs: Ruleset): string {
     "imageStyle":"生图画风描述（30-60 字，中文）",
     "castHint":"这个世界里通常有哪些人（40-80 字）"
   },
-  "module":{"title":"","premise":"","opening":"","start_location":"","goal":"","stakes":"","urgency":"","truth":"","npcs":[{"name":"","role":"","motive":"","secret":""}],"locations":"","map_nodes":[{"name":"","links":[],"note":""}],"clueChain":"","acts":"","endings":"","notes":"","source_note":"","start_clock":{"day":1,"minute":540},"deadline_in":0},
+  "module":{"title":"","premise":"","opening":"","start_location":"","goal":"","stakes":"","urgency":"","truth":"","npcs":[{"name":"","role":"","motive":"","secret":"","appearance":""}],"locations":"","map_nodes":[{"name":"","links":[],"note":""}],"clueChain":"","acts":"","endings":"","notes":"","source_note":"","start_clock":{"day":1,"minute":540},"deadline_in":0},
   "worldbook":[{"keys":["关键词"],"content":"设定正文","priority":50}],
   "companions":[{"name":"","role":"","bond":"","personality":"","secret":"","agenda":"","initiative":"reactive","skills":{"技能":数值},"vitals":{${rs.vitalDefs
     .map((v) => `"${v.key}":${v.default}`)
@@ -795,6 +796,77 @@ export function characterImagePrompt(
     genre ? `题材：${genre.name}` : '',
     '身后是有细节的具体环境（室内或街道等），人物与背景都清晰',
     PORTRAIT_FRAMING_RULE,
+    styleOf(genre),
+  ];
+  return parts.filter(Boolean).join('，');
+}
+
+/**
+ * 怪物形象提示词（1-F）：竖版特写，**主体就是它**。
+ *
+ * ## 🔴 为什么不能拿场景图凑（报告 §2.3bis 的三条实测理由）
+ * 1. **场景图是环境不是敌人**：`scene` 是 1024×576 横版广角，画的是空间，
+ *    生场景时模型**不知道**你这轮在打谁；
+ * 2. **一场多敌**：打三只，一张广角里得画三只 —— 既没这规格也没这控制力；
+ * 3. **比例就错了**：怪物是**主体**，该给竖版特写（768×1024，与立绘同规格）。
+ *
+ * 吃 `bestiary` 表里的 `look`（外观/声音/气味）与 `behavior`（习性）——
+ * 那是作者已经写好的、玩家**照面即可见**的字段（G5），不碰 `weakness`（那是活路）。
+ */
+export function monsterImagePrompt(
+  name: string,
+  opts: { look?: string; behavior?: string; premise?: string } = {},
+  genre?: Genre
+): string {
+  const parts = [
+    '动漫风格怪物立绘，第三视角全身/大半身特写，主体是一只怪物',
+    name?.trim() ? `这个怪物是：${name.trim()}` : '一只怪物',
+    opts.look?.trim() ? `外观：${opts.look.trim()}` : '',
+    opts.behavior?.trim() ? `习性：${opts.behavior.trim().slice(0, 80)}` : '',
+    genre ? `题材：${genre.name}` : '',
+    opts.premise?.trim() ? `背景设定：${opts.premise.trim().slice(0, 100)}` : '',
+    '它是画面的绝对主体，占满大部分画面，身形完整可见，头部与肢体都不被裁切',
+    '身后是能暗示它出没场所的简单环境，不要画人物',
+    PORTRAIT_FRAMING_RULE,
+    styleOf(genre),
+  ];
+  return parts.filter(Boolean).join('，');
+}
+
+/**
+ * 头像构图约束（方版 · 阶段 2）。
+ *
+ * 与 `PORTRAIT_FRAMING_RULE` 的差别只有一条，但很关键：
+ * 立绘是 3:4 竖版，方版头像**更矮更宽** —— 模型若按"半身"去画，
+ * 头会顶满画幅、肩膀被切掉。所以这里要的是**头肩**，并且明说"别画全身"。
+ */
+export const AVATAR_FRAMING_RULE =
+  '头像构图，人物居中，只画头部与肩膀，头部完整不被裁切，四周留出余白，不要画全身、不要特写；' +
+  'portrait headshot framing, head and shoulders centered, full head visible, ' +
+  'generous margin around the subject, not a full body shot';
+
+/**
+ * 关键人物头像提示词（阶段 2 · 计划 2-3）：**方版**肖像，主体就是这个人。
+ *
+ * ## 与 `characterImagePrompt` 的差别只有两处（别再多了）
+ * 1. **取景**：方版头肩像，不是 3:4 半身立绘（`AVATAR_FRAMING_RULE`）；
+ * 2. **吃谁**：关键人物没有 `description`（那是玩家角色的字段），
+ *    它的外貌来自 `module.npcs[].appearance`（阶段 2 新增）；没有就退回 `role`
+ *    —— 与 `appearanceOf()` 同一套优先级，**一处取法**。
+ *
+ * 画风与背景硬约束全部复用 `styleOf()`，与其它品类同源（同一部作品，同框不打架）。
+ */
+export function npcAvatarPrompt(
+  npc: { name?: string; appearance?: string; role?: string; note?: string },
+  genre?: Genre
+): string {
+  const parts = [
+    '动漫风格人物肖像，第三视角',
+    npc.name?.trim() ? `这是「${npc.name.trim()}」` : '一名人物',
+    appearanceOf(npc) || '一名人物',
+    npc.note?.trim() ? `在场观察：${npc.note.trim().slice(0, 60)}` : '',
+    genre ? `题材：${genre.name}` : '',
+    AVATAR_FRAMING_RULE,
     styleOf(genre),
   ];
   return parts.filter(Boolean).join('，');

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useStore, mapNodesOf, type MapNode } from './store';
+import { LineArt, OrnamentDice } from './ornaments';
 import { actAt, normalizeActIndex, parseActs, type ActItem } from '../core/acts.js';
 import {
   clockDetail,
@@ -20,6 +21,8 @@ import { AnchorList } from './EndingScreen';
 import { mapImagePrompt, sceneImagePrompt } from '../orchestrator/generate.js';
 import { getGenre } from '../core/genres.js';
 import { getRuleset } from '../core/rulesets/index.js';
+import { occupantsOf } from '../core/state/gameState.js';
+import { selectWorldbook } from '../core/worldbook.js';
 
 const INITIATIVE_LABEL: Record<string, string> = {
   reactive: '被动',
@@ -115,10 +118,19 @@ function Section({
   title,
   icon,
   children,
+  action,
 }: {
   title: string;
   icon?: IconName;
   children: React.ReactNode;
+  /**
+   * 标题右侧的一个小动作（1-B：世界书/角色卡的「全部 ›」深链）。
+   *
+   * **可选**：不传就是原来的样子，几十处老调用一行都不用改。
+   * 刻意不做成"通用 children 塞按钮"—— 那样每个调用处都能往标题里塞东西，
+   * 标题栏迟早变成第二个工具栏。这里只开一条通路：**一个入口，带个名字**。
+   */
+  action?: { label: string; onClick: () => void };
 }) {
   const Icon = icon ? ICONS[icon] : null;
   return (
@@ -126,14 +138,51 @@ function Section({
       <h3 className="mb-2 flex items-center gap-1.5 text-[11px] tracking-wider text-mist-500">
         {Icon && <Icon size={13} className="shrink-0" />}
         {title}
+        {action && (
+          <button
+            onClick={action.onClick}
+            className="ml-auto shrink-0 text-[10px] text-mist-500 transition hover:text-gold-400"
+          >
+            {action.label}
+          </button>
+        )}
       </h3>
+      {/*
+       * ⚠️ 这里**曾经**放了一条"章节标题装饰带"（第二批资产）——**已撤**。
+       * 主人 2026-10-02：「**右边无意义的花纹占用版面了**」。
+       *
+       * 它 `h-3 w-full`，看着只占 12px，但**每一节都占一次** —— 世界页有十来节，
+       * 加起来是真版面。而且它只是装饰，不传递任何信息。
+       * 教训：**装饰若占版面，就该让位给内容**（这一条与"看得见"并不矛盾 ——
+       * 看得见靠"位置与对比"，不靠"占地方"）。
+       *
+       * 分节仍然分得清：`Section` 的标题本身有字距与图标。
+       */}
       {children}
     </section>
   );
 }
 
-function Empty({ text }: { text: string }) {
-  return <p className="text-[12px] text-mist-500">{text}</p>;
+/**
+ * 空态那一行话。
+ *
+ * 空屏只有一句话会像"坏了"，一枚安静的线稿既说明"这儿现在确实没东西"，又不喧哗（美术规范 §八）。
+ *
+ * ⚠️ 尺寸**调过一次**：第一版做成 28px／60% 后主人说**"感觉没什么变化"** ——
+ * 太淡就等于没做（铁律：玩家看不见＝没做）。现在 40px。
+ *
+ * 🔴 图形从生图换成了**手写 SVG**（2026-10-04）：线稿这种东西
+ * **需求与生图能力正相反** —— 要的是"干净、纤细、可换色、当衬底"，
+ * 生图给的却是"细节、光影、质感"（见 `ui/ornaments.tsx` 顶部四条理由）。
+ * 换完之后它还能跟着主题变色，这一点位图做不到。
+ */
+function Empty({ text, art }: { text: string; art?: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <span className="shrink-0 text-mist-600">{art ?? <LineArt name="notes" size={40} />}</span>
+      <p className="text-[12px] text-mist-500">{text}</p>
+    </div>
+  );
 }
 
 /**
@@ -395,6 +444,19 @@ function splitLabel(name: string): string[] {
 }
 
 /**
+ * 地图节点底下那行人名（1-E）：`你 · 老陈 · 玛丽`，太长就 `…`。
+ *
+ * 节点宽度只有几十像素，人一多必然溢出画布 —— 必须截。
+ * 截的时候**保留前两个**：玩家最关心的是"这儿有几个人、都是谁"，
+ * 而不是完整名单（完整名单在下面那块文字版里，那里不截）。
+ */
+function peopleLabel(names: string[]): string {
+  if (names.length === 0) return '';
+  if (names.length <= 2) return names.join(' · ');
+  return `${names.slice(0, 2).join(' · ')} +${names.length - 2}`;
+}
+
+/**
  * 地图节点关系图：节点＝地点、连线＝走得通。
  *
  * 三件事必须做到：**空间信息**（谁挨着谁）、**可缩放拖拽**（侧栏太小看不清）、
@@ -405,15 +467,20 @@ function MapGraph({
   current,
   revealed,
   visited,
+  occupants,
   onTravel,
+  onOpenNpc,
 }: {
   nodes: MapNode[];
   current: string;
   revealed: Set<string>;
   /** 真正去过的地方（"只是听说过"的不算）——用来区分实心与虚线两种亮度 */
   visited?: Set<string>;
+  /** 每个地点上有谁（1-E 合并：人物画在节点上） */
+  occupants: Map<string, string[]>;
   /** 必传：`WorldPanel` 两个挂载点都传了。留成可选会让漏传变成"点了没反应"的静默空操作 */
   onTravel: (location: string) => void;
+  onOpenNpc: (name: string) => void;
 }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -479,7 +546,7 @@ function MapGraph({
   const H = 316;
   const cx = W / 2;
   const cy = H / 2;
-  const radius = n <= 1 ? 0 : Math.min(118, 34 + n * 13);
+  const radius = n <= 1 ? 0 : Math.min(100, 30 + n * 11);
   const pos = new Map<string, { x: number; y: number }>();
   nodes.forEach((nd, i) => {
     const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
@@ -532,6 +599,13 @@ function MapGraph({
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
       >
+        {/*
+         * ⚠️ 这里**曾经**铺过一枚罗盘纹（同心圆环）——**已撤**。
+         * 原因：节点图本身就是环形布局 + 圆形节点，再垫一层同心圆，
+         * 两套圆叠在一起像靶子（主人 2026-10-02：「地图那几个圈丑的要死」）。
+         * 教训记在 `docs/报告/复盘-界面美术为什么像半成品.md`：
+         * **要加的是"纸面的材质"，不是"再画一个圆"** —— 材质与图案是两回事。
+         */}
         <div
           className="h-full w-full"
           style={{
@@ -598,10 +672,23 @@ function MapGraph({
                         ? `${nd.name}：${nd.note}`
                         : nd.name}
                 </title>
+                  {/*
+                   * 🔴 去掉描边、只留色块（2026-10-02）。
+                   *
+                   * 以前是「描边大圆 + 圈里塞两行字」，一个节点上压着好几层线；
+                   * 环形布局排开之后，看上去就是"几个圈"（主人原话：**「那几个圈丑的要死」**）。
+                   *
+                   * 现在：**已探索的一律实心、无描边** —— 像地图上的墨点／盖上去的印记；
+                   * 只有"只听说过、没去过"的才保留**虚线**，因为那层线是**信息**（没去过），不是装饰。
+                   * 当前所在多一圈**柔和光晕**（就这一层，不再叠同心圆）。
+                   */}
+                  {here && (
+                    <circle cx={p.x} cy={p.y} r={36} fill="var(--c-accent)" opacity={0.13} />
+                  )}
                   <circle
                     cx={p.x}
                     cy={p.y}
-                    r={here ? 26 : 23}
+                    r={here ? 24 : 21}
                     fill={
                       here
                         ? 'var(--c-accent)'
@@ -609,22 +696,20 @@ function MapGraph({
                           ? 'var(--c-elevated)'
                           : 'transparent'
                     }
-                    stroke={
-                      here
-                        ? 'var(--c-accent)'
-                        : known
-                          ? 'var(--c-border-strong)'
-                          : 'var(--c-border)'
-                    }
-                    strokeWidth={1.4}
-                    strokeDasharray={!known ? '3 3' : been || here ? undefined : '3 4'}
+                    stroke={known ? 'none' : 'var(--c-border)'}
+                    strokeWidth={1.2}
+                    strokeDasharray={known ? undefined : '3 3'}
                   />
+                  {/*
+                   * 地点名挂在**点位下方**（在地图上这是"地名标签"的画法），
+                   * 不再塞进圆里 —— 圆小了之后，圈内文字必然溢出（"霍尔特的侦探事务所"折两行有 60px 宽）。
+                   */}
                   <text
                     x={p.x}
-                    y={twoLine ? p.y - 1 : p.y + 4}
+                    y={p.y + (twoLine ? 18 : 23)}
                     textAnchor="middle"
-                    fontSize={twoLine ? 9.5 : 11}
-                    fill={here ? '#14171d' : known ? 'var(--c-text)' : 'var(--c-muted)'}
+                    fontSize={twoLine ? 10 : 11.5}
+                    fill={here ? 'var(--c-accent)' : known ? 'var(--c-text)' : 'var(--c-muted)'}
                   >
                     {lines.map((ln, li) => (
                       <tspan key={li} x={p.x} dy={li === 0 ? 0 : 11.5}>
@@ -632,6 +717,37 @@ function MapGraph({
                       </tspan>
                     ))}
                   </text>
+                  {/*
+                   * 1-E：谁在这个地点 —— 画在**节点下方**的小名字串。
+                   *
+                   * 为什么不画进圆圈里：圈里已经被地点名占满（还可能折两行），
+                   * 再塞人的名字两边都看不清。挂在下面既不动布局，也不挡住地点名。
+                   *
+                   * 只画**已知地点**上的人：没听说过的地方不该冒出人名（那是剧透）。
+                   *
+                   * 名字串**可点**（跳档案卡）—— 节点组的 onClick 在祖先上，
+                   * 所以这里要 stopPropagation，否则点人名会顺带触发一次搬家。
+                   * 配色按主题变量走：玩家所在处用 `--c-accent`，其余用 `--c-text`
+                   * （🔥 浅底铁律：功能色不许带透明度，否则在羊皮纸上淡到看不见）。
+                   */}
+                  {known && (occupants.get(nd.name)?.length ?? 0) > 0 && (
+                    <text
+                      x={p.x}
+                      y={p.y + (twoLine ? 38 : 34)}
+                      textAnchor="middle"
+                      fontSize={9}
+                      fill={here ? 'var(--c-accent)' : 'var(--c-text)'}
+                      style={{ cursor: 'pointer' }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (suppressClick.current) return;
+                        const who = occupants.get(nd.name);
+                        if (who?.[0]) onOpenNpc(who[0]);
+                      }}
+                    >
+                      {peopleLabel(occupants.get(nd.name)!)}
+                    </text>
+                  )}
                 </g>
               );
             })}
@@ -680,6 +796,11 @@ function MapGraph({
 
 /**
  * 地图区块：节点关系图（带迷雾与缩放）＋ 可选的手绘区域图（生图）。
+ *
+ * ## 1-E 地图合并（主人 2026-10-01 拍板）
+ * 「在地人物」原先是一块独立面板，把地图节点上的人**又列了一遍** ——
+ * 两块信息重叠、两边都要滚（压测铁律：**左右栏信息不许重叠**）。
+ * 现在人物**点画在节点上**：一眼看到「塔内楼梯：你 · 老陈 · 玛丽」。
  */
 function MapSection({
   nodes,
@@ -687,15 +808,21 @@ function MapSection({
   revealed,
   visited,
   mapImage,
+  occupants,
   onTravel,
+  onOpenNpc,
 }: {
   nodes: MapNode[];
   current: string;
   revealed: Set<string>;
   visited?: Set<string>;
   mapImage: string;
+  /** 每个地点上有谁（键＝地点名）。合并后人物画在节点上，不再单列一块 */
+  occupants: Map<string, string[]>;
   /** 必传：同上。地图搬家是玩家的主动操作，静默失败＝玩家以为点了没用 */
   onTravel: (location: string) => void;
+  /** 点地图上的人名看他的档案（与旧「在地人物」同一个出口） */
+  onOpenNpc: (name: string) => void;
 }) {
   const module = useStore((s) => s.module);
   // 同 MapGraph：流式期间地点钮也要禁用（否则点了发不出去，见 P1-1 家族）
@@ -743,7 +870,9 @@ function MapSection({
         current={here}
         revealed={shown}
         visited={visited}
+        occupants={occupants}
         onTravel={onTravel}
+        onOpenNpc={onOpenNpc}
       />
 
       {hereNode && (
@@ -756,6 +885,32 @@ function MapSection({
             </span>
           )}
         </p>
+      )}
+
+      {/*
+       * 「谁在哪」的**文字版**：图上节点名字是折行截断的，人多时也挤。
+       * 这里按地点把名字列全（与图上的人是同一份数据，不是第二处真源）。
+       */}
+      {occupants.size > 0 && (
+        <div className="mt-2 space-y-1">
+          {[...occupants.entries()].map(([place, who]) => (
+            <div key={place} className="flex items-start gap-2 text-[11px]">
+              <span className="shrink-0 text-mist-500">{place}</span>
+              <span className="min-w-0 flex-1 flex flex-wrap gap-1">
+                {who.map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => onOpenNpc(n)}
+                    className="rounded border border-ink-600 px-1.5 py-0.5 text-[10px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
+                    title={`看${n}是什么人`}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </span>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* 已知地点用完整名字列一遍：图上的节点名是折行/截断的，这里补全 */}
@@ -825,12 +980,21 @@ export function WorldPanel({
   onPromptCompanion,
   onTravel,
   onRewind,
+  onOpenPrep,
 }: {
   /** 三个回调全部必传：`App.tsx` 的两处挂载（移动端 `:1194` / 桌面侧栏 `:1204`）都传了。
    *  留成可选＝漏传时点击静默空操作（当年 `onUseItem` 就是这么栽的）。 */
   onPromptCompanion: (name: string) => void;
   onTravel: (location: string) => void;
   onRewind: (msgId: string) => void;
+  /**
+   * 1-B：打开准备页并落在指定页签（「全部 ›」深链）。
+   *
+   * 主人要求「世界书/角色卡等大信息量部件**主界面必须有入口（三次点击内可达）**」。
+   * 这里只负责**传页签名**，怎么打开是 `App.tsx` 的事 ——
+   * 面板不该知道准备页是个弹层还是整页（那是布局，不是它的职责）。
+   */
+  onOpenPrep: (tab: 'module' | 'character' | 'companions' | 'worldbook' | 'world') => void;
 }) {
   const gameState = useStore((s) => s.gameState);
   // P3-8：判据要看规则包（它声明了哪些状态）
@@ -847,6 +1011,15 @@ export function WorldPanel({
   const genreId = useStore((s) => s.genreId);
   const customGenres = useStore((s) => s.customGenres);
   /*
+   * 1-B：世界书的**生效条目**（常驻入口要显示"这一轮真被注进去的几条"）。
+   *
+   * ⚠️ 选的是稳定切片（整份数组 / 稳定引用），派生走 `useMemo` ——
+   * `selectWorldbook` 每次返回新数组，直接进选择器就是那个 `#185` 无限重渲染。
+   * 判据与提示词**同源**（`core/worldbook.ts` 那一份），界面不另立一套，
+   * 否则"界面说生效了、模型没收到"这类分歧迟早出现。
+   */
+  const worldbook = useStore((s) => s.worldbook);
+  /*
    * 订阅的是**函数引用**（稳定），不是在选择器里调用它 ——
    * `useStore((s) => s.insanity())` 每次返回新对象会无限重渲染，那样写是错的。
    * H16·残留：世界页「剧情标记」要跟状态栏说同一句话。
@@ -854,6 +1027,13 @@ export function WorldPanel({
   const insanity = useStore((s) => s.insanity);
   // 点击在地人物弹出的档案卡
   const [npcCard, setNpcCard] = useState<NpcProfile | null>(null);
+  /**
+   * 1-C：编年史「看更早的」是否展开。
+   *
+   * 组件本地状态、**不进存档**：它是"我现在想看什么"，不是这一局的事实。
+   * 重开一局时组件本来就重挂载，状态自然回到折叠 —— 那正是想要的行为。
+   */
+  const [chronicleExpanded, setChronicleExpanded] = useState(false);
   /*
    * ---------------------------------------------------------------------
    * 下面这几份派生数据全部用 `useMemo` 包住（协作方 §五 性能三连 ③）
@@ -1002,6 +1182,48 @@ export function WorldPanel({
     return set;
   }, [gameState.visited, mapNodes]);
 
+  /*
+   * 谁在哪（1-E）—— 地图上直接看得出"这个地点有谁"，不必再单开一块「在地人物」。
+   *
+   * 🔴 取法是**纯函数 `occupantsOf()`**（`core/state/gameState.ts`），不在这里就地拼。
+   * 原因是一次真事故（2026-10-02 主人报「地图看不见人名」）：
+   * 这里曾经**按 `location` 原文做键**（如"霍尔特的侦探事务所"），
+   * 而地图是按**节点名**取值（`occupants.get(nd.name)`，如"事务所"）——
+   * 建键与取值口径不一致，于是玩家自己和同行者的名字**一次都没画出来过**
+   * （只有走过归并的关键人物画得出）。抽成纯函数后这条口径能被断言钉住。
+   *
+   * 归并规则与地图迷雾同一套：全等 > 节点名含它 > 它含节点名；归并不上就原样成键
+   * （宁可让它在下面「谁在哪」文字表里单独一行，也不硬塞到某个节点上指错地方）。
+   */
+  const occupants = useMemo(
+    () => occupantsOf(gameState, character.name, mapNodes),
+    [gameState, character.name, mapNodes]
+  );
+
+  /** 点地图上的人名 → 弹出同一张档案卡（旧「在地人物」的出口，原样保留） */
+  const openNpc = (name: string) => setNpcCard(npcProfileOf(name, gameState, module));
+
+  /*
+   * 1-B：这一轮**真正会被注进提示词**的世界书条目。
+   *
+   * ## 为什么显示"生效的"而不是"全部"
+   * 世界书是关键词触发的：一局跑下来累积几十条，但**每一轮最多只吃 8 条**
+   * （`selectWorldbook` 的默认 `limit`）。全摊出来玩家看到的是"我有 42 条设定"，
+   * 而实际影响这一轮的可能只有 2 条 —— 那个数字对他没有意义，这个才有。
+   *
+   * ## 上下文口径与提示词一致
+   * 取最近 4 条消息（`App.tsx` 里 `snapshot.slice(-4)`），不把整局塞进去。
+   * 两处口径若不同，界面会显示"生效 A 条"而模型收到别的 —— 比不显示更坏。
+   */
+  const liveWorldbook = useMemo(
+    () =>
+      selectWorldbook(
+        worldbook,
+        messages.slice(-4).map((m) => m.content)
+      ),
+    [worldbook, messages]
+  );
+
   return (
     <div className="space-y-6 p-4">
       {/*
@@ -1050,6 +1272,8 @@ export function WorldPanel({
         current={location ?? ''}
         revealed={revealed}
         visited={visitedNames}
+        occupants={occupants}
+        onOpenNpc={openNpc}
         mapImage={mapImage}
         onTravel={onTravel}
       />
@@ -1119,48 +1343,34 @@ export function WorldPanel({
         </Section>
       )}
 
-      <Section icon="profile" title="在地人物">
-        <ul className="space-y-1">
-          <li className="rounded-md border-l-2 border-gold-600/60 bg-ink-850 px-2.5 py-1.5 text-[12px] text-mist-300">
-            {character.name}（你）
-          </li>
-          {gameState.companions
-            .filter((c) => c.alive && c.present)
-            .map((c) => (
-              <li
-                key={c.id}
-                className="rounded-md border-l-2 border-arcane-600/60 bg-ink-850 px-2.5 py-1.5 text-[12px] text-mist-300"
-              >
-                {c.name}
-              </li>
-            ))}
-          {gameState.npcsAlive.map((npc) => (
-            <li key={npc}>
-              <button
-                onClick={() => setNpcCard(npcProfileOf(npc, gameState, module))}
-                className="w-full rounded-md border-l-2 border-blood-400/50 bg-ink-850 px-2.5 py-1.5 text-left text-[12px] text-mist-300 transition hover:bg-ink-800 hover:text-mist-100"
-              >
-                {npc}
-              </button>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-2 text-[10px] leading-relaxed text-mist-500">
-          点击人物可看他是什么人
-        </p>
-      </Section>
+      {/* 「在地人物」已并入上方地图（1-E）：人和地点在同一张图上，不另开一块。 */}
 
-      <Section icon="clue" title="线索">
+      {/*
+       * 1-C 侧栏抗压：线索改成**单行**（标题 + 右侧短标注）。
+       *
+       * ## 为什么
+       * 压测结论（报告 §三）：右栏四块堆叠的总高会超过一屏，要滚动才看得到线索。
+       * 线索原本每条 `py-2` + `leading-relaxed`，一条能占三行 —— 七条就吃掉半屏。
+       * 但**信息不能减**：线索全文是这个游戏的核心资产，砍了就等于没显示。
+       * 所以压的是**排版**不是内容：一行一条，`truncate` 掉溢出部分，
+       * 鼠标悬停看全文（`title`），想看完整就走上面的编年史（那里有上下文）。
+       *
+       * ⚠️ 与「太稀，再塞」是同一条方向的两面：**塞信息，不塞留白**。
+       */}
+      <Section icon="clue" title={`线索${gameState.clues.length ? `（${gameState.clues.length}）` : ''}`}>
         {gameState.clues.length === 0 ? (
-          <Empty text="尚未发现任何线索" />
+          <Empty text="尚未发现任何线索" art={<LineArt name="clues" size={40} />} />
         ) : (
-          <ul className="space-y-1.5">
+          <ul className="space-y-0.5">
             {gameState.clues.map((clue, i) => (
               <li
                 key={i}
-                className="rounded-md border-l-2 border-gold-600/60 bg-ink-850 px-2.5 py-2 text-[12px] leading-relaxed text-mist-300"
+                title={clue}
+                className="flex items-center gap-2 rounded border-l-2 border-gold-600/60 bg-ink-850 px-2 py-1"
               >
-                {clue}
+                <span className="min-w-0 flex-1 truncate text-[12px] text-mist-300">
+                  {clue}
+                </span>
               </li>
             ))}
           </ul>
@@ -1181,7 +1391,7 @@ export function WorldPanel({
             .filter((m) => m.check || m.checks?.length)
             .flatMap((m) => checksOf(m))
             .reverse();
-          if (checks.length === 0) return <Empty text="还没有检定过" />;
+          if (checks.length === 0) return <Empty text="还没有检定过" art={<OrnamentDice size={34} />} />;
           return (
             <ul className="space-y-1">
               {checks.slice(0, 20).map((c, i) => (
@@ -1252,27 +1462,126 @@ export function WorldPanel({
         {chronicle.length === 0 ? (
           <Empty text="尚无记录，跑几轮后这里会按回合列出剧情要点" />
         ) : (
-          <ol className="space-y-2">
-            {[...chronicle].reverse().map((c) => (
-              <li key={c.turn} className="flex gap-2.5">
-                <span className="mt-0.5 w-5 shrink-0 text-right font-mono text-[10px] text-mist-500">
-                  {c.turn}
+          <>
+            {/*
+             * 1-C 侧栏抗压：编年史**不能压成一行** —— 它是玩家回看"当初到底发生了什么"
+             * 的唯一全文入口（结档页只给摘要）。所以压的是**视野**不是内容：
+             * 默认只铺最近 8 条，更早的一条按钮展开。
+             *
+             * 🔴 为什么不做"限高 + 内部滚动"：侧栏整体本来就在滚，
+             * 里面再套一个滚动区会出现**滚轮陷阱**（鼠标停在上面，页面滚不动）
+             * —— 玩家会以为界面卡住了。加一个「看更早的」按钮是**加东西不加分支**。
+             */}
+            <ol className="space-y-2">
+              {(chronicleExpanded ? [...chronicle].reverse() : [...chronicle].reverse().slice(0, 8)).map(
+                (c) => (
+                  <li key={c.turn} className="flex gap-2.5">
+                    <span className="mt-0.5 w-5 shrink-0 text-right font-mono text-[10px] text-mist-500">
+                      {c.turn}
+                    </span>
+                    <div className="min-w-0 flex-1 border-l border-ink-700 pl-2.5">
+                      {saidByTurn.get(c.turn) && (
+                        <p className="mb-1 border-l-2 border-gold-600/50 pl-2 text-[11px] leading-relaxed text-gold-400">
+                          我说：{saidByTurn.get(c.turn)}
+                        </p>
+                      )}
+                      <p className="text-[12px] leading-relaxed text-mist-300">{c.text}</p>
+                      {c.location && (
+                        <p className="mt-0.5 text-[10px] text-mist-500">{c.location}</p>
+                      )}
+                    </div>
+                  </li>
+                )
+              )}
+            </ol>
+            {chronicle.length > 8 && (
+              <button
+                onClick={() => setChronicleExpanded((v) => !v)}
+                className="mt-2 w-full rounded-md border border-ink-700 py-1 text-[11px] text-mist-500 transition hover:border-gold-600/50 hover:text-gold-400"
+              >
+                {chronicleExpanded
+                  ? '收起早先的'
+                  : `看更早的 ${chronicle.length - 8} 条 ›`}
+              </button>
+            )}
+          </>
+        )}
+      </Section>
+
+      {/*
+       * 1-B：世界书 · 生效 N（常驻入口）。
+       *
+       * 主人要求「世界书和角色卡等含大量信息的部件**需要在主界面有入口**」。
+       * 这里给的是**摘要 + 直达**：看得见"现在哪几条正在生效"，
+       * 点「全部 ›」一步跳到准备页的世界书页签（整页编辑）。
+       *
+       * 为什么压缩成一行一条：协作方压测的结论是"侧栏不许假设内容很少"，
+       * 而世界书条目正文动辄几百字 —— 铺开就是侧栏被一块吃掉。
+       * **塞信息，不塞留白**：关键词给全，正文不给（正文去准备页看）。
+       */}
+      <Section
+        icon="book"
+        title={`世界书${liveWorldbook.length ? ` · 生效 ${liveWorldbook.length}` : ''}`}
+        action={{ label: '全部 ›', onClick: () => onOpenPrep('worldbook') }}
+      >
+        {liveWorldbook.length === 0 ? (
+          <Empty
+            text={
+              worldbook.length > 0
+                ? `共 ${worldbook.length} 条，这一轮没有关键词命中`
+                : '还没写过世界书条目 —— 点「全部 ›」去加'
+            }
+          />
+        ) : (
+          <ul className="space-y-1">
+            {liveWorldbook.map((e) => (
+              <li
+                key={e.id}
+                className="flex items-center gap-2 rounded-md bg-ink-850 px-2.5 py-1.5"
+              >
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-mist-400">
+                  {e.keys.join('、') || e.content.slice(0, 20)}
                 </span>
-                <div className="min-w-0 flex-1 border-l border-ink-700 pl-2.5">
-                  {saidByTurn.get(c.turn) && (
-                    <p className="mb-1 border-l-2 border-gold-600/50 pl-2 text-[11px] leading-relaxed text-gold-400">
-                      我说：{saidByTurn.get(c.turn)}
-                    </p>
-                  )}
-                  <p className="text-[12px] leading-relaxed text-mist-300">{c.text}</p>
-                  {c.location && (
-                    <p className="mt-0.5 text-[10px] text-mist-500">{c.location}</p>
-                  )}
-                </div>
+                {e.constant && (
+                  <span className="shrink-0 rounded border border-gold-600/50 px-1 text-[9px] text-gold-400">
+                    常驻
+                  </span>
+                )}
               </li>
             ))}
-          </ol>
+          </ul>
         )}
+      </Section>
+
+      {/*
+       * 1-B：角色卡 · 全文（常驻入口）。
+       *
+       * 「角色卡」不是只有属性 —— 名字 / 外貌 / 来历这三样**撑起了守密人对你的全部称呼**，
+       * 而它们原先只躺在准备页里。这里给摘要（三行内），全文去准备页。
+       *
+       * 属性/技能那些已经常驻在**左栏**（`CharacterSheet`），所以这里**刻意不重复**：
+       * 左右栏信息不许重叠（压测铁律）—— 重叠＝两边都在滚。
+       */}
+      <Section
+        icon="profile"
+        title="角色卡"
+        action={{ label: '全文 ›', onClick: () => onOpenPrep('character') }}
+      >
+        <div className="space-y-1">
+          <p className="text-[12px] text-mist-200">{character.name || '未命名'}</p>
+          {character.gender && (
+            <p className="text-[11px] text-mist-500">{character.gender}</p>
+          )}
+          {character.appearance?.trim() ? (
+            <p className="text-[11px] leading-relaxed text-mist-400">
+              {character.appearance.trim()}
+            </p>
+          ) : (
+            <p className="text-[11px] leading-relaxed text-mist-500">
+              还没写外貌 —— 守密人只能自己脑补你长什么样。
+            </p>
+          )}
+        </div>
       </Section>
 
       {npcCard && <NpcCardModal profile={npcCard} onClose={() => setNpcCard(null)} />}

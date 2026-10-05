@@ -235,6 +235,20 @@ export const IconHelp = (p: IconProps) => (
 );
 
 /**
+ * 更多（⋮）。顶栏把 12 个入口收进一个菜单用（1-D 主命令）。
+ *
+ * 三个点**竖排**：横排在中文界面里会和「…省略号」混淆，
+ * 而它点开的是菜单、不是"内容被省略了"。
+ */
+export const IconMore = (p: IconProps) => (
+  <Svg {...p}>
+    {dot(12, 5.6, 1.5)}
+    {dot(12, 12, 1.5)}
+    {dot(12, 18.4, 1.5)}
+  </Svg>
+);
+
+/**
  * 按名字取图标（界面按字符串取用）。
  *
  * 用具名映射而不是 `import * as`：**打包时只带上真正用到的那几个**，
@@ -267,6 +281,7 @@ export const ICONS = {
   volumeOff: IconVolumeOff,
   stop: IconStop,
   help: IconHelp,
+  more: IconMore,
 } as const;
 
 export type IconName = keyof typeof ICONS;

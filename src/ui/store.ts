@@ -1460,6 +1460,13 @@ interface Store extends StoreState {
    * 拒落时调用方必须走 `failJob`，不能照常 `dropJob` —— 否则玩家什么也看不到。
    */
   applyImageResult(job: ImageJob, url: string): Promise<boolean>;
+  /**
+   * 把一张形象图落到 `gameState.foeArt[名字]`（怪物与关键人物共用）。
+   *
+   * 名字键与 `combat.foes[].name` / `npcsAlive` 同一套，所以图鉴卡与档案卡
+   * 都能用同一个名字取到图。传空串＝删掉这张（「移除」按钮走这条路）。
+   */
+  setFoeArt(name: string, url: string): void;
   /** 覆盖整条待掷检定队列（守密人一次要求多个时用） */
   setPendingChecks(list: PendingCheck[]): void;
   /** 掷掉队列里的第 index 个 */
@@ -2580,6 +2587,27 @@ export const useStore = create<Store>((set, get) => ({
       case 'map':
         done.push(get().setMapImage(url));
         break;
+      case 'monster':
+        /*
+         * 怪物形象（1-F）：落在 `gameState.foeArt[名字]`。
+         *
+         * 走 `saveJsonNow` 而不是节流落盘 —— 与上面队友那条同一个理由：
+         * 生成一张图要等几十秒，中间玩家很可能就关页面了，节流窗口里丢掉的
+         * 是**他刚刚花掉的一次调用**。结构性写入必须立刻落盘。
+         */
+        get().setFoeArt(job.target, url);
+        break;
+      case 'avatar':
+        /*
+         * 关键人物头像（阶段 2 · 计划 2-3）：`target = 'npc:<名字>'`。
+         *
+         * 为什么单开一个 case 而不是并进 `portrait` 的 `npc:` 分支：
+         * 两者**取规格与提示词都不同**（768×768 方版头像 vs 768×1024 竖版立绘），
+         * 而落点这一步与它**逐字相同** —— 所以这里只做这一件事，
+         * 提示词的分叉留在 `generate.ts` 那侧（`npcAvatarPrompt`）。
+         */
+        get().setFoeArt(job.target.replace(/^npc:/, ''), url);
+        break;
       case 'portrait':
         /*
          * 立绘有两个人：玩家自己（target = 'character'）与队友（target = 队友 id）。
@@ -2592,6 +2620,18 @@ export const useStore = create<Store>((set, get) => ({
           // 塞进 localStorage 会直接顶到配额，表现成"立绘莫名其妙没了"。
           // 与场景 / 消息图同一条口径：**大件走 IndexedDB**。
           done.push(putImageBlob('characterPortrait', url));
+        } else if (job.target.startsWith('npc:')) {
+          /*
+           * 关键剧情人物（1-F）：`target = 'npc:<名字>'`。
+           *
+           * 为什么复用 `portrait` 而不是新开 kind：这类图与立绘**尺寸、构图、画法全同**
+           * （768×1024 竖版半身，`characterImagePrompt` 直接吃），差别只在落点。
+           * 新开一类会让尺寸表、提示词、`kindLabel` 三处都要分叉 —— 加东西不加分支。
+           *
+           * 落点仍在 `gameState.foeArt`：那是个"名字 → 图"的通用映射，
+           * 人物与怪物共用一份，图鉴/档案卡都从它取图。
+           */
+          get().setFoeArt(job.target.slice(4), url);
         } else {
           // 队友在**两个名单**里都可能：已入队的在 gameState.companions，还没入队的在候选里
           const gs = get().gameState;
@@ -2615,6 +2655,24 @@ export const useStore = create<Store>((set, get) => ({
         break;
     }
     return Promise.all(done).then(() => true);
+  },
+
+  setFoeArt(name, url) {
+    const key = String(name ?? '').trim();
+    if (!key) return;
+    const gs = get().gameState;
+    /*
+     * 传空串＝**删掉这一条**，不是写一个空值进去。
+     * `autoArtCount` 与 `artCandidates` 都按"有值才算画过"判，
+     * 留一个 `''` 会让"已经画过"和"没画过"两种判断都错。
+     */
+    const cur = { ...(gs.foeArt ?? {}) };
+    if (url) cur[key] = url;
+    else delete cur[key];
+    const next: GameState = { ...gs, foeArt: cur };
+    // 结构性写入（图是玩家的资产）必须立刻落盘，不等节流窗口
+    saveJsonNow('trpg.gameState', next);
+    set({ gameState: next });
   },
 
   async hydrateImages() {

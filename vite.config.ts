@@ -108,7 +108,14 @@ export default defineConfig({
          * 而那一版的"立即更新"是坏的。详见 `public/entry-redirect.js` 顶部的说明。
          */
         importScripts: ['entry-redirect.js'],
-        globPatterns: ['**/*.{js,css,svg,woff2}'],
+        /*
+         * 🔴 2026-10-04 加入 `webp`：整页背景图（`public/art/bg-atlas.webp`）必须**离线也有** ——
+         * 它是"一进来就该看到"的东西，掉线时缺一块会很显眼。
+         * `public/art/` 现在**只有这一张**（其余装饰已改手写 SVG，见 `ui/ornaments.tsx`），
+         * 所以不必担心把旧资产一起预缓存进来。
+         * ⚠️ HTML 仍然**绝不进** precache（见下面 `navigateFallback` 那段）。
+         */
+        globPatterns: ['**/*.{js,css,svg,woff2,webp}'],
         /*
          * **不要设 `navigateFallback`**：workbox 会为它注册一条优先级最高的 NavigationRoute，
          * 用 `createHandlerBoundToURL('index.html')` 去 precache 里找——而 index.html 已经不在

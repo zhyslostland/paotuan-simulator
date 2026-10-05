@@ -24,7 +24,7 @@ export type GenPresetModule = {
   stakes?: string;
   urgency?: string;
   truth?: string;
-  npcs?: { name?: string; role?: string; motive?: string; secret?: string }[];
+  npcs?: { name?: string; role?: string; motive?: string; secret?: string; appearance?: string }[];
   locations?: string;
   map_nodes?: { name?: string; links?: string[]; note?: string }[];
   clueChain?: string;
@@ -222,6 +222,8 @@ export function applyPreset(data: GenPreset): void {
         role: n.role ?? '',
         motive: n.motive ?? '',
         secret: n.secret ?? '',
+        // 外貌锚点（阶段 2）：只写长相，供关键人物头像用；没给就不写这个键
+        ...(n.appearance?.trim() ? { appearance: n.appearance.trim() } : {}),
       }));
     /*
      * 走 `applyModule()`：应用整套预设＝**真的换了一个模组**，

@@ -1595,7 +1595,7 @@ function ModuleTab() {
     setModule({
       npcs: [
         ...gameModule.npcs,
-        { id: uid(), name: '新人物', role: '', motive: '', secret: '' },
+        { id: uid(), name: '新人物', role: '', motive: '', secret: '', appearance: '' },
       ],
     });
 
@@ -1632,7 +1632,10 @@ function ModuleTab() {
             '',
             '## 关键人物',
             ...m.npcs.map(
-              (n) => `- **${n.name}**（${n.role}）\n  - 动机：${n.motive || '未定'}\n  - 秘密：${n.secret || '无'}`
+              (n) =>
+                `- **${n.name}**（${n.role}）\n  - 动机：${n.motive || '未定'}\n  - 秘密：${n.secret || '无'}${
+                  n.appearance?.trim() ? `\n  - 外貌：${n.appearance.trim()}` : ''
+                }`
             ),
             '',
             '## 关键地点',
@@ -2020,6 +2023,17 @@ function ModuleTab() {
                 />
               </label>
               <label className="block">
+                <span className="mb-0.5 block text-[10px] text-mist-500">
+                  外貌 <span className="text-mist-600">（画头像用，只写长相）</span>
+                </span>
+                <input
+                  className={inputCls}
+                  value={n.appearance ?? ''}
+                  placeholder="如：五十来岁的瘦高男人，灰白短发，洗旧的蓝布工装"
+                  onChange={(e) => upsertNpc({ ...n, appearance: e.target.value })}
+                />
+              </label>
+              <label className="block">
                 <span className="mb-0.5 block text-[10px] text-mist-500">动机（他想要什么）</span>
                 <input
                   className={inputCls}
@@ -2282,7 +2296,7 @@ function ModuleTab() {
             goal?: string;
             stakes?: string;
             urgency?: string;
-            npcs?: { name?: string; role?: string; motive?: string; secret?: string }[];
+            npcs?: { name?: string; role?: string; motive?: string; secret?: string; appearance?: string }[];
             locations?: string;
             map_nodes?: { name?: string; links?: string[]; note?: string }[];
             clueChain?: string;
@@ -2357,6 +2371,8 @@ function ModuleTab() {
                 role: n.role ?? '',
                 motive: n.motive ?? '',
                 secret: n.secret ?? '',
+                // 外貌锚点（阶段 2）：只写长相，供人物头像用；没给就不写这个键
+                ...(n.appearance?.trim() ? { appearance: n.appearance.trim() } : {}),
               })),
             locations: data.locations ?? '',
             /*
@@ -2534,7 +2550,7 @@ function ModuleTab() {
                     stakes?: string;
                     urgency?: string;
                     truth?: string;
-                    npcs?: { name?: string; role?: string; motive?: string; secret?: string }[];
+                    npcs?: { name?: string; role?: string; motive?: string; secret?: string; appearance?: string }[];
                     locations?: string;
                     map_nodes?: { name?: string; links?: string[]; note?: string }[];
                     clueChain?: string;
@@ -2573,6 +2589,8 @@ function ModuleTab() {
                         role: n.role ?? '',
                         motive: n.motive ?? '',
                         secret: n.secret ?? '',
+                        // 外貌锚点（阶段 2）：同上，只写长相
+                        ...(n.appearance?.trim() ? { appearance: n.appearance.trim() } : {}),
                       })),
                     locations: data.locations ?? '',
                     // 同上：地图节点要接住，否则地图迷雾没法工作
@@ -2888,11 +2906,23 @@ export function Preparation({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/80 p-4 backdrop-blur-sm">
       <div className="flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-ink-600 bg-ink-900">
-        <div className="flex shrink-0 items-center justify-between border-b border-ink-700 px-5 py-3">
-          <h2 className="font-serif text-lg text-mist-100">前期准备</h2>
+        <div className="relative flex shrink-0 items-center justify-between overflow-hidden border-b border-ink-700 px-5 py-3">
+          {/*
+           * 🔴 这里原来铺着一张"书桌一角"的题图（生图），**已撤**（2026-10-04）。
+           *
+           * 两条理由，记下来免得下次又加回来：
+           * 1. 主人 2026-10-02：「**右边无意义的花纹占用版面了**」——
+           *    从 85% 收到 42% 也仍然占着右边那一块（「完成」按钮就在那儿）；
+           * 2. 它的性质是**装饰**，而装饰不该生图（主人 2026-10-04：
+           *    「目前的美术我没看到需要调用生图额度的质量」）。
+           *
+           * 页头现在只有标题与「完成」—— **装饰让位给内容**。
+           * 详见 `docs/报告/方案-美术资产路数重定.md`。
+           */}
+          <h2 className="relative font-serif text-lg text-mist-100">前期准备</h2>
           <button
             onClick={onClose}
-            className="rounded-md px-2 py-1 text-[13px] text-mist-500 transition hover:text-mist-200"
+            className="relative rounded-md px-2 py-1 text-[13px] text-mist-500 transition hover:text-mist-200"
           >
             完成
           </button>

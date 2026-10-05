@@ -105,9 +105,32 @@ describe('H21：切图规格按类型分构图', () => {
      * "有人把 imageJobs 改回自己定义 union" —— 那种情况下 core 加一个 kind、
      * ui 不知道 → 新类型没有尺寸、静默拿方图。
      */
-    const all: ImageJobKind[] = ['action', 'scene', 'map', 'portrait'];
+    const all: ImageJobKind[] = ['action', 'scene', 'map', 'portrait', 'monster', 'avatar'];
     for (const k of all) expect(ART_SIZES[k], `${k} 在 core 里没有尺寸`).toMatch(/^\d+x\d+$/);
     expect(all.sort()).toEqual([...ART_KINDS].sort());
+  });
+
+  it('1-F：怪物形象与立绘同规格（怪物是主体，该给竖版特写）', () => {
+    /*
+     * 真判据：怪物**不是**场景（16:9 广角，画的是空间不是它），
+     * 也不是方图。报告 §2.3bis 三条理由：一场多敌、比例错、场景图不知道你在打谁。
+     * 这一条钉住"将来有人图省事把 monster 并回 scene/action"。
+     */
+    expect(ART_SIZES.monster).toBe(ART_SIZES.portrait);
+    expect(aspectRatioOf('monster')).toBe(aspectRatioOf('portrait'));
+    const [mw, mh] = aspectRatioOf('monster').split('/').map((s) => Number(s.trim()));
+    expect(mw! / mh!).toBeLessThan(1); // 必须是竖版
+  });
+
+  it('阶段 2：关键人物头像是**方版**（1:1），与竖版立绘分家', () => {
+    /*
+     * 判据：头像的用途是"认人"，要塞进方框；3:4 的竖图在方框里会被左右裁。
+     * 这一条钉住"将来有人嫌多一类、把它并回 portrait" —— 一并回去就又会裁脸。
+     */
+    expect(ART_SIZES.avatar).toBe('768x768');
+    expect(aspectRatioOf('avatar')).toBe('768 / 768');
+    const [aw, ah] = aspectRatioOf('avatar').split('/').map((s) => Number(s.trim()));
+    expect(aw! / ah!).toBeCloseTo(1, 5);
   });
 
   it('每一类都有中文名（队列角标要显示）', () => {

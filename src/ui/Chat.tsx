@@ -392,7 +392,6 @@ export function Chat({
     if (pendingChecks.length === 0) setBlockNote('');
   }, [pendingChecks.length]);
   const typography = useStore((s) => s.typography);
-  const combat = useStore((s) => s.gameState.combat);
   const messageImages = useStore((s) => s.messageImages);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -470,7 +469,15 @@ export function Chat({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8">
+      {/*
+       * 叙事区 = 玩家**看得最久**的一块面（主人 2026-10-02 的判据：
+       * 「美术资产按照玩家看到的时间排重要性」），所以材质先铺这里。
+       * `paper-surface`：材质 + 白底 + 统一投影（见 theme.css 的"两个原语"）。
+       */}
+      <div
+        ref={scrollRef}
+        className="paper-surface min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8"
+      >
         <div className="mx-auto max-w-3xl space-y-6">
           {messages.length > renderCount && (
             <div className="text-center">
@@ -510,43 +517,14 @@ export function Chat({
         </div>
       </div>
 
-      {combat?.active && (
-        <div className="shrink-0 border-t border-blood-400/30 bg-blood-400/5 px-4 py-1.5 sm:px-8">
-          <div className="mx-auto max-w-3xl">
-            <div className="flex items-center justify-between gap-3">
-              <span className="shrink-0 text-[12px] text-blood-300">
-                ⚔ 战斗中 · 第 {combat.round || 1} 轮
-              </span>
-              <span className="min-w-0 truncate text-[11px] text-mist-500">
-                尽情描述你的动作，想做几件都行——轮次是给世界用的
-              </span>
-            </div>
-            {combat.foes && combat.foes.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1.5">
-                {combat.foes.map((f) => {
-                  const pct = Math.max(0, Math.min(100, (f.hp / Math.max(f.max, 1)) * 100));
-                  return (
-                    <div key={f.name} className="flex items-center gap-1.5">
-                      <span className="text-[11px] text-mist-300">{f.name}</span>
-                      <div className="h-1.5 w-16 overflow-hidden rounded-full bg-ink-700">
-                        <div
-                          className={`h-full rounded-full ${
-                            pct <= 25 ? 'bg-blood-400' : 'bg-blood-400/70'
-                          }`}
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                      <span className="text-[10px] tabular-nums text-mist-400">
-                        {f.hp}/{f.max}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      {/*
+       * 战斗横幅**已挪到 `App.tsx` 的顶栏之下**（1-A 战斗归位）。
+       *
+       * 为什么不留在这里：`Chat` 被包在 `<main>` 里，而手机端是靠 `hidden`
+       * 在三个页签间切换的 —— 战斗一开、玩家点去「角色」或「世界」，
+       * 这条横幅会**整个消失**。它必须在任何页签下都看得见（状态可见铁律）。
+       * 所以这里不再渲染任何战斗相关的东西。
+       */}
 
       {/*
         H2：守密人还在写的时候，这张卡**不再整块消失**。
@@ -625,7 +603,7 @@ export function Chat({
       <div className="safe-bottom border-t border-ink-700 bg-ink-900/95 px-4 py-3 backdrop-blur sm:px-8">
         <div className="mx-auto max-w-3xl">
           {blockNote && <p className="mb-1.5 text-[11px] text-gold-500">{blockNote}</p>}
-          <div className="flex items-end gap-2 rounded-xl border border-ink-600 bg-ink-850 p-2 focus-within:border-gold-600/60">
+          <div className="paper-inset flex items-end gap-2 rounded-xl border border-ink-600 p-2 focus-within:border-gold-600/60">
             <textarea
               ref={taRef}
               value={draft}

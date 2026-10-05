@@ -25,11 +25,46 @@ export type ArtKind =
   | 'scene'
   /** 整个世界的地图 */
   | 'map'
-  /** 角色立绘 */
-  | 'portrait';
+  /** 角色立绘（玩家 / 同行者 / 关键剧情人物） */
+  | 'portrait'
+  /**
+   * 怪物形象（1-F 新增）。
+   *
+   * ## 与 `portrait` 分开的理由
+   * 尺寸、构图、**存档落点**全都不同：立绘落在 `character.portrait` 或
+   * `companions[].portrait`，而怪物形象落在 `gameState.foeArt`（按名字索引）。
+   * 合成一类的话 `applyImageResult` 里就得按 target 再分叉一次 ——
+   * 那是"加分支"，与「加东西不加分支」相悖。
+   *
+   * ⚠️ 尺寸与立绘相同（768×1024 竖版）：怪物是**主体**，
+   * 该给竖版特写而不是塞进场景广角里（报告 §2.3bis 三条理由）。
+   */
+  | 'monster'
+  /**
+   * 人物头像（阶段 2 · 计划 2-3）—— 方版。
+   *
+   * ## 为什么关键人物不用 `portrait` 的 3:4
+   * 这类图的用途是**认人**（档案卡里那 9rem 的小图、以及"谁在这儿"这类位置），
+   * 而 3:4 的竖版全身塞进方框会被左右裁掉。方版才是"头像"该有的规格。
+   *
+   * ## 存哪儿
+   * 仍落 `gameState.foeArt`（`npc:<名字>` → 去掉前缀后按名字索引），
+   * 与怪物共用同一张表 —— **不新增字段、不升 `SAVE_VERSION`**。
+   *
+   * ## 与 `portrait` 的关系（**不是二选一**）
+   * 玩家与同行者仍走 `portrait`（竖版立绘）；只有**关键剧情人物**走 `avatar`。
+   */
+  | 'avatar';
 
-/** 四类的全集（新增 kind 时必须同步补 —— 有断言钉着） */
-export const ART_KINDS: readonly ArtKind[] = ['action', 'scene', 'map', 'portrait'] as const;
+/** 六类的全集（新增 kind 时必须同步补 —— 有断言钉着） */
+export const ART_KINDS: readonly ArtKind[] = [
+  'action',
+  'scene',
+  'map',
+  'portrait',
+  'monster',
+  'avatar',
+] as const;
 
 /**
  * 🔴 **切图规格：按类型分构图**（2026-09-25 主人拍板，2026-09-26 落地）
@@ -37,6 +72,8 @@ export const ART_KINDS: readonly ArtKind[] = ['action', 'scene', 'map', 'portrai
  * | 类型 | 尺寸 | 比例 | 为什么 |
  * |---|---|---|---|
  * | `portrait` 立绘 | 768×1024 | 3:4 | 竖版半身/全身，方图会把人物裁成半身 |
+ * | `monster` 怪物 | 768×1024 | 3:4 | 与立绘同规格：怪物是主体，该给竖版特写 |
+ * | `avatar` 头像 | 768×768 | 1:1 | 关键人物**认人**用：方版塞进方框不裁脸 |
  * | `scene` 场景 | 1024×576 | 16:9 | 广角全景，方图没有广角感 |
  * | `map` 地图 | 1024×1024 | 1:1 | 俯视区域图，方形最自然 |
  * | `action` 插画 | 1024×1024 | 1:1 | 正文里的小图，方形嵌在段落间不抢版 |
@@ -47,6 +84,8 @@ export const ART_KINDS: readonly ArtKind[] = ['action', 'scene', 'map', 'portrai
  */
 export const ART_SIZES: Record<ArtKind, string> = {
   portrait: '768x1024',
+  monster: '768x1024',
+  avatar: '768x768',
   scene: '1024x576',
   map: '1024x1024',
   action: '1024x1024',

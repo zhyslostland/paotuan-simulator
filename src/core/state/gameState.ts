@@ -16,6 +16,8 @@ import { planHarm } from './harm.js';
 import { attackRejectedReason, HARM_NEEDS_CHECK_REASON, type AttackGrant } from './refusal.js';
 import { type Wound } from '../wounds.js';
 import { type BestiaryEntry } from '../bestiary.js';
+// 仅类型（编译后擦除）：1-E 地图合并的归并用得到节点名，不引入运行时循环
+import { type MapNode } from '../types.js';
 import { type Deadline, type StoryClock, normalizeClock, tickClock, clockLabel } from '../clock.js';
 
 export type { Wound };
@@ -238,6 +240,23 @@ export interface GameState {
    */
   npcNotes?: Record<string, NpcNote>;
   /**
+   * NPC 现在在哪个地点（**旁挂**，1-E 地图合并）。
+   *
+   * 键 = 名字（与 `npcsAlive` / `npcNotes` 同一套键），值 = 地点名。
+   * 用途：地图面板要把"谁在哪"**画在节点上** —— 玩家一眼看见
+   * 「塔内楼梯：你·老陈·玛丽」，而不是在两块面板之间来回对。
+   *
+   * ## 为什么还是旁挂（`npcNotes` 走过的同一条路，别重犯）
+   * 把 `npcsAlive` 改成 `{name, where}[]` 会牵动地图、检定面板、提示词，
+   * 且**必须升 `SAVE_VERSION`**。这里只加一个可选映射：
+   * 旧档读到 `undefined`，地图退化成"人在当前节点"（同 `CAST_RULES` 的兜底口径）。
+   *
+   * ## 🔴 代价（如实记）
+   * 守密人每轮多写一个字段，**漏写 = 那个人在地图上没有地点**。
+   * 兜底：**按玩家当前节点处理**（与「拿不准按在场处理」同一逻辑，见 `npcWhereOf`）。
+   */
+  npcWhere?: Record<string, string>;
+  /**
    * 伤口（引擎侧持续伤害的来源）。
    *
    * 可选新增字段 —— 旧档读到是 `undefined`（按"没有伤口"处理），**不需要升 `SAVE_VERSION`**。
@@ -264,6 +283,21 @@ export interface GameState {
    * 交手过（挨过打 / 打出过血 / 它死在这一局里）才算把弱点挣到手。
    */
   fought?: string[];
+  characterized?: string[];
+  /**
+   * 怪物形象（**旁挂**，1-F 形象体系）。
+   *
+   * 键 = 怪物名（与 `combat.foes[].name` / `encountered` / `fought` 同一套名字），
+   * 值 = 图的 data URI 或临时链接。**只有引擎写**（`applyImageResult`），
+   * 模型碰不到它 —— 它不是叙事状态，是玩家机器上的资产。
+   *
+   * ## 为什么放 `gameState` 而不是 localStorage
+   * `npcNotes` / `wounds` 走过的同一条路：大件走 IndexedDB（`putImageBlob`），
+   * 状态里只存引用/短串。可选新增字段，旧档读到 `undefined` → 图鉴退化成无图，**不升 `SAVE_VERSION`**。
+   *
+   * ⚠️ 它**不进 `ALLOWED_ROOTS`**：模型既不该写也不该读，写了会被白名单直接拒掉。
+   */
+  foeArt?: Record<string, string>;
   /**
    * 当前跑到**第几幕**（0 起）。R14 进章按需展开用。
    *
@@ -437,9 +471,10 @@ export const MODEL_WRITABLE_ROOTS = [
  *
  * 它们没有专属分支，走 `applyDeltas` 末尾那个"自由字段"兜底：
  * `flags` 是任意剧情开关；`npcsAlive` 是"谁在场"的字符串表；
- * `npcNotes` 是 NPC 档案的稀疏映射（前缀制天然支持 `npcNotes.<名字>.role`）。
+ * `npcNotes` 是 NPC 档案的稀疏映射（前缀制天然支持 `npcNotes.<名字>.role`）；
+ * `npcWhere` 是"某人在哪"的稀疏映射（键 = 名字，值 = 地点名，1-E 地图合并用）。
  */
-export const FREE_FIELD_ROOTS = ['flags', 'npcsAlive', 'npcNotes'] as const;
+export const FREE_FIELD_ROOTS = ['flags', 'npcsAlive', 'npcNotes', 'npcWhere'] as const;
 
 /**
  * **只由引擎写**的根：模型写了就拒。
@@ -453,6 +488,8 @@ export const FREE_FIELD_ROOTS = ['flags', 'npcsAlive', 'npcNotes'] as const;
  *   放进可写清单等于让模型把"听说过的东西"塞进图鉴。
  * - `carriedFrom` / `actIndex` / `actDetails`：世界层与幕结构，开团时由引擎写死。
  * - `vitalsMax` / `dying` / `ending`：派生值 / 濒死标记 / 收档，全部引擎独占。
+ * - `foeArt`：怪物形象（1-F）。**模型既不该写也不该读** ——
+ *   它是玩家机器上的资产引用（`applyImageResult` 落），不是叙事状态。
  */
 export const ENGINE_ONLY_ROOTS = [
   'wounds',
@@ -466,6 +503,7 @@ export const ENGINE_ONLY_ROOTS = [
   'vitalsMax',
   'dying',
   'ending',
+  'foeArt',
 ] as const;
 
 /** 判据用的集合（原来是手写 `new Set([...])`，现在由上面的清单派生）。 */
@@ -494,6 +532,7 @@ export const MODEL_WRITABLE_TARGET_TEXT: string = [
   'location.',
   'npcsAlive',
   'npcNotes.',
+  'npcWhere.',
   'threads.',
   'combat.active',
   'combat.round',
@@ -519,6 +558,217 @@ export const MODEL_WRITABLE_TARGET_TEXT: string = [
  */
 const LOSS_RE =
   /缴械|被夺|夺走|抢夺|抢走|没收|上缴|送给|送人|赠送|赠予|赠与|交给|留给|留作|递给|转交|丢失|遗失|丢了|掉落|掉进|掉入|掉下|沉入|损坏|摔坏|炸膛|炸毁|报废|毁坏|损毁|烧毁|焚毁|断裂|折断|出售|卖掉|交易|典当|丢弃|丢掉|丢进|扔掉|扔进|扔下|抛掉|丢下|投弃|抵押|捐赠|上交/;
+
+/**
+ * 某个人现在在哪（1-E 地图合并 · 纯函数，可单测）。
+ *
+ * ## 三级兜底（按可靠度从高到低）
+ * 1. `npcWhere[名字]` 有值 → 用它（守密人这一轮明确写了）；
+ * 2. 没写 → **按玩家当前所在**（`location`）—— 与 `CAST_RULES` 里「拿不准按在场处理」
+ *    同一条口径。理由一样：**宁可多算一个在场，也别把该看见的人弄丢**；
+ * 3. `location` 也空（开局）→ 返回空串，调用方按"不画在地图上"处理。
+ *
+ * 🔴 为什么不返回"未知"这种第三态：地图上多一个"未知"气泡对玩家毫无意义，
+ * 而他真正想知道的是"这个人大概率在这儿吧" —— 兜底答案就该是这个。
+ */
+export function npcWhereOf(state: Pick<GameState, 'npcWhere' | 'location'>, name: string): string {
+  const explicit = state.npcWhere?.[name]?.trim();
+  if (explicit) return explicit;
+  return state.location?.trim() ?? '';
+}
+
+/**
+ * 把一个**叙事里的地点名**归并到地图节点名（1-E 地图合并 · 纯函数，可单测）。
+ *
+ * ## 为什么必须有这一步（真 bug，2026-10-02 主人报「地图看不见人名」）
+ * 地图上画的节点名是**简称**（`mapNodes[].name`，如「事务所」），
+ * 而 `location` 是**叙事里的全名**（如「霍尔特的侦探事务所」，模组 `start_location` 原样）。
+ * 两者**不同源**（一个来自 AI 的 `map_nodes`，一个来自 `start_location` / 地点表），
+ * 内置模组上就已经不相等。
+ *
+ * 人名的落点曾经**按 `location` 原文做键、按 `nd.name` 取值**——
+ * 建键与取值两处口径不一致，于是**玩家自己和同行者的名字在地图上永远画不出来**
+ * （只有走过归并的关键人物画得出）：不是"有时看不见"，是"一直看不见"。
+ *
+ * 归并口径与地图迷雾 `revealedNodeNames()` 完全一致：全等 > 节点名含它 > 它含节点名。
+ * 归并不上时**原样返回** —— 宁可让它在「谁在哪」文字表里单独占一行，
+ * 也不硬塞到某个节点上，把玩家指到错的地方去。
+ */
+export function snapPlaceToNode(raw: string, nodes: Pick<MapNode, 'name'>[]): string {
+  const t = raw.trim();
+  if (!t) return '';
+  const hit = nodes.find((x) => {
+    const n = x.name.trim();
+    return Boolean(n) && (n === t || n.includes(t) || t.includes(n));
+  });
+  return hit ? hit.name.trim() : t;
+}
+
+/**
+ * 「谁在哪」（1-E 地图合并的数据层 · 纯函数，可单测）。
+ *
+ * 地图节点底下那行人名，与「谁在哪」文字表**吃的是同一份**，这里就是它俩的唯一真源。
+ *
+ * 🔴 键一律是**地图节点名**（经 `snapPlaceToNode` 归并）——
+ * 必须与 `MapGraph` 里 `occupants.get(nd.name)` 的取值口径对齐；
+ * 口径不一致就会重演上面那个「地图上的人名永远不显示」。
+ *
+ * 三条来源（都是引擎已有的事实，不新增玩家要维护的状态）：
+ *   - 玩家自己 → `playerName`，落在 `location`
+ *   - 同行者 → `companions` 里 `alive && present` 的
+ *   - 其余人物 → `npcWhereOf()`：守密人显式写过就跑显式值，没写就算在玩家所在地
+ */
+export function occupantsOf(
+  state: Pick<GameState, 'companions' | 'npcsAlive' | 'npcWhere' | 'location'>,
+  playerName: string,
+  mapNodes: Pick<MapNode, 'name'>[]
+): Map<string, string[]> {
+  const here = snapPlaceToNode(state.location ?? '', mapNodes);
+  const m = new Map<string, string[]>();
+  const bucket = (place: string, name: string) => {
+    const key = place.trim();
+    const who = name.trim();
+    if (!key || !who) return;
+    const list = m.get(key);
+    if (list) list.push(who);
+    else m.set(key, [who]);
+  };
+  bucket(here, playerName);
+  for (const c of state.companions ?? []) {
+    if (c.alive && c.present) bucket(here, c.name);
+  }
+  for (const npc of state.npcsAlive ?? []) {
+    // 拿不准的人一律按"在玩家当前所在地"处理（与 `CAST_RULES` 同一条口径）
+    bucket(snapPlaceToNode(npcWhereOf(state, npc), mapNodes) || here, npc);
+  }
+  return m;
+}
+
+/* ============================================================
+ * 形象体系（1-F）：谁该被画
+ * ============================================================ */
+
+/**
+ * 一局里**自动排队生图**的上限（主人 2026-10-01 拍板「防呆闸」）。
+ *
+ * 为什么要有：四条自动线（玩家 / 同行者 / 关键人物 / 怪物）都是"零操作自动排"，
+ * 一个长局能自然累积到几十个人 —— 每一张都是一次真实计费与一次真实等待。
+ * 12 是**够用且不失控**的数：一局里真正需要"长什么样"的核心角色通常不超过十来个人。
+ *
+ * ⚠️ 玩家**手动**点「画一张」不受这个闸门限制 —— 那是显式意图，
+ * 与「预制资产不许盖住重新生成」同一条判据（别替玩家做决定）。
+ */
+export const AUTO_ART_CAP = 12;
+
+/**
+ * 这一局已经自动画了几张（数**人物/怪物**形象，不含插画·场景·地图）。
+ *
+ * 判据只看 `portrait` / `monster` 两类已经**存在图**的数量：
+ * 数队列里的任务不可靠（失败/取消会漂），数"已经落地的图"才是事实。
+ */
+export function autoArtCount(state: Pick<GameState, 'foeArt'> & { companions?: Companion[] }, hasPlayerPortrait: boolean): number {
+  let n = state.foeArt ? Object.keys(state.foeArt).filter((k) => state.foeArt?.[k]).length : 0;
+  n += (state.companions ?? []).filter((c) => c.alive && c.portrait).length;
+  if (hasPlayerPortrait) n += 1;
+  return n;
+}
+
+/**
+ * 该给谁画形象 —— **四条自动线**的判据（纯函数，可单测）。
+ *
+ * | 优先 | 对象 | 判据 | 什么时候 |
+ * |---|---|---|---|
+ * | 1 | 玩家 | 永远在名单里，由调用方传 `hasPlayerArt` | 开团时 |
+ * | 2 | 同行者 | `companions` 里活着的 | 入队时 |
+ * | 3 | 关键剧情人物 | **名字在 `module.npcs` 里** 且已进 `npcsAlive` | 首次登场 |
+ * | 4 | 怪物 | `combat.foes` 里的人 | 进战斗轮 |
+ *
+ * ## 🔴 关键判据：`module.npcs` 是唯一一个"作者已经点过名"的信号
+ * 路人**不出专属图** —— 主人原话：「路人不生成啊，也不显示在在地人物」。
+ * 不给路人画不是偷懒：`npcsAlive` 里随时会冒出"码头工人甲"这种，
+ * 给他们每人一张图既没有上限也毫无价值。**照抄既有信号，不新增字段**
+ * （`npcProfileOf()` 里已经在查同一份表）。
+ *
+ * ⚠️ 返回的是**候选名单**，是否真排队由调用方叠加
+ * 「有没有图」「到没到 12 张上限」「有没有配 Key」三道闸。
+ */
+export interface ArtCandidate {
+  kind: 'portrait' | 'monster' | 'avatar';
+  /**
+   * `portrait` → 'character' / 队友 id；`monster` → 怪物名；
+   * `avatar` → `npc:<名字>`（落点仍在 `foeArt`，去掉前缀后按名字索引）
+   */
+  target: string;
+  name: string;
+  /** 队列里给玩家看的一行字 */
+  label: string;
+}
+
+export function artCandidates(
+  state: Pick<GameState, 'companions' | 'npcsAlive' | 'location' | 'combat' | 'foeArt'>,
+  moduleNpcNames: readonly string[],
+  characterName: string,
+  opts: { hasPlayerArt?: boolean } = {}
+): ArtCandidate[] {
+  const out: ArtCandidate[] = [];
+  /**
+   * 已画过的名字集合 —— **三处都要收**，少一处就会重复排队。
+   *
+   * - 玩家立绘不在 `gameState` 里（在 `character.portrait`），由 `opts` 传；
+   * - 队友立绘在 `companions[].portrait`；
+   * - 关键人物与怪物的图都在 `foeArt`（同一张表，按名字索引）。
+   *
+   * 🔴 这条曾经漏了 `foeArt` 里的**人物**：只收了怪物那一半，
+   * 于是关键人物每回合都会被重新排一次队 —— 直到撞上 12 张上限才停。
+   * 补断言时抓到的（`tests/artCandidates.test.ts`）。
+   */
+  const done = new Set<string>();
+  if (opts.hasPlayerArt) done.add(characterName.trim());
+  for (const c of state.companions ?? []) {
+    if (c.portrait) done.add(c.name.trim());
+  }
+  for (const k of Object.keys(state.foeArt ?? {})) {
+    if (state.foeArt?.[k]) done.add(k.trim());
+  }
+
+  // ① 玩家
+  if (characterName.trim() && !opts.hasPlayerArt) {
+    out.push({ kind: 'portrait', target: 'character', name: characterName.trim(), label: '你自己的立绘' });
+  }
+
+  // ② 同行者
+  for (const c of state.companions ?? []) {
+    if (!c.alive || c.portrait) continue;
+    out.push({ kind: 'portrait', target: c.id, name: c.name, label: `同行者「${c.name}」的立绘` });
+  }
+
+  // ③ 关键剧情人物（名字在模组人物表里 = 作者点过名）
+  const modNames = new Set((moduleNpcNames ?? []).map((n) => n.trim()).filter(Boolean));
+  for (const npc of state.npcsAlive ?? []) {
+    const n = npc.trim();
+    if (!n || done.has(n)) continue;
+    if (!modNames.has(n)) continue; // 路人：不画
+    /*
+     * 阶段 2（计划 2-3）：关键人物走 **`avatar`（方版 768×768）**，不再走竖版立绘。
+     *
+     * 这类图的用途是"认人"（档案卡里那张小图），不是"看全身"——
+     * 3:4 的竖版塞进方框会被左右裁，方版才是头像该有的规格。
+     * 落点没变：仍是 `foeArt`（`npc:<名字>` 去掉前缀）。
+     */
+    out.push({ kind: 'avatar', target: `npc:${n}`, name: n, label: `关键人物「${n}」的头像` });
+  }
+
+  // ④ 怪物（进了战斗轮的都算"照过面"——一行判据，与图鉴 G5 对齐）
+  if (state.combat?.active) {
+    for (const f of state.combat.foes ?? []) {
+      const n = f.name?.trim();
+      if (!n || done.has(n)) continue;
+      out.push({ kind: 'monster', target: n, name: n, label: `怪物「${n}」的形象` });
+    }
+  }
+
+  return out;
+}
 
 export function createInitialState(overrides: Partial<GameState> = {}): GameState {
     return {
@@ -1363,7 +1613,7 @@ export function applyDeltas(
       continue;
     }
 
-    // --- 自由字段：flags / npcsAlive ---
+    // --- 自由字段：flags / npcsAlive / npcNotes / npcWhere（只支持 set，不做语义校验）
     if (delta.op !== 'set') {
       rejected.push({ delta, reason: `${root} 只支持 set` });
       continue;

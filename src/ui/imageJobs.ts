@@ -23,7 +23,16 @@
 
 import type { ArtKind } from '../core/artSpec.js';
 
-/** 一张图是给谁画的。决定结果落到哪个位置 */
+/**
+ * 一张图是给谁画的。决定结果落到哪个位置
+ *
+ * `target` 的落点口径：
+ * - `action` → 消息 id
+ * - `scene` → 地点名
+ * - `map` → `'map'`
+ * - `portrait` → `'character'` / 队友 id
+ * - `monster` → 怪物名（1-F）
+ */
 /*
  * 类型定义在 `core/artSpec.ts`（那边还要按 kind 给尺寸）。这里只做别名，
  * 方向是 ui → core —— 铁律：core 不许反向依赖 ui。
@@ -199,6 +208,10 @@ export function kindLabel(kind: ImageJobKind): string {
       return '地图';
     case 'portrait':
       return '立绘';
+    case 'monster':
+      return '怪物形象';
+    case 'avatar':
+      return '人物头像';
   }
 }
 

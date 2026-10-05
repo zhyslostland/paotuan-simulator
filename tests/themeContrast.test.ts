@@ -214,6 +214,81 @@ describe('对比度算法本身（自检，防公式写错一路绿）', () => {
  * 纸纹铺在 `body` 上，会轻微改变背景的**实际亮度**，压到正文对比度上。
  * 所以这几条钉的不是"它长什么样"，而是"它必须足够轻、并且铺得对"。
  */
+/*
+ * ============================================================
+ * 面板材质（阶段 3 · 2026-10-04 改回内联 SVG）：同理
+ * ============================================================
+ *
+ * `--art-paper` 铺在**面板**上（`.paper-surface`），比整页底纹更靠近正文 ——
+ * 强度同理不许超 0.06。它与 `--paper-grain` 是**两个不同的东西**
+ * （一个是沙、一个是纤维），所以分开钉，别让将来有人以为"改一个就够"。
+ */
+describe('面板材质（阶段 3）不许伤到可读性', () => {
+  /** 把 `--art-paper` 里那段内联 SVG 抠出来并解码 */
+  function panelSvg(): string {
+    const m = /--art-paper:\s*url\("data:image\/svg\+xml,([^"]+)"\)/.exec(css);
+    const raw = decodeURIComponent(m?.[1] ?? '');
+    expect(raw, '找不到 --art-paper 变量（面板材质会静默消失）').toContain('<svg');
+    return raw;
+  }
+
+  it('🔴 纤维强度 ≤ 0.06（面板比整页底更靠近正文，更不能压对比度）', () => {
+    const om = /opacity='([\d.]+)'/.exec(panelSvg());
+    expect(om?.[1] ?? '', '面板材质没写 opacity —— 等于全强度').toMatch(/^\d/);
+    const alpha = Number(om![1]);
+    expect(alpha).toBeGreaterThan(0);
+    expect(alpha, `面板材质强度 ${alpha} 太大（上限 0.06）`).toBeLessThanOrEqual(0.06);
+  });
+
+  it('用了 stitchTiles=stitch（`.paper-surface` 是平铺的，接缝会露馅）', () => {
+    expect(panelSvg()).toContain("stitchTiles='stitch'");
+  });
+
+  it('去过色（saturate）—— 默认 feTurbulence 是彩色的，铺在米色纸上像撒彩砂', () => {
+    expect(panelSvg()).toContain("type='saturate'");
+  });
+
+  it('🔴 午夜主题必须**显式**设 none（漏了会静默继承羊皮纸那张米色纸）', () => {
+    /*
+     * 2026-10-02 真栽过的坑：`--art-paper` 只在 `:root` 定义过一次，
+     * 于是深色主题的每个面板都被糊上一层浅米色，而且**零报错**。
+     * 现在它换成了内联 SVG，但"主题专属变量两套都要显式设"这条规矩不变
+     * （主题守门第 ③ 条）。
+     */
+    const midnight = /:root\[data-theme='midnight'\]\s*\{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+    expect(midnight, '找不到午夜主题块').toContain('--art-paper: none');
+  });
+
+  it('🔴 整页背景图：浓淡两套都要显式设，且不许超过 0.85（它压在正文后面）', () => {
+    /*
+     * 背景图是**跨主题共用一张**的（`--art-bg` 故意只在 `:root` 定义一次），
+     * 但**浓淡**两套各自设 —— 于是按"主题专属变量"那条规矩钉：
+     * 漏一套会**静默继承**另一套的值。
+     *
+     * 🔴 上限为什么是 0.85（2026-10-04 实测改上来的）：
+     * 它压在**正文后面**，太浓会把字吃掉 —— 但也不能给太小，因为玩家实际看到的
+     * 强度是 `--art-bg-opacity × 面板的不透明度`，**是乘起来**的：
+     * 界面几乎全是半透明面板，第一版给了 0.30 × 面板透 10% ≈ 3%，
+     * 结果主人反馈「**背景图还是白的**」。所以上限得留出"乘完还看得见"的余地。
+     */
+    const flat =
+      css.match(/:root,\s*\n:root\[data-theme='parchment'\]\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+    const dark = /:root\[data-theme='midnight'\]\s*\{([\s\S]*?)\n\}/.exec(css)?.[1] ?? '';
+    expect(flat, '找不到羊皮纸主题块').not.toBe('');
+    expect(dark, '找不到午夜主题块').not.toBe('');
+    for (const [name, block] of [
+      ['羊皮纸', flat],
+      ['午夜', dark],
+    ] as const) {
+      const v = block.match(/--art-bg-opacity\s*:\s*([\d.]+)/)?.[1] ?? '';
+      expect(v, `${name}主题没显式设 --art-bg-opacity（会静默继承另一套）`).not.toBe('');
+      const n = Number(v);
+      expect(n).toBeGreaterThan(0);
+      expect(n, `${name}的背景图浓淡 ${n} 太大（上限 0.85，它在正文后面）`).toBeLessThanOrEqual(0.85);
+    }
+  });
+});
+
 describe('纸纹（阶段 1-2）不许伤到可读性', () => {
   /** 把 `--paper-grain` 里那段内联 SVG 抠出来并解码 */
   function grainSvg(): string {

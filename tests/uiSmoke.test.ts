@@ -110,9 +110,29 @@ describe('主要界面能被画出来（冒烟）', () => {
         onPromptCompanion: noop,
         onTravel: noop,
         onRewind: noop,
+        // 1-B：深链回调同样必传（漏传＝右栏「全部 ›」点了没反应）
+        onOpenPrep: noop,
       })
     );
     expect(html.length).toBeGreaterThan(800);
     expect(html).toContain('关键抉择');
+    // 1-B：两块常驻入口要在
+    expect(html).toContain('世界书');
+    expect(html).toContain('角色卡');
+  });
+
+  it('1-C：编年史默认只铺最近 8 条 + 一个「看更早的」按钮（不加滚动区）', () => {
+    /*
+     * 真判据：**不许出现侧栏内部的滚动容器**（滚轮陷阱）。
+     * 判的是"有没有滚动区"这件事本身，不是数 div —— 数 div 改个写法就假红。
+     */
+    const html = renderToString(createElement(WorldPanel, {
+      onPromptCompanion: noop,
+      onTravel: noop,
+      onRewind: noop,
+      onOpenPrep: noop,
+    }));
+    expect(html).not.toContain('overflow-y-auto');
+    expect(html).not.toContain('overflow-scroll');
   });
 });

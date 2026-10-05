@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useStore, type TurnSnapshot } from './store';
+import { OrnamentSeal } from './ornaments';
 import { defaultWorldName, findWorld } from '../core/campaign.js';
 import { getRuleset } from '../core/rulesets/index.js';
 import {
@@ -360,6 +361,12 @@ export function EndingScreen({
         <div className="mb-6 flex items-center gap-3">
           <span className="h-px w-8 bg-gold-600/60" />
           <span className="text-[11px] tracking-[0.2em] text-gold-500">结档</span>
+          {/*
+           * 火漆印（**手写 SVG**，见 `ui/ornaments.tsx`）—— "这一局封存了"最直白的记号。
+           * 一局只看一次（曝光排序里排最后，美术规范 §8.5）；
+           * 正因为看得少，它可以比别的件"实"一点点。
+           */}
+          <OrnamentSeal size={28} className="text-gold-500" />
         </div>
 
         <h1 className="font-serif text-[26px] leading-snug text-mist-100">

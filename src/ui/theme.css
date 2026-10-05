@@ -37,6 +37,7 @@
  *   --c-bg        页面底          最深/最亮的一层
  *   --c-surface   内容区底         比 bg 高一档（卡片会落在它上面）
  *   --c-panel     面板 / 弹层底     比 surface 再高一档
+ *   --c-panel-a   **半透明版的面板底** 同上，但让整页背景图透过来一点（见 `body::after`）
  *   --c-elevated  抬起元素底       输入框、代码块等
  *   --c-border    常规边框         **有意低对比**（1.2~1.5），它不该抢戏
  *   --c-border-strong 强边框 / 分隔  略强于 border，仍低于 2
@@ -57,7 +58,14 @@
 @theme inline {
   --color-ink-950: var(--c-bg);
   --color-ink-900: var(--c-surface);
-  --color-ink-850: var(--c-panel);
+  /*
+   * 🔴 `ink-850`（卡片/小面板底）指向**半透明版**（2026-10-05）：
+   * 原先它是 `--c-panel`（**不透明纯白**），而大面板 `.paper-surface` 用的是
+   * `--c-panel-a`（半透明）—— 同一个界面上两种卡片底，
+   * 浅色主题下就成了"一屏白块浮在纸上"，与那张古地图完全断开。
+   * 现在统一走半透明：卡片也能看到背景的经纬与罗盘，**同一张纸**。
+   */
+  --color-ink-850: var(--c-panel-a);
   --color-ink-800: var(--c-elevated);
   --color-ink-700: var(--c-border);
   --color-ink-600: var(--c-border-strong);
@@ -109,20 +117,84 @@
 }
 
 /*
+ * ── 界面视觉语言：形状 · 光源 · 层级（阶段 3，2026-10-02）──────────────
+ *
+ * 背景：主人当天两次点出「**界面美术还是半成品**」「地图那几个圈丑的要死」。
+ * 复盘（`docs/报告/复盘-界面美术为什么像半成品.md`）的结论是：
+ * 我一直在**加点缀**，而界面缺的是**归属属性**（形状语言 / 线宽 / 材质 / 光源）。
+ * 这一块就是在补它 —— 而且**一处改动、全局生效**，不用满仓库改组件。
+ *
+ * ### 1. 形状语言：圆角刻度整体收紧
+ * 以前各处随手 `rounded-md/lg/xl/2xl`（默认 6/8/12/16px），
+ * 于是卡片是"圆润的现代 App"，不是"纸卡"。纸卡的四角是**切口**，不是圆弧。
+ * 这里把整套刻度压到 **2/3/4/6/8/10** —— 同一个 `rounded-lg` 现在读起来是"裁出来的"。
+ * `rounded-full` 不受影响（胶囊形标签仍然该圆）。
+ *
+ * ### 2. 光源：统一**左上**
+ * 所有投影都用"上方略偏左"的一致方向，不再各处随手写 shadow-2xl。
+ * 方向一致是"同一只手做的"最省力的体现（比配色更明显）。
+ *
+ * ### 3. 层级：明度必须**拉开**
+ * 这是本次最要命的一处：羊皮纸主题原来的 `bg 242 / surface 250 / panel 255 / elevated 239`
+ * 四档挤在 16 个亮度值里 —— 面板根本"浮"不起来，界面像一张平贴的纸（dissolve）。
+ * 现在四档拉开了，见下面各主题的色值注释。
+ */
+@theme {
+  /* 圆角刻度：比 Tailwind 默认小一半以上 —— 切口，不是圆弧 */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 6px;
+  --radius-2xl: 8px;
+  --radius-3xl: 10px;
+
+  /* 投影刻度：统一光源（左上偏上），三档够用 */
+  --shadow-sm: 0 1px 1px rgb(0 0 0 / 0.05), 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-md: 0 1px 2px rgb(0 0 0 / 0.05), 0 2px 6px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 2px 4px rgb(0 0 0 / 0.06), 0 6px 16px rgb(0 0 0 / 0.08);
+}
+
+/*
  * ── 羊皮纸（浅色 · 默认） ─────────────────────────────────────────────
  */
 :root,
 :root[data-theme='parchment'] {
-  --c-bg: #f2ece0;
-  --c-surface: #faf7f0;
+  /*
+   * 🔴 明度四档**拉开**（2026-10-02，界面结构层）。
+   *
+   * 原来：bg 242 / surface 250 / panel 255 / elevated 239 —— 四档挤在 16 个亮度值里。
+   * 后果：面板与背景几乎同色，界面像**一张平贴的纸**（复盘里那种 "dissolve"），
+   * 卡片也不"浮"——这比配色难看更致命，因为它让整个界面没有**层次**。
+   *
+   * 现在：底 228 → 纸 247 → 面板 255（差 19 / 8），浮起来的关系一眼看得出。
+   * ⚠️ 改这四档要跑 `tests/themeContrast.test.ts` —— 它按"最难的底色"守 4.5:1。
+   */
+  --c-bg: #ece5d6;
+  --c-surface: #f9f5ec;
   --c-panel: #ffffff;
-  --c-elevated: #efe9db;
-  --c-border: #ded5c2;
-  --c-border-strong: #c9bda3;
+  /*
+   * 半透明版的面板底（2026-10-04，配整页背景图）。
+   *
+   * 🔴 数值是**实测调出来的**，不是拍的：界面几乎全是面板（聊天区 / 左右栏 / 底栏），
+   * 背景图又是 0.75 —— 若面板只透 10%，玩家实际看到的强度是 `0.75 × 0.10 ≈ 7%`，
+   * 等于**看不见**（主人当场反馈「背景图还是白的」）。
+   * 现在透 30%：既让那张古地图的经纬与罗盘真的看得出来，又不至于把字压住
+   * （最坏情况"线压在字上"仍有 ~11:1）。
+   */
+  --c-panel-a: rgb(255 255 255 / 0.7);
+  --c-elevated: #e8e0cd;
+  --c-border: #ddd3bd;
+  --c-border-strong: #c5b797;
   --c-text: #2b2620;
   --c-text-2: #574f43;
   --c-text-3: #665c4f;
-  --c-muted: #746a5e;
+  /*
+   * ⚠️ 底一暗，最弱文字就先撑不住 —— 这是浅色主题的硬约束（守门立刻逮到了：
+   * 原来 4.54:1，底调到 228 之后掉到 3.82）。所以底只敢暗到 236，
+   * 同时把 muted 从 #746a5e 微调到 #6f6559，重新配平回 4.5 以上。
+   * **层级不是靠"底无限压暗"拉开的**，剩下那半靠投影（见上面的 `--shadow-*`）。
+   */
+  --c-muted: #6f6559;
   --c-accent: #7a5214;
   --c-arcane: #543fc0;
   --c-danger: #9e2f2b;
@@ -150,12 +222,62 @@
    */
   --paper-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23g)' opacity='0.04'/%3E%3C/svg%3E");
   /*
+   * ── 面板材质（阶段 3 · 2026-10-04 改回内联 SVG）─────────────────────
+   *
+   * 与上面那层 `--paper-grain` 的区别（别搞混）：
+   * - `--paper-grain` 是**整页底**的极细噪点（高频，像沙）；
+   * - 这一层是**纸的纤维**（横向低频 × 纵向高频 → 长条状的丝），
+   *   给"看得最久的那块面"一个**表面** —— 它证明面板是"一张纸"，不是"一个色块"。
+   *
+   * 🔴 **它只铺"看得久"的地方**（主人 2026-10-02 的判据：
+   * 「**美术资产按照玩家看到的时间排重要性**」）——
+   * 所以落点是**聊天区**（玩家绝大部分时间在这儿），不是空局那一屏。
+   *
+   * ## 为什么从位图改回内联 SVG（2026-10-04）
+   * 它原来是 `url('/art/paper-texture.webp')`（生图出的一张 74 KB 纸纹）。改回来的三条理由：
+   * 1. **无缝**：`stitchTiles='stitch'` 平铺接得上；那张位图不是无缝的，只能 `cover` 拉伸，
+   *    铺在大面板上会**放大到看出糊**；
+   * 2. **零字节外链、且随主题走**：这串几十字节；位图 74 KB 且固定是米色；
+   * 3. **可微调**：浓淡就是改 `opacity` 一个数字，不用重出图。
+   * 主人原话：「**目前的美术我没看到需要调用生图额度的质量**」——
+   * 这类"衬底"本就不该生图（`docs/报告/方案-美术资产路数重定.md`）。
+   *
+   * 🔴 强度是**可读性**问题：`opacity` 不许超过 0.06（有断言钉着）。
+   */
+  --art-paper: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.015 0.55' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23f)' opacity='0.04'/%3E%3C/svg%3E");
+  /*
    * 暖色晕染：两团极淡的赭色，让纸面**不均匀**。
    * 纯噪点看着像"脏"，加点不均匀才像"纸"。
    */
   --paper-wash:
     radial-gradient(ellipse 70% 50% at 18% 8%, rgba(122, 82, 20, 0.035), transparent 70%),
     radial-gradient(ellipse 60% 45% at 88% 92%, rgba(122, 82, 20, 0.028), transparent 70%);
+
+  /*
+   * ── 整页背景图（2026-10-04）─────────────────────────────────────────
+   *
+   * 主人：「**缺背景图，半透明的那种**」。
+   *
+   * 🔴 这是**唯一**还需要生图的资产 —— 因为它是"**要一张画**"的位置
+   * （有构图、有画风、天天看）。装饰 / 图标 / 材质 / 线条一律在
+   * `ui/ornaments.tsx` 手写，别往这里加。
+   *
+   * 🔴 **它跨主题共用一张**（主人拍板），所以这一行**故意只在 `:root` 定义**、
+   * 不覆盖 —— 与 `--paper-grain` 那种"主题专属、两套都要显式设"的变量不同。
+   * 之所以共用还成立：出图后**抠掉了纸底**（`scripts/prepare-art-assets.py` 的 `PAPER_KEYED`），
+   * 只剩一条**暗金线** —— 铺在米底上是羊皮纸，铺在深底上就是午夜
+   * （暗金本来就是午夜主题的强调色 `#c9a44c`）。
+   *
+   * ## 🔴 浓淡 0.42 是**看着调出来的**（2026-10-04 → 10-05）
+   * 第一版 0.30，主人反馈「**背景图还是白的**」—— 真因是**被稀释了两次**：
+   * 界面几乎全是面板，而面板当时只透 10%，`0.30 × 0.10 = 3%`，等于没铺。
+   * 中间试到 0.75：桌面端正好，**手机端就太密了**（内容铺满全屏，罗盘的刻度环与正文叠在一起）。
+   * 现在 **0.42 × 面板透 30% ≈ 29%**（是原来 3% 的近十倍）：
+   * 手机上罗盘的放射与经纬"隐约但清楚"，桌面端也够。
+   * ⚠️ 改这个值要连着 `--c-panel-a` 一起想 —— 它俩是**乘起来**生效的。
+   */
+  --art-bg: url('/art/bg-atlas.webp');
+  --art-bg-opacity: 0.42;
 }
 
 /*
@@ -167,12 +289,15 @@
  * - 紫 arcane / 红 danger / 绿 success 沿用「午夜 · 暗金」的亮色版（暗底上要亮才看得见）。
  */
 :root[data-theme='midnight'] {
-  --c-bg: #0c0c0e;
+  /* 明度四档同样拉开（底更深、面板更亮）—— 理由同羊皮纸那一处 */
+  --c-bg: #0a0a0c;
   --c-surface: #121214;
-  --c-panel: #18181b;
-  --c-elevated: #1f1f23;
-  --c-border: #2c2c32;
-  --c-border-strong: #41414a;
+  --c-panel: #1c1c20;
+  /* 半透明版（理由同羊皮纸那一处）：深色主题的"透"略收敛 —— 底太黑，透多了会脏 */
+  --c-panel-a: rgb(28 28 32 / 0.72);
+  --c-elevated: #24242a;
+  --c-border: #2f2f36;
+  --c-border-strong: #46464f;
   --c-text: #f0f0f3;
   --c-text-2: #cfcfd6;
   --c-text-3: #acacb6;
@@ -190,6 +315,34 @@
    */
   --paper-grain: none;
   --paper-wash: none;
+  /*
+   * 🔴 **必须显式设 none**（2026-10-02 补的坑，主人提醒「别忘了还有一个暗金主题」时查出来的）：
+   * 它跟上面两项同性质 —— 不设就会继承羊皮纸那张**米色纸材质**，
+   * 于是深色主题的每个面板都会被糊上一层浅米色。变量继承是**静默**的，没有报错。
+   */
+  --art-paper: none;
+
+  /*
+   * 整页背景图**共用同一张**（`--art-bg` 故意不覆盖，见羊皮纸那一段）；
+   * 这里只调浓淡：深底上暗金线更"跳"，所以给得略高一点 —— 但也别高到抢正文。
+   */
+  --art-bg-opacity: 0.52;
+}
+
+/*
+ * 深色主题的「浮起」要换一种表达：投影在深底上几乎看不见。
+ * 业界做法一致 —— **暗底上用"亮边 + 顶部内高光"表达层级**，而不是外投影。
+ */
+:root[data-theme='midnight'] .paper-surface {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    0 1px 1px rgb(0 0 0 / 0.4);
+}
+/* 凹槽同理：上沿加深、下沿一条极淡的亮线 —— 光在暗底上依然是"从上来" */
+:root[data-theme='midnight'] .paper-inset {
+  box-shadow:
+    inset 0 2px 4px rgb(0 0 0 / 0.45),
+    inset 0 -1px 0 rgb(255 255 255 / 0.04);
 }
 
 html,
@@ -216,6 +369,45 @@ body {
     color 0.25s ease;
 }
 
+/*
+ * ── 整页背景图那一层（2026-10-04）───────────────────────────────────────
+ *
+ * ## 为什么用伪元素，而不是直接写在 `body` 的 `background-image` 里
+ * 因为**图片的不透明度没法单独控制** —— `opacity` 会连 body 的背景色与文字一起压，
+ * 而 `background-image` 本身不带 alpha 参数。用一个固定定位的伪元素专管它最省事：
+ * 图归它，浓淡归它，互不干扰。
+ *
+ * ## 为什么它以前"不存在"（这一步其实是在修 bug）
+ * 主容器（`App.tsx` 的根节点）原来有 `bg-ink-950` —— 那是**不透明**的 `--c-bg`，
+ * 全屏盖在 body 之上，于是 body 这一整层（纸纹 + 背景图）**根本看不见**。
+ * 现在主容器不设底色、并 `relative z-10` 抬到本层之上（`App.tsx` 里有注释）。
+ *
+ * ## 浓淡
+ * `--art-bg-opacity` 两套主题各自设（羊皮纸 0.30 / 午夜 0.38）。
+ * 它是**可读性**问题而不是口味问题：背景图在正文后面，太浓会把字吃掉。
+ *
+ * ## 尺寸
+ * `cover`：整页铺满，两端各自裁一点。图本身是均匀的星图，裁哪儿都不难看。
+ */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: var(--art-bg);
+  background-size: cover;
+  /*
+   * 🔴 偏上，不是正中（2026-10-05）：这张图的**中心是罗盘玫瑰**，
+   * 而内容（尤其是手机端）正好压在中段 —— 罗盘的放射线会与正文叠在一起。
+   * 往上挪 30% 之后，罗盘落在顶栏那一片"内容最稀"的地方，
+   * 中段留下的是经纬网与小岛，均匀、不抢。
+   */
+  background-position: center 32%;
+  background-repeat: no-repeat;
+  opacity: var(--art-bg-opacity);
+}
+
 .safe-bottom {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -224,123 +416,33 @@ body {
 }
 
 /*
- * 触摸设备上给按钮一个够大的热区。
- * 界面上有不少 10-11px 的文字按钮，视觉上很好，但手指点不中。
- * 只加最小高度，不动字号；桌面（精确指针）不受影响。
+ * ── 界面结构层的两个原语（阶段 3，2026-10-02）─────────────────────────
+ *
+ * 复盘说界面缺的是"归属属性"，落到代码上就这两个类：**面**与**槽**。
+ * 它们不画任何花纹，只做三件事：**有材质、有统一光源（投影）、有边界**。
+ * 一个界面只要这两样做对了，就已经"是个物体"了 —— 花纹是后话。
  */
-@media (pointer: coarse) {
-  button {
-    min-height: 34px;
-  }
-  /* 需要保持紧凑的按钮可以加 .hit-compact 退出这条规则 */
-  button.hit-compact {
-    min-height: 0;
-  }
-}
 
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--c-border-strong);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--c-muted);
-}
-
-@keyframes riseIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-.rise-in {
-  animation: riseIn 0.24s ease-out;
-}
-
-@keyframes pulseGlow {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.55;
-  }
-}
-.thinking-dot {
-  animation: pulseGlow 1.2s ease-in-out infinite;
-}
-
-.prose-trpg {
-  line-height: 1.75;
-}
-.prose-trpg p {
-  margin: 0 0 0.85em;
-}
-.prose-trpg p:last-child {
-  margin-bottom: 0;
-}
-/* 首行缩进两字（"书卷"排版预设用） */
-.prose-indent p {
-  text-indent: 2em;
-}
-.prose-trpg strong {
-  color: var(--c-text);
-  font-weight: 600;
-}
 /*
- * 中文没有真正的斜体字形，浏览器会硬拉出一个"伪斜体"，小字号下非常糊。
- * 所以 em 只做提亮，不倾斜。
+ * 纸面：看得越久的地方越该用它。
+ *
+ * 🔴 **平铺，不是拉伸**（2026-10-04 改）：纹理现在是内联 SVG 的纤维层，
+ * `stitchTiles='stitch'` 保证平铺边界接得上 —— 所以按自然尺寸 repeat。
+ * 上一版用位图时只能 `cover` 拉伸，铺在大面板上会把纹理放大到看出糊。
+ *
+ * 🔴 **底色用半透明的 `--c-panel-a`**（2026-10-04）：让整页那张背景图在面板上也**隐约带一点** ——
+ * 面板与整页才是同一张纸。只透 10% 上下，不影响明度层级，也不压正文对比度。
  */
-.prose-trpg em {
-  color: var(--c-text);
-  font-style: normal;
+.paper-surface {
+  background-color: var(--c-panel-a);
+  background-image: var(--art-paper);
+  background-repeat: repeat;
+  background-size: 240px 240px;
+  box-shadow: var(--shadow-sm);
 }
-.prose-trpg ul,
-.prose-trpg ol {
-  margin: 0 0 0.85em;
-  padding-left: 1.4em;
-}
-.prose-trpg ul {
-  list-style: disc;
-}
-.prose-trpg ol {
-  list-style: decimal;
-}
-/*
- * 引用块：开场白里的「你要做的事 / 赌注 / 时间」就走这里。
- * 之前是 `color: tertiary + italic`，暗色主题下又灰又斜，基本看不清。
- * 现在用 secondary 色 + 左侧金线 + 轻微底色，保证一眼能读到。
- */
-.prose-trpg blockquote {
-  border-left: 3px solid var(--c-accent);
-  border-radius: 0 6px 6px 0;
-  background: color-mix(in srgb, var(--c-accent) 8%, transparent);
-  padding: 0.5em 0.9em;
-  margin: 0 0 0.85em;
-  color: var(--c-text-2);
-}
-.prose-trpg blockquote p {
-  margin: 0 0 0.35em;
-}
-.prose-trpg blockquote p:last-child {
-  margin-bottom: 0;
-}
-.prose-trpg blockquote strong {
-  color: var(--c-text);
-}
-.prose-trpg code {
-  background: var(--c-elevated);
-  padding: 0.1em 0.4em;
-  border-radius: 4px;
-  font-size: 0.9em;
+
+/* 槽：输入框这类"压进去"的面 —— 光从左上打，所以上沿暗、下沿亮 */
+.paper-inset {
+  background-color: var(--c-elevated);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.07);
 }

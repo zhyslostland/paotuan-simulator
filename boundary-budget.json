@@ -1,0 +1,54 @@
+{
+  "note": "体检 §3 的体量基线（阶段 1 落盘）。上调会在 diff 里留痕。",
+  "files": {
+    "src/ui/store.ts": {
+      "chars": 113304,
+      "lines": 3790
+    },
+    "src/ui/Preparation.tsx": {
+      "chars": 108765,
+      "lines": 2977
+    },
+    "src/ui/Settings.tsx": {
+      "chars": 77413,
+      "lines": 2156
+    },
+    "src/ui/App.tsx": {
+      "chars": 59031,
+      "lines": 1750
+    },
+    "src/core/state/gameState.ts": {
+      "chars": 46715,
+      "lines": 1472
+    },
+    "src/orchestrator/prompt.ts": {
+      "chars": 42282,
+      "lines": 1252
+    },
+    "src/ui/WorldPanel.tsx": {
+      "chars": 41858,
+      "lines": 1282
+    },
+    "src/ui/CharacterSheet.tsx": {
+      "chars": 39105,
+      "lines": 1089
+    },
+    "src/ui/Changelog.tsx": {
+      "chars": 36324,
+      "lines": 849
+    },
+    "src/ui/state/loaders.ts": {
+      "chars": 32139,
+      "lines": 1071
+    },
+    "src/orchestrator/generate.ts": {
+      "chars": 28562,
+      "lines": 870
+    },
+    "src/ui/Chat.tsx": {
+      "chars": 23914,
+      "lines": 706
+    }
+  },
+  "silentCatch": 27
+}

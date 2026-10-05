@@ -233,6 +233,17 @@ export interface ModuleNpc {
   role: string;
   motive: string;
   secret: string;
+  /**
+   * 外貌锚点（阶段 2 · 计划 2-3，可选新增）。
+   *
+   * 关键人物的图以前**零外貌输入** —— 提示词只有名字与身份，
+   * 模型每次画出来都是另一个人。这里给它一个写长相的地方，取法与
+   * 主角/队友完全同一处（`core/appearance.ts` 的 `appearanceOf`）。
+   *
+   * ⚠️ 可选新增 → **不升 `SAVE_VERSION`**；老模组读到 `undefined`，
+   * 提示词退回 `role`，与以前一字不差。
+   */
+  appearance?: string;
 }
 /** 地图上的一个地点节点（空间信息的最小单位） */
 export interface MapNode {

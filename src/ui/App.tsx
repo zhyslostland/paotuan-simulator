@@ -13,6 +13,7 @@ import { consumeLoadError } from './state/loaders.js';
 import { statusNote as statusEffectsNote } from '../core/statusEffects.js';
 import { Chat } from './Chat';
 import { ImageJobsBadge } from './ImageJobsBadge';
+import { LineArt, OrnamentEmblem } from './ornaments';
 import {
   ICONS,
   IconFlask,
@@ -24,6 +25,7 @@ import {
 import { CharacterSheet, CheckDialog, type Difficulty } from './CharacterSheet';
 import { WorldPanel } from './WorldPanel';
 import { ConfirmDialog } from './ConfirmDialog';
+import { LightboxOverlay } from './ImageLightbox';
 /*
  * 三个最大的弹层改成**按需加载**（`React.lazy`）。
  *
@@ -40,10 +42,19 @@ import { ConfirmDialog } from './ConfirmDialog';
 const Settings = lazy(() => import('./Settings').then((m) => ({ default: m.Settings })));
 const Preparation = lazy(() => import('./Preparation').then((m) => ({ default: m.Preparation })));
 const TestSandbox = lazy(() => import('./TestSandbox').then((m) => ({ default: m.TestSandbox })));
-/** 分包还在路上时的占位 —— 一行字就够，别为它做动画 */
+/**
+ * 分包还在路上时的占位 —— 一句人话 + 一枚沙漏线稿（手写 SVG，见 `ornaments.tsx`）。
+ *
+ * ⚠️ 尺寸调过一次：第一版做成 56px／70% 后主人说"感觉没什么变化" ——
+ * 太淡就等于没做（铁律：玩家看不见＝没做）。现在 88px。
+ */
 const ChunkLoading = () => (
-  <div className="fixed inset-0 z-[80] flex items-center justify-center bg-ink-950/60 text-[12px] text-mist-400">
-    载入中…
+  <div className="fixed inset-0 z-[80] flex flex-col items-center justify-center gap-4 bg-ink-950/60">
+    {/* ⚠️ 浓淡一律用 `opacity-*`（**元素级**）—— 文字色带上透明度会把对比度打穿，
+        有断言钉着（`themeContrast.test.ts`）。⚠️ 那断言是**扫源码文本**的，
+        所以连注释里也别把那种写法原样写出来（写了会**假红**）。 */}
+    <LineArt name="hourglass" size={88} className="text-gold-600 opacity-70" />
+    <span className="text-[12px] text-mist-400">载入中…</span>
   </div>
 );
 import {
@@ -80,7 +91,10 @@ import { streamChat, chat, ModelError, type ChatTurn } from '../providers/model.
 import {
   FOLD_SYSTEM,
   actionImagePrompt,
+  characterImagePrompt,
   endingSystemPrompt,
+  monsterImagePrompt,
+  npcAvatarPrompt,
 } from '../orchestrator/generate.js';
 import { EndingScreen } from './EndingScreen';
 import { applyUpdate, checkForUpdate, watchForUpdates } from '../update.js';
@@ -93,6 +107,7 @@ import { HelpDialog } from './HelpGuide';
 import { getRuleset } from '../core/rulesets/index.js';
 import { getGenre } from '../core/genres.js';
 import type { Ending } from '../core/state/gameState.js';
+import { AUTO_ART_CAP, artCandidates, autoArtCount } from '../core/state/gameState.js';
 import { encumbranceNote } from '../core/encumbrance.js';
 import { isHealOnlyConsumable, itemsMentionedIn } from '../core/items.js';
 import { readLocal, writeLocal } from './state/storage.js';
@@ -138,6 +153,148 @@ const FALLBACK_ENDING: Record<string, string> = {
  * 也可能早就撑爆提示词。现在**按字符**：合计 ≥ 4000 字折一次，保留近 2000 字。
  * 判据本体在 `core/chronicle.ts`（纯函数，可单测）。
  */
+/**
+ * 顶栏的「⋮」菜单（1-D 主命令，主人 2026-10-01 拍板）。
+ *
+ * ## 为什么非要有它
+ * 顶栏原先挂着九个按钮（帮助 / 音频 / 停音效 / 沙盒 / 终幕 / 开团 / 准备 / 设置…），
+ * 全排在一行里 —— 手机 390px 下会挤成两行、还挤掉标题。
+ * 而这些**全是低频动作**：一局开一次团、改一次设置。
+ * 高频的「行动 / 重试」在底栏，一次点击直达；顶栏只留这个菜单。
+ *
+ * ## 两条实现口径
+ * 1. **点外面 / 按 Esc 关掉** —— 菜单不关会挡着界面，且玩家会以为界面卡了；
+ * 2. **每一项关掉菜单再执行** —— 否则弹层会叠在菜单上，堆成一团。
+ *
+ * ## 沙盒 / 终幕是**条件项**
+ * `devMode` 关着就没有沙盒（它是测试用的）；这一局还没结档就没有终幕。
+ * 条件项**不占位置**（`null`），不是"灰着摆那儿"—— 摆着会让人以为功能坏了。
+ */
+function TopMenu({
+  devMode,
+  showEnding,
+  audioOn,
+  onHelp,
+  onToggleAudio,
+  onStopSfx,
+  onSandbox,
+  onEnding,
+  onStart,
+  onPrep,
+  onSettings,
+}: {
+  devMode: boolean;
+  showEnding: boolean;
+  audioOn: boolean;
+  onHelp: () => void;
+  onToggleAudio: () => void;
+  onStopSfx: () => void;
+  onSandbox: () => void;
+  onEnding: () => void;
+  onStart: () => void;
+  onPrep: () => void;
+  onSettings: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  // 点外面 / Esc 关掉
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  /** 包一层：先关菜单，再执行 —— 免得弹层叠在菜单上 */
+  const run = (fn: () => void) => () => {
+    setOpen(false);
+    fn();
+  };
+
+  const item =
+    'flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-mist-300 transition hover:bg-ink-800 hover:text-mist-100';
+
+  return (
+    <div ref={boxRef} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center justify-center rounded-md border px-2.5 py-1.5 text-[12px] transition ${
+          open
+            ? 'border-gold-600/50 text-gold-400'
+            : 'border-ink-600 text-mist-400 hover:border-gold-600/50 hover:text-mist-100'
+        }`}
+        title="更多"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <ICONS.more size={15} />
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+6px)] z-50 w-44 overflow-hidden rounded-lg border border-ink-600 bg-ink-900 py-1 shadow-2xl"
+        >
+          <button className={item} onClick={run(onHelp)}>
+            <IconHelp size={14} />
+            怎么玩
+          </button>
+          <button className={item} onClick={run(onToggleAudio)}>
+            {audioOn ? <IconVolumeOn size={14} /> : <IconVolumeOff size={14} />}
+            {audioOn ? '静音' : '打开音频'}
+          </button>
+          {audioOn && (
+            <button className={item} onClick={run(onStopSfx)}>
+              <IconStop size={13} />
+              掐掉音效
+            </button>
+          )}
+
+          <div className="my-1 h-px bg-ink-700" />
+
+          <button className={item} onClick={run(onStart)}>
+            <ICONS.card size={14} />
+            <span className="text-gold-400">开团</span>
+          </button>
+          <button className={item} onClick={run(onPrep)}>
+            <ICONS.folder size={14} />
+            准备
+          </button>
+          <button className={item} onClick={run(onSettings)}>
+            <ICONS.settings size={14} />
+            设置
+          </button>
+
+          {(showEnding || devMode) && <div className="my-1 h-px bg-ink-700" />}
+
+          {showEnding && (
+            <button className={item} onClick={run(onEnding)}>
+              <ICONS.trophy size={14} />
+              回到终幕
+            </button>
+          )}
+          {devMode && (
+            <button className={item} onClick={run(onSandbox)}>
+              <IconFlask size={14} />
+              测试沙盒
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const {
     messages,
@@ -169,6 +326,27 @@ export default function App() {
     if (showSettings) setSettingsMounted(true);
   }, [showSettings]);
   const [showPrep, setShowPrep] = useState(false);
+  /**
+   * 1-B：这次打开准备页要落在哪一页签（右栏「全部 ›」深链用）。
+   *
+   * 与 `showPrep` 配对：每次打开前先设好这里，再 `setShowPrep(true)`。
+   * 为什么不用 `Preparation` 自己的默认页签：那个默认是「角色卡」，
+   * 而玩家点右栏「世界书 · 全部 ›」时想看的就是世界书 —— 落错页等于多一次点击。
+   */
+  const [prepTab, setPrepTab] = useState<
+    'module' | 'character' | 'companions' | 'worldbook' | 'world' | undefined
+  >(undefined);
+  /**
+   * 🔴 `prepTab` 是**一次性**的：`Preparation` 只在挂载那一刻读它（`useState(initialTab)`）。
+   *
+   * 所以关掉准备页时必须清空 —— 否则「上次点过世界书 ›」会一直留着，
+   * 下一次从 ⋮ 里点「准备」进来还落在世界书页，玩家会以为角色卡那一页丢了。
+   * 清空的时机放在关闭处（而不是打开处）才不影响这次挂载读到的值。
+   */
+  const closePrep = () => {
+    setShowPrep(false);
+    setPrepTab(undefined);
+  };
   const [mobilePanel, setMobilePanel] = useState<Panel>('chat');
   const [draft, setDraft] = useState('');
   const [checkSkill, setCheckSkill] = useState<string | null>(null);
@@ -192,6 +370,13 @@ export default function App() {
   const [showSandbox, setShowSandbox] = useState(false);
   const [showChangelog, setShowChangelog] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  /**
+   * 1-F：战斗横幅里点开的那个怪物名字（非 null 时弹大图）。
+   *
+   * 存**名字**不存 URL：名字是稳定引用，而 `foeArt` 里的图随时可能被重新生成
+   * （换一张）或被移除 —— 存 URL 会让弹窗里停在一张已经被替换掉的旧图。
+   */
+  const [foeArtName, setFoeArtName] = useState<string | null>(null);
   /** 音频开关的界面状态（与 store 里的 audio.enabled 同步） */
   const [audioOn, setAudioOn] = useState(() => useStore.getState().audio.enabled);
   const devMode = useStore((s) => s.devMode);
@@ -354,7 +539,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (checkSkill) return setCheckSkill(null);
-        if (showPrep) return setShowPrep(false);
+        if (showPrep) return closePrep();
         if (showSettings) return setShowSettings(false);
         if (pendingStart) return setPendingStart(false);
         return;
@@ -1046,6 +1231,106 @@ export default function App() {
       abortRef.current = null;
     }
 
+    /*
+     * 🔴 1-F 形象体系：四条线**自动排队**（主人 2026-10-01 拍板「玩家操作次数 0」）。
+     *
+     * ## 为什么放在这里、放在 finally 之后
+     * 它是**回合的后事**，不是回合本身：玩家已经在读这一轮叙事了，
+     * 排队这件事不该占用他的等待时间。而且必须等 `applyModelDeltas` 落完之后跑 ——
+     * 这一轮的 `combat.foes` / `npcsAlive` / `companions` 才是最新的。
+     *
+     * ## 四道闸（缺一不可）
+     * ① `autoIllustrate` 总开关（既有字段，默认关）—— 每张图都是真金白银的调用，
+     *    默认开着等于替主人决定支出。已有「任何一条消息上都有单独的配图按钮」兜底。
+     * ② 到没到 `AUTO_ART_CAP`（12 张），到了就停 —— 防呆闸。
+     * ③ 有没有配 Key / 生图模型：`queueImage` 自己判，没配就返回 null（当无事发生）。
+     * ④ 有没有画过：`artCandidates` 只返回**还没有图**的人。
+     */
+    if (useStore.getState().autoIllustrate) {
+      const s = useStore.getState();
+      const genre = getGenre(s.genreId, s.customGenres);
+      const st = s.gameState;
+      const playerDone = Boolean(s.character.portrait);
+      const used = autoArtCount(st, playerDone);
+      const room = AUTO_ART_CAP - used;
+      if (room > 0) {
+        const cands = artCandidates(
+          st,
+          s.module.npcs.map((n) => n.name),
+          s.character.name,
+          { hasPlayerArt: playerDone }
+        );
+        for (const c of cands.slice(0, room)) {
+          /*
+           * 提示词按类型分叉**只在这一处**：人物走 `characterImagePrompt`（吃外貌锚点），
+           * 怪物走 `monsterImagePrompt`（吃图鉴表的 look/behavior，不碰 weakness）。
+           * 两条都复用 `portrait` 这一类（同尺寸同构图），只是 target 前缀不同：
+           * `npc:<名字>` 落在 `foeArt`，其余走既有立绘落点。
+           */
+          if (c.kind === 'monster') {
+            const hit = (s.module.monsters ?? []).find((m) => m.name === c.name);
+            s.queueImage({
+              kind: 'monster',
+              target: c.name,
+              label: c.label,
+              prompt: monsterImagePrompt(
+                c.name,
+                { look: hit?.look, behavior: hit?.behavior, premise: s.module.premise },
+                genre
+              ),
+            });
+          } else if (c.kind === 'avatar') {
+            /*
+             * 关键人物头像（阶段 2 · 计划 2-3）：方版 768×768，落 `foeArt`。
+             *
+             * 外貌吃 `module.npcs[].appearance`（阶段 2 新增字段）——
+             * 以前这里手上只有名字，模型每画一次都是另一个人。
+             * 再兜一层模型自己写下的在场观察（`npcNotes`），它比空字段有用得多。
+             */
+            const mNpc = (s.module.npcs ?? []).find((x) => x.name === c.name);
+            // 档案里那份"在场观察"（模型写的）比空字段有用 —— 与 role 一起兜底
+            const memo = st.npcNotes?.[c.name];
+            s.queueImage({
+              kind: 'avatar',
+              target: c.target,
+              label: c.label,
+              prompt: npcAvatarPrompt(
+                {
+                  name: c.name,
+                  appearance: mNpc?.appearance,
+                  role: mNpc?.role ?? memo?.role,
+                  note: memo?.note,
+                },
+                genre
+              ),
+            });
+          } else {
+            /*
+             * 队友走 `appearance`（外貌锚点，AI 生成队友时一并产出）——
+             * 模组人物表里没有外貌字段，所以它的 `look` 拿不到，
+             * 兜底交给 `appearanceOf()`：`role` / `note` 就是它手上仅有的线索。
+             * 这不是缺陷：关键人物**首次登场**时模型会在 `npcNotes` 里写下观察，
+             * 那份 note 比一个空字段有用得多。
+             */
+            const comp = st.companions.find((x) => x.name === c.name);
+            s.queueImage({
+              kind: 'portrait',
+              target: c.target,
+              label: c.label,
+              prompt: characterImagePrompt(
+                {
+                  name: c.name,
+                  description: comp?.personality ?? comp?.role,
+                  appearance: comp?.appearance,
+                },
+                genre
+              ),
+            });
+          }
+        }
+      }
+    }
+
     // 放在流结束之后：玩家已经在读文本了，压缩不占用等待时间
     await foldChronicleIfNeeded();
 
@@ -1321,7 +1606,7 @@ export default function App() {
      */
     void useStore.getState().expandAct(0);
     setPendingStart(false);
-    setShowPrep(false);
+    closePrep();
     setShowSettings(false);
     setShowEnding(false);
     setMobilePanel('chat');
@@ -1333,6 +1618,19 @@ export default function App() {
     // 开团音：翻开了第一页
     const a = useStore.getState().audio;
     if (a.enabled) void playSfx('start', a.sfxVol);
+  };
+
+  /**
+   * 1-B：打开准备页并**落在指定页签**（右栏「全部 ›」走这条路）。
+   *
+   * 为什么不各自 `setShowPrep(true)`：deep-link 要靠"先设页签再打开"这个顺序，
+   * 散在两处迟早有人只写一半（开了页、没落对页签）。收成一个出口。
+   */
+  const openPrepAt = (
+    tab: 'module' | 'character' | 'companions' | 'worldbook' | 'world'
+  ) => {
+    setPrepTab(tab);
+    setShowPrep(true);
   };
 
   /** 回溯到某条玩家消息之前：恢复当时状态、截断其后消息，并把内容填回输入框以便改完重发 */
@@ -1479,9 +1777,25 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-ink-950">
+    /*
+     * ⚠️ 这个根节点**不能有自己的底色**（原来写的是 `bg-ink-950`）。
+     *
+     * 它是全屏不透明的，会把 `body` 上的一切（底纹、整页背景图）**整个盖住** ——
+     * 这正是"背景层一直是死的"那个 bug（2026-10-04 查出来）。
+     * 现在：底色交给 `body`（`--c-bg`），背景图交给 `body::after`，
+     * 这里只管布局，并**抬到背景之上**（`relative z-10`）。
+     */
+    <div className="relative z-10 flex h-full flex-col">
       <header className="safe-top flex shrink-0 items-center justify-between gap-2 border-b border-ink-700 bg-ink-900/90 px-4 py-2 backdrop-blur">
         <div className="flex min-w-0 items-baseline gap-2.5">
+          {/*
+           * 应用章纹（**手写 SVG**，见 `ui/ornaments.tsx`）：**小、不抢视线** ——
+           * 给标题一点"这东西是有身世的"的分量，不是来抢字的（美术规范 §八）。
+           *
+           * 🔴 原来是一张生图（26px 下边缘全是毛点，且位图不随主题变色）。
+           * 手写这套走 `currentColor` —— 羊皮纸与午夜各自成立。
+           */}
+          <OrnamentEmblem size={26} className="shrink-0 self-center text-gold-500" />
           <h1 className="shrink-0 font-serif text-[16px] tracking-wide text-mist-100">
             跑团模拟器
           </h1>
@@ -1490,6 +1804,12 @@ export default function App() {
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/*
+           * 「未配置 API」保留在**顶栏本体**，不塞进 ⋮。
+           * 理由：它是一条**提醒**，不是入口 —— 新玩家进来第一件事就是找它，
+           * 收进菜单等于把"你还没配 key、现在什么都跑不了"藏起来。
+           * 配好之后它自己消失（`!config.apiKey`）。
+           */}
           {!config.apiKey && (
             <button
               onClick={() => setShowSettings(true)}
@@ -1498,82 +1818,114 @@ export default function App() {
               未配置 API
             </button>
           )}
-          {/* 常驻帮助入口：别只依赖"首次进入"那一次弹窗（协作方 R42） */}
-          <button
-            onClick={() => setShowHelp(true)}
-            className="flex items-center justify-center rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-400 transition hover:border-gold-600/50 hover:text-mist-100"
-            title="怎么玩（随时可看）"
-          >
-            <IconHelp size={15} />
-          </button>
-          {/* 音频控制坞：玩的时候不用翻设置就能一键静音 / 掐掉正在播的音效 */}
-          <button
-            onClick={toggleAudio}
-            className={`flex items-center justify-center rounded-md border px-2 py-1.5 text-[12px] transition ${
-              audioOn
-                ? 'border-gold-600/50 text-gold-400 hover:bg-gold-500/10'
-                : 'border-ink-600 text-mist-500 hover:text-mist-300'
-            }`}
-            title={audioOn ? '静音（背景音与音效一起）' : '打开音频'}
-          >
-            {audioOn ? <IconVolumeOn size={15} /> : <IconVolumeOff size={15} />}
-          </button>
-          {audioOn && (
-            <button
-              onClick={() => stopSfx()}
-              className="flex items-center justify-center rounded-md border border-ink-600 px-2 py-1.5 text-[12px] text-mist-500 transition hover:text-mist-300"
-              title="掐掉正在播的音效（上传了整首歌时很有用）"
-            >
-              <IconStop size={14} />
-            </button>
-          )}
-          {/* 开发者模式：一键把测试环境摆好，省得每次测功能都从头建角色想模组 */}
-          {devMode && (
-            <button
-              onClick={() => setShowSandbox(true)}
-              className="flex items-center justify-center rounded-md border border-ink-600 px-2.5 py-1.5 text-[12px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
-              title="测试沙盒：灌入测试存档 / 脚本化模组 / 调数值 / 触发结档"
-            >
-              <IconFlask size={15} />
-            </button>
-          )}
-          {/* 结档后常驻一个入口：关掉结档页看记录之后，还回得去（协作方 I） */}
-          {gameState.ending?.text && (
-            <button
-              onClick={() => setShowEnding(true)}
-              className="rounded-md border border-gold-600/50 px-2.5 py-1.5 text-[12px] text-gold-400 transition hover:bg-gold-500/10"
-              title="回到这一局的结局"
-            >
-              终幕
-            </button>
-          )}
-          <button
-            onClick={startNew}
-            className="rounded-md border border-gold-600/60 bg-gold-500/10 px-3 py-1.5 text-[13px] font-medium text-gold-400 transition hover:bg-gold-500/20"
-          >
-            开团
-          </button>
-          <button
-            onClick={() => setShowPrep(true)}
-            className="rounded-md border border-ink-600 px-3 py-1.5 text-[13px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
-          >
-            准备
-          </button>
-          <button
-            onClick={() => setShowSettings(true)}
-            className="rounded-md border border-ink-600 px-3 py-1.5 text-[13px] text-mist-300 transition hover:border-gold-600/50 hover:text-mist-100"
-            title="快捷键：Cmd/Ctrl + ,"
-          >
-            <span className="flex items-center gap-1.5">
-              <ICONS.settings size={14} />
-              设置
-            </span>
-          </button>
+          {/*
+           * 🔴 1-D 主命令：顶栏从 12 个入口降到 2 个（1-A 时已砍到 9 个）。
+           *
+           * 收进 ⋮ 的六项：帮助 · 音频 · 沙盒(dev) · 终幕(结档后) · 开团 · 准备 · 设置。
+           * **不是**"藏起来" —— 是一次点击换一次清爽：它们全是低频动作
+           * （一局开一次团、改一次设置），却每时每刻占着顶栏最贵的那条横线。
+           * 高频的（行动 / 重试）在底栏，一次点击直达。
+           *
+           * ⚠️ **回档不在这里**：右栏「关键抉择」的锚点列表本来就是回档入口
+           * （`AnchorList` 的 `onRewind`），顶栏再放一个是重复的，已核实并删掉。
+           */}
+          <TopMenu
+            devMode={devMode}
+            showEnding={Boolean(gameState.ending?.text)}
+            audioOn={audioOn}
+            onHelp={() => setShowHelp(true)}
+            onToggleAudio={toggleAudio}
+            onStopSfx={stopSfx}
+            onSandbox={() => setShowSandbox(true)}
+            onEnding={() => setShowEnding(true)}
+            onStart={startNew}
+            onPrep={() => openPrepAt('character')}
+            onSettings={() => setShowSettings(true)}
+          />
         </div>
       </header>
 
+      {/*
+       * 🔴 战斗横幅**提到顶栏之下、三栏之上**（1-A 战斗归位，主人 2026-10-01 拍板）。
+       *
+       * ## 为什么必须提出来
+       * 它原先长在 `Chat` 里面。桌面端三栏并排时看着没问题，
+       * **但手机端是三个标签切换的（`hidden` 挡）** —— 战斗一开、玩家点去
+       * 「角色」或「世界」页签，**整条横幅直接消失**：打了几轮、敌人还剩多少血
+       * 全看不见。这正踩「状态可见」那条铁律（宁可重复不可缺失）。
+       * 提到这里之后，**任何页签下都在**。
+       *
+       * ## 形态：轻量单行
+       * 左＝轮次，中＝敌人名 + 血条 + 数字，右＝一句说明（挤了就 `truncate`）。
+       * 两行会每次战斗都往上顶叙事区，而说明语不是信息、只是解释 —— 不值得占一行。
+       */}
+      {gameState.combat?.active && (
+        <div className="shrink-0 border-b border-blood-400/30 bg-blood-400/[0.07] px-4 py-1.5 sm:px-6">
+          <div className="flex items-center gap-3">
+            <span className="flex shrink-0 items-center gap-1.5 text-[12px] text-blood-300">
+              <ICONS.combat size={13} />
+              第 {gameState.combat.round || 1} 轮
+            </span>
+            {gameState.combat.foes && gameState.combat.foes.length > 0 && (
+              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                {gameState.combat.foes.map((f) => {
+                  const pct = Math.max(0, Math.min(100, (f.hp / Math.max(f.max, 1)) * 100));
+                  const art = gameState.foeArt?.[f.name];
+                  return (
+                    <div key={f.name} className="flex items-center gap-1.5">
+                      {/*
+                       * 1-F：怪物形象**入口**，不是把大图塞进横幅。
+                       *
+                       * 主人原话：「一行横幅里塞全身图」—— 768×1024 压进拇指盖大小等于没画。
+                       * 所以这里只放一枚 15×20px 的小缩略图（点开看大图）；
+                       * 还没画出来时用一个问号方框占位 —— **"这个还没画"本身是信息**，
+                       * 比什么都不显示强（玩家知道这里以后会有张图）。
+                       */}
+                      <button
+                        onClick={() => setFoeArtName(art ? f.name : null)}
+                        disabled={!art}
+                        title={art ? `看「${f.name}」长什么样` : '这一只还没画形象'}
+                        className={`flex h-5 w-[15px] shrink-0 items-center justify-center overflow-hidden rounded-sm border ${
+                          art
+                            ? 'border-blood-400/50 hover:border-blood-400'
+                            : 'border-ink-600 text-mist-600'
+                        }`}
+                      >
+                        {art ? (
+                          <img src={art} alt={f.name} className="h-full w-full object-cover" />
+                        ) : (
+                          <span className="text-[9px] leading-none">?</span>
+                        )}
+                      </button>
+                      <span className="max-w-[9rem] truncate text-[11px] text-mist-300">
+                        {f.name}
+                      </span>
+                      <div className="h-1.5 w-14 overflow-hidden rounded-full bg-ink-700">
+                        <div
+                          className={`h-full rounded-full ${
+                            pct <= 25 ? 'bg-blood-400' : 'bg-blood-400/70'
+                          }`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <span className="shrink-0 text-[10px] tabular-nums text-mist-400">
+                        {f.hp}/{f.max}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* 说明语留在最右，挤了就截断 —— 它不该把敌人挤下去 */}
+            <span className="ml-auto hidden min-w-0 truncate text-[11px] text-mist-500 md:inline">
+              尽情描述你的动作，想做几件都行
+            </span>
+          </div>
+        </div>
+      )}
+
       <div className="flex min-h-0 flex-1">
-        <aside className="hidden w-64 shrink-0 overflow-y-auto border-r border-ink-700 bg-ink-900 lg:block xl:w-72">
+        <aside className="hidden w-64 shrink-0 overflow-y-auto border-r border-ink-700 bg-ink-900/72 lg:block xl:w-72">
           <CharacterSheet
             onRequestCheck={setCheckSkill}
             onPromptUse={promptUse}
@@ -1609,21 +1961,23 @@ export default function App() {
                 onPromptCompanion={promptCompanion}
                 onTravel={travelTo}
                 onRewind={rewindTo}
+                onOpenPrep={openPrepAt}
               />
             </div>
           </div>
         </main>
 
-        <aside className="hidden w-64 shrink-0 overflow-y-auto border-l border-ink-700 bg-ink-900 lg:block xl:w-72">
+        <aside className="hidden w-64 shrink-0 overflow-y-auto border-l border-ink-700 bg-ink-900/72 lg:block xl:w-72">
           <WorldPanel
             onPromptCompanion={promptCompanion}
             onTravel={travelTo}
             onRewind={rewindTo}
+            onOpenPrep={openPrepAt}
           />
         </aside>
       </div>
 
-      <nav className="safe-bottom flex shrink-0 border-t border-ink-700 bg-ink-900 lg:hidden">
+      <nav className="safe-bottom flex shrink-0 border-t border-ink-700 bg-ink-900/72 lg:hidden">
         {panelBtn('character', '角色', '⌘1', 'profile')}
         {panelBtn('chat', '故事', '⌘2', 'book')}
         {panelBtn('world', '世界', '⌘3', 'map')}
@@ -1643,7 +1997,18 @@ export default function App() {
       )}
       {showPrep && (
         <Suspense fallback={<ChunkLoading />}>
-          <Preparation onClose={() => setShowPrep(false)} onStartNew={startNew} />
+          <Preparation
+            onClose={closePrep}
+            onStartNew={startNew}
+            /*
+             * 1-B：右栏的「全部 ›」**深链**到准备页的对应页签。
+             *
+             * 主人要求「世界书/角色卡等大信息量部件主界面必须有入口（三次点击内可达）」；
+             * 这里给的是**直达**：右栏点一下 → 落在该看的那一页。
+             * 「不删旧路」原则照旧 —— 准备页原五个页签一个不动，这只是多一条进来的路。
+             */
+            initialTab={prepTab}
+          />
         </Suspense>
       )}
       {pendingStart && (
@@ -1822,6 +2187,14 @@ export default function App() {
             startNew();
           }}
         />
+      )}
+      {/*
+        1-F：战斗横幅点开的那张怪物大图。
+        与 `ImageLightbox` 同一套遮罩（Esc 关、点背景关、双击缩放），
+        只是它由**外部状态**驱动（横幅上的小缩略图），所以直接用 Overlay 那一半。
+      */}
+      {foeArtName && gameState.foeArt?.[foeArtName] && (
+        <LightboxOverlay src={gameState.foeArt[foeArtName]} onClose={() => setFoeArtName(null)} />
       )}
       {/*
         生图进度角标（R40）：放在**所有弹层之后**渲染，z-index 也高过弹层 ——

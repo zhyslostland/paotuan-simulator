@@ -164,6 +164,34 @@ describe('成功：图落到该在的位置，然后出队', () => {
     expect(store.getState().gameState.companions[0]!.portrait).toBe(IMG);
     expect(store.getState().companionCandidates[0]!.portrait).toBe(IMG);
   });
+
+  it('1-F：怪物形象 → gameState.foeArt[名字]；关键人物（npc: 前缀）落同一张表', async () => {
+    /*
+     * 🔴 这一条是**必须补的 store 层集成断言**（铁律：改 store 行为要补，
+     * 纯函数对 ≠ 接上了线）。`artCandidates` / `autoArtCount` 都按
+     * "foeArt 里有没有这个人"判"画过没画过" —— 落点写错，整条自动线会无限重复排队。
+     */
+    withKey();
+    gen.mockResolvedValue(IMG);
+
+    store.getState().queueImage({ kind: 'monster', target: '雾中的巨影', prompt: 'p', label: '怪物' });
+    store.getState().queueImage({ kind: 'portrait', target: 'npc:老陈', prompt: 'p', label: '关键人物' });
+    await flush();
+
+    expect(store.getState().gameState.foeArt?.['雾中的巨影']).toBe(IMG);
+    // `npc:` 前缀要去掉才当键 —— 留着前缀就和 npcsAlive 里的名字对不上，取不到图
+    expect(store.getState().gameState.foeArt?.['老陈']).toBe(IMG);
+    expect(store.getState().gameState.foeArt?.['npc:老陈']).toBeUndefined();
+    expect(store.getState().imageJobs).toEqual([]);
+  });
+
+  it('1-F：setFoeArt 传空串＝删掉这一条（不是写个空值进去）', () => {
+    store.getState().setFoeArt('雾中的巨影', IMG);
+    expect(store.getState().gameState.foeArt?.['雾中的巨影']).toBe(IMG);
+    store.getState().setFoeArt('雾中的巨影', '');
+    // 留一个 '' 会让 autoArtCount / artCandidates 两边都判错
+    expect('雾中的巨影' in (store.getState().gameState.foeArt ?? {})).toBe(false);
+  });
 });
 
 describe('失败：留在队列里，带一句人话，能重试', () => {

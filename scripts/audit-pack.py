@@ -30,10 +30,12 @@ BANNED_EXACT = {
     'index.html', 'version.json', 'sw.js', 'sw-v2.js',
     'manifest.webmanifest', 'icon.svg', 'entry-redirect.js',
 }
-# 🔴 大体积资产同样不进包：`generated-images/` 是画风比对用的平台生图（5 张 ≈ 7 MB，带水印）。
+# 🔴 大体积资产同样不进包：
+#    `generated-images/` 是画风比对用的平台生图（带水印，不可作正式资产）；
+#    `public/art/` 是**游戏内置美术（预制资产）** —— 主人 2026-10-02 定：**代码包不发图**。
 #    与 `scripts/pack-for-review.py` 的 BANNED_PREFIX **必须一致**，否则这里会报「漏」。
 BANNED_PREFIX = ('assets/', 'dist/', 'node_modules/', '.git/', '.workbuddy/',
-                 'generated-images/')
+                 'generated-images/', 'public/art/')
 
 # 协作方要用的关键文件（少一个就是"漏"）
 MUST_HAVE = [

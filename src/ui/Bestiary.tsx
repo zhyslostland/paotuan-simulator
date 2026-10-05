@@ -25,6 +25,8 @@
 import { useMemo } from 'react';
 import { useStore } from './store';
 import { buildBestiary } from '../core/bestiary.js';
+import { aspectRatioOf } from '../core/artSpec.js';
+import { ImageLightbox } from './ImageLightbox';
 
 /** 三档可见度对应的视觉与文案。`none` 也画出来——"这里还有东西你没见过"本身就是信息 */
 const LEVEL_STYLE: Record<
@@ -75,6 +77,14 @@ export function BestiaryPanel() {
   const fought = useStore((s) => s.gameState.fought);
   const ending = useStore((s) => s.gameState.ending);
   const moduleTitle = useStore((s) => s.module.title);
+  /*
+   * 1-F：怪物形象（旁挂 `gameState.foeArt`，键 = 名字）。
+   *
+   * 选的是**稳定引用**（整个 map），在渲染时用名字取 —— 不在选择器里现算。
+   * 早解锁时它可能还没有这个人（图是异步生成的），取到 undefined 就当没图，
+   * 卡片退化成本来的纯文字形态，不崩、不报错。
+   */
+  const foeArt = useStore((s) => s.gameState.foeArt);
 
   const bestiary = useMemo(
     () =>
@@ -141,6 +151,7 @@ export function BestiaryPanel() {
           {bestiary.cards.map((c) => {
             const st = LEVEL_STYLE[c.level] ?? LEVEL_STYLE.none!;
             const locked = c.level === 'none';
+            const art = locked ? undefined : foeArt?.[c.name];
             return (
               <div
                 key={c.name}
@@ -167,6 +178,23 @@ export function BestiaryPanel() {
                   </p>
                 ) : (
                   <div className="mt-1 space-y-0.5">
+                    {/*
+                      1-F：形象图**铺大**（这是三处落点里唯一给大图的地方）。
+                      比例走 `aspectRatioOf('monster')`（3:4 竖版），
+                      与生成尺寸同源 —— 容器比例错了会把头顶裁掉（阶段 0-2 踩过）。
+                      ⚠️ `locked` 的条目**不给图**：那是"还没碰上"的东西，
+                      连名字都不给，给图等于把剧透从后门放进来。
+                    */}
+                    {art && (
+                      <ImageLightbox src={art} className="mb-1.5 max-w-[9rem]">
+                        <img
+                          src={art}
+                          alt={c.name}
+                          style={{ aspectRatio: aspectRatioOf('monster') }}
+                          className="w-full rounded border border-ink-600 object-cover"
+                        />
+                      </ImageLightbox>
+                    )}
                     <Row label="样子" value={c.look} />
                     {/* 血量只在真打过之后才给具体数 —— 只是照面不该知道"它还有几滴" */}
                     {c.level === 'fought' && <Row label="生命" value={c.hp} />}

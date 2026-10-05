@@ -24,6 +24,9 @@ data/
 # 与上面 8 项同性质，一并忽略。
 /entry-redirect.js
 /icon.svg
+# 内置美术（预制资产）的根副本：真源在 `public/art/`（那份**要进版本管理**），
+# 根这份同样是 publish-root 拷出来的产物。
+/art/
 
 # WorkBuddy 内部 / 部署产物（含本地部署标记，不进仓库）
 .wbapp_*.genie
